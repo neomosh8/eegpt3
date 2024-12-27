@@ -3,3 +3,7 @@
 /.idea
 *.csv
 /original_database
+quantized_coeffs.txt
+quantized_channels.txt
+dataset/.DS_Store
+*.pyc
