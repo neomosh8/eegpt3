@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+
+from sandbox2 import calculate_sps
+
 wvlet = 'db2'
 level = 2
 # Import your utility functions
@@ -15,14 +18,15 @@ from utils import (
 
 def main():
     # === 1. Load the CSV data ===
-    df = pd.read_csv('dataset.csv')
+    path = 'dataset/sub-000_task-proposer_run-1_eeg.csv'
+    df = pd.read_csv(path)
 
     # Identify possible EEG channels
     all_columns = list(df.columns)
     exclude_cols = ['timestamp','VEOG','X','Y','Z']  # adjust as needed
     eeg_channels = [col for col in all_columns if col not in exclude_cols]
 
-    fs = 250  # sampling rate (Hz)
+    fs = calculate_sps(path)  # sampling rate (Hz)
     num_samples_4sec = 1 * fs
 
     # === 2. Randomly pick ONE channel and one 4-second window ===
