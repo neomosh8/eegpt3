@@ -21,6 +21,8 @@ def main():
     path = 'dataset/sub-000_task-proposer_run-1_eeg.csv'
     df = pd.read_csv(path)
     fs = int(calculate_sps(path))  # sampling rate (Hz)
+    print(fs)
+
     num_samples_4sec = 1 * fs
     # Identify possible EEG channels
     all_columns = list(df.columns)
