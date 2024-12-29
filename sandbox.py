@@ -20,14 +20,14 @@ def main():
     # === 1. Load the CSV data ===
     path = 'dataset/sub-000_task-proposer_run-1_eeg.csv'
     df = pd.read_csv(path)
-
+    fs = int(calculate_sps(path))  # sampling rate (Hz)
+    num_samples_4sec = 1 * fs
     # Identify possible EEG channels
     all_columns = list(df.columns)
-    exclude_cols = ['timestamp','VEOG','X','Y','Z']  # adjust as needed
+    exclude_cols = ['timestamp','VEOG','X','Y','Z',"EXG1","EXG2","EXG7","EXG8"]  # adjust as needed
     eeg_channels = [col for col in all_columns if col not in exclude_cols]
 
-    fs = calculate_sps(path)  # sampling rate (Hz)
-    num_samples_4sec = 1 * fs
+
 
     # === 2. Randomly pick ONE channel and one 4-second window ===
     chosen_channel = random.choice(eeg_channels)
@@ -38,7 +38,7 @@ def main():
         raise ValueError("Not enough data to extract 4 seconds from this dataset.")
 
     start_idx = random.randint(0, max_start_index)
-    end_idx = start_idx + num_samples_4sec
+    end_idx = int(start_idx + num_samples_4sec)
 
     original_signal = df[chosen_channel].values[start_idx:end_idx]
     window = np.expand_dims(original_signal, axis=0)  # shape: (1, num_samples_4sec)

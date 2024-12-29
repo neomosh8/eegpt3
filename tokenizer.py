@@ -1,5 +1,8 @@
 import collections
 import sys
+import os
+import json
+import concurrent.futures
 
 
 def read_tokens_from_file(filepath):
@@ -13,213 +16,317 @@ def read_tokens_from_file(filepath):
     return tokens
 
 
-def get_top_bigrams(tokens, num_merges=10):
+def count_bigrams_in_chunk(chunk, offset_token=None):
     """
-    Count bigram frequencies and return the top `num_merges` bigrams.
-    Return as a list of tuples (bigram, frequency).
+    Count bigrams within a chunk of tokens.
+    If offset_token is provided, count the bigram that crosses the boundary
+    (offset_token, chunk[0]) if the chunk is non-empty.
+    Returns a collections.Counter for the bigrams.
     """
     bigram_counts = collections.Counter()
-    for i in range(len(tokens) - 1):
-        bigram = (tokens[i], tokens[i + 1])
+    # If there's an offset_token from the previous chunk's boundary
+    # then form a bigram with the first token in this chunk
+    if offset_token is not None and chunk:
+        bigram_counts[(offset_token, chunk[0])] += 1
+
+    for i in range(len(chunk) - 1):
+        bigram = (chunk[i], chunk[i + 1])
         bigram_counts[bigram] += 1
-
-    # Get most common bigrams
-    top_bigrams = bigram_counts.most_common(num_merges)
-    return top_bigrams  # list of ((tokenA, tokenB), freq)
+    return bigram_counts
 
 
-def apply_bpe_merges(tokens, merges):
+
+class BPE_RLE_Tokenizer:
     """
-    Given a list of merges (each is ((A,B), freq)),
-    turn every occurrence of (A, B) in the token list into a single token "A_B".
-
-    We'll do a single pass for simplicity:
-      - scan left-to-right, whenever we see (A, B) we merge them once.
-    In real BPE, you'd often do repeated passes or more complex logic,
-    but this is a basic demonstration.
+    Class that encapsulates:
+      1) Train BPE merges (parallel bigram counting).
+      2) Apply BPE merges in a single pass.
+      3) Apply run-length encoding.
+      4) Decode run-length encoding, undo BPE merges.
+      5) Save/load merges from disk.
+      6) Build/save/load vocabulary and encode/decode to/from integer IDs.
     """
-    merged_tokens = []
-    skip_next = False
 
-    # Convert merges list into a set of pairs for quick lookup
-    # We only care about the pair (A, B), ignoring frequency for merging
-    merge_pairs = set(m[0] for m in merges)
+    def __init__(self, merges=None, token2id=None):
+        """
+        :param merges: a list of ((tokenA, tokenB), frequency) if already trained.
+        :param token2id: an optional dictionary {token: int} if you already have a vocab.
+        """
+        self.merges = merges if merges is not None else []
 
-    i = 0
-    while i < len(tokens):
-        if skip_next:
-            skip_next = False
-            i += 1
-            continue
+        # For vocab
+        self.token2id = token2id if token2id is not None else {}
+        # Derive reverse mapping if token2id is given
+        self.id2token = {idx: tok for tok, idx in self.token2id.items()}
 
-        if i < len(tokens) - 1:
-            pair = (tokens[i], tokens[i + 1])
-            if pair in merge_pairs:
-                # Merge them
-                merged_tokens.append(tokens[i] + "_" + tokens[i + 1])
-                skip_next = True  # skip the next token because it's merged
+    def train(self, tokens, num_merges=10, max_workers=None):
+        """
+        1. Learn top bigrams (like BPE).
+        2. Store merges internally so we can do `encode()` later.
+
+        :param tokens: list of tokens (strings)
+        :param num_merges: number of merges (bigrams) to learn
+        :param max_workers: number of worker threads/processes for parallel execution
+        """
+        n = len(tokens)
+        if n == 0:
+            return []
+
+        chunk_count = max_workers
+        if chunk_count is None:
+            chunk_count = min(4, n)
+
+        chunk_size = (n + chunk_count - 1) // chunk_count  # ceiling division
+
+        futures = []
+        counters = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=chunk_count) as executor:
+            for i in range(0, n, chunk_size):
+                chunk = tokens[i:i + chunk_size]
+                offset_token = tokens[i - 1] if i > 0 else None
+                futures.append(executor.submit(count_bigrams_in_chunk, chunk, offset_token))
+
+            # Collect results
+            for f in concurrent.futures.as_completed(futures):
+                counters.append(f.result())
+
+        # Combine all bigram counters
+        global_bigram_counts = collections.Counter()
+        for c in counters:
+            global_bigram_counts.update(c)
+
+        # Pick the top `num_merges` from the aggregated bigram counts
+        top_bigrams = global_bigram_counts.most_common(num_merges)
+        self.merges = top_bigrams
+        return top_bigrams
+
+    def apply_bpe_merges(self, tokens):
+        """
+        Given self.merges (list of ((A,B), freq)),
+        turn every occurrence of (A, B) in the token list into "A_B".
+        Single-pass scanning from left-to-right.
+        """
+        if not self.merges:
+            # No merges to apply
+            return tokens
+
+        merge_pairs = set(m[0] for m in self.merges)
+
+        merged_tokens = []
+        skip_next = False
+        i = 0
+        while i < len(tokens):
+            if skip_next:
+                skip_next = False
+                i += 1
+                continue
+
+            if i < len(tokens) - 1:
+                pair = (tokens[i], tokens[i + 1])
+                if pair in merge_pairs:
+                    # Merge them
+                    merged_tokens.append(tokens[i] + "_" + tokens[i + 1])
+                    skip_next = True
+                else:
+                    merged_tokens.append(tokens[i])
             else:
+                # Last token
                 merged_tokens.append(tokens[i])
+            i += 1
+
+        return merged_tokens
+
+    def run_length_encode(self, tokens):
+        """
+        E.g. T T T T => T R=3
+        """
+        if not tokens:
+            return []
+
+        rle_tokens = []
+        current_token = tokens[0]
+        count = 1
+
+        for t in tokens[1:]:
+            if t == current_token:
+                count += 1
+            else:
+                rle_tokens.append(current_token)
+                if count > 1:
+                    rle_tokens.append(f"R={count - 1}")
+                current_token = t
+                count = 1
+
+        # flush last run
+        rle_tokens.append(current_token)
+        if count > 1:
+            rle_tokens.append(f"R={count - 1}")
+
+        return rle_tokens
+
+    def run_length_decode(self, rle_tokens):
+        """
+        Reverse of run_length_encode.
+        """
+        decoded = []
+        for tok in rle_tokens:
+            if tok.startswith("R="):
+                repeat_count = int(tok.split("=")[1])
+                if decoded:  # sanity check
+                    last_tok = decoded[-1]
+                    decoded.extend([last_tok] * repeat_count)
+            else:
+                decoded.append(tok)
+        return decoded
+
+    def undo_bpe_merges(self, tokens):
+        """
+        If a token was "A_B", split to ["A", "B"].
+        """
+        expanded = []
+        for tok in tokens:
+            if "_" in tok:
+                parts = tok.split("_")
+                expanded.extend(parts)
+            else:
+                expanded.append(tok)
+        return expanded
+
+    def encode(self, tokens, as_ids=False):
+        """
+        1) apply BPE merges
+        2) run-length encode
+        3) (optionally) convert to IDs if `as_ids=True`
+        """
+        bpe_tokens = self.apply_bpe_merges(tokens)
+        rle_tokens = self.run_length_encode(bpe_tokens)
+        if as_ids:
+            if not self.token2id:
+                raise ValueError("No vocabulary found. Call build_vocab() or load_vocab() first.")
+            # Convert each string token into its integer ID, falling back to <UNK> if needed
+            unk_id = self.token2id.get("<UNK>", None)
+            encoded_ids = []
+            for t in rle_tokens:
+                if t in self.token2id:
+                    encoded_ids.append(self.token2id[t])
+                elif unk_id is not None:
+                    encoded_ids.append(unk_id)
+                else:
+                    raise ValueError(
+                        f"Token '{t}' not in vocab and <UNK> is not defined in the vocab."
+                    )
+            return encoded_ids
         else:
-            # last token, just append
-            merged_tokens.append(tokens[i])
-        i += 1
+            return rle_tokens
 
-    return merged_tokens
-
-
-def run_length_encode(tokens):
-    """
-    Perform a simple run-length encoding:
-    If we have T repeated k times, represent it as [T, R(k-1)]
-    with a special 'R' token plus the count.
-
-    E.g. T T T T => T R3  (meaning T repeated 4 times).
-
-    We'll represent R(k) as a single token: 'R=<k>'
-    """
-    if not tokens:
-        return []
-
-    rle_tokens = []
-
-    current_token = tokens[0]
-    count = 1
-
-    for t in tokens[1:]:
-        if t == current_token:
-            count += 1
+    def decode(self, encoded, from_ids=False):
+        """
+        Reverse of `encode`:
+        1) either interpret `encoded` as IDs -> convert to string tokens
+        2) run-length decode
+        3) undo BPE merges
+        """
+        if from_ids:
+            if not self.id2token:
+                raise ValueError("No reverse vocab found. Call build_vocab() or load_vocab() first.")
+            # Convert IDs back to string tokens
+            rle_tokens = [self.id2token[i] for i in encoded]
         else:
-            # flush the previous run
-            rle_tokens.append(current_token)
-            if count > 1:
-                rle_tokens.append(f"R={count - 1}")
-            # reset
-            current_token = t
-            count = 1
+            # Assume already string tokens
+            rle_tokens = encoded
 
-    # flush last run
-    rle_tokens.append(current_token)
-    if count > 1:
-        rle_tokens.append(f"R={count - 1}")
+        decoded_bpe_tokens = self.run_length_decode(rle_tokens)
+        final_tokens = self.undo_bpe_merges(decoded_bpe_tokens)
+        return final_tokens
 
-    return rle_tokens
+    # ---------------------------------------------------------------------
+    # BPE merges save/load
+    # ---------------------------------------------------------------------
+    def save_merges(self, filepath):
+        """
+        Save self.merges to a JSON file so we can reuse them later.
+        """
+        data_to_save = [
+            {"pair": list(pair), "freq": freq} for (pair, freq) in self.merges
+        ]
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
 
+    def load_merges(self, filepath):
+        """
+        Load merges from a JSON file and store them in self.merges.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.merges = [((item["pair"][0], item["pair"][1]), item["freq"]) for item in data]
 
-def run_length_decode(rle_tokens):
-    """
-    Decode the tokens created by run_length_encode.
+    # ---------------------------------------------------------------------
+    # Vocabulary build/save/load
+    # ---------------------------------------------------------------------
+    def build_vocab(self, tokens, add_unk=True):
+        """
+        Builds a vocabulary (token->id) from a list of final tokens (e.g. after BPE+RLE)
+        or from the raw tokens if you prefer.
+        :param tokens: A list of string tokens.
+        :param add_unk: If True, reserve an <UNK> token in the vocab for unknown tokens.
+        """
+        unique_tokens = list(dict.fromkeys(tokens))  # preserves order, removes duplicates
 
-    Whenever we see a token like 'R=3', we repeat the previous token 3 more times.
-    """
-    decoded = []
-    for i, tok in enumerate(rle_tokens):
-        if tok.startswith("R="):
-            # get the repeat count
-            repeat_count = int(tok.split("=")[1])
-            # repeat the last real token
-            if decoded:  # sanity check
-                last_tok = decoded[-1]
-                decoded.extend([last_tok] * repeat_count)
+        # Optionally add a special <UNK> token at index 0
+        start_idx = 0
+        if add_unk and "<UNK>" not in unique_tokens:
+            self.token2id = {"<UNK>": 0}
+            start_idx = 1
         else:
-            decoded.append(tok)
-    return decoded
+            self.token2id = {}
 
+        # Populate the vocab
+        for i, tok in enumerate(unique_tokens, start=start_idx):
+            self.token2id[tok] = i
 
-def undo_bpe_merges(tokens):
-    """
-    Undo merges by splitting on the underscore '_'.
-    If a token was originally "A_B", we return ["A", "B"].
-    If it doesn't have '_', we keep it as is.
-    """
-    expanded = []
-    for tok in tokens:
-        if "_" in tok:
-            parts = tok.split("_")
-            expanded.extend(parts)
-        else:
-            expanded.append(tok)
-    return expanded
+        # Build the reverse mapping
+        self.id2token = {idx: tok for tok, idx in self.token2id.items()}
 
+    def save_vocab(self, filepath):
+        """
+        Save the current vocabulary (token2id) to JSON.
+        """
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(self.token2id, f, ensure_ascii=False, indent=2)
+
+    def load_vocab(self, filepath):
+        """
+        Load token2id from a JSON file and rebuild id2token.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            self.token2id = json.load(f)
+
+        # Convert string keys to int if necessary (depending how you saved it).
+        # If you saved it as {token: int_id}, this is okay. If you saved as {str_id: token}, invert it.
+        # Here, we assume we have {token: int_id}.
+        self.id2token = {idx: tok for tok, idx in self.token2id.items()}
 
 def main():
-    # -------------------------------------------------------------------------
-    # 1) Read and tokenize input text
-    # -------------------------------------------------------------------------
-
+    # Example usage:
     filepath = 'quantized_coeffs.txt'
-    num_merges = int(sys.argv[2]) if len(sys.argv) > 2 else 400
-
     tokens = read_tokens_from_file(filepath)
-    original_len = len(tokens)
-    print("Original token count:", original_len)
+    tokenizer = BPE_RLE_Tokenizer()
+    merges = tokenizer.train(tokens,num_merges=5000)
+    tokenizer.save_merges("neo_tokenizer/merges.json")
+    final_tokens = tokenizer.encode(tokens)  # by default returns strings with BPE+RLE
+    tokenizer.build_vocab(final_tokens, add_unk=True)
+    tokenizer.save_vocab("neo_tokenizer/vocab.json")
 
-    # -------------------------------------------------------------------------
-    # 2) Learn top bigrams (mini BPE merges)
-    # -------------------------------------------------------------------------
-    top_bigrams = get_top_bigrams(tokens, num_merges=num_merges)
-    print(f"Top {num_merges} bigrams:", top_bigrams)
 
-    # -------------------------------------------------------------------------
-    # 3) Apply BPE merges
-    # -------------------------------------------------------------------------
-    bpe_tokens = apply_bpe_merges(tokens, top_bigrams)
-    bpe_len = len(bpe_tokens)
+    tokens_as_ids = tokenizer.encode(tokens[0:30], as_ids=True)
+    print(tokens_as_ids)
+    decoded_tokens = tokenizer.decode(tokens_as_ids, from_ids=True)
+    print(decoded_tokens)
 
-    # Calculate BPE compression ratio
-    if bpe_len > 0:
-        bpe_compression_ratio = original_len / bpe_len
+    if tokens[0:30] == decoded_tokens:
+        print("GOOD!")
     else:
-        bpe_compression_ratio = 1.0  # fallback if empty
-
-    print(f"After BPE merges, token count: {bpe_len} "
-          f"(BPE compression ratio: {bpe_compression_ratio:.2f})")
-
-    # -------------------------------------------------------------------------
-    # 4) Apply Run-Length Encoding
-    # -------------------------------------------------------------------------
-    rle_tokens = run_length_encode(bpe_tokens)
-    rle_len = len(rle_tokens)
-
-    # RLE compression ratio relative to BPE
-    if rle_len > 0:
-        rle_compression_ratio_bpe = bpe_len / rle_len
-        overall_compression_ratio = original_len / rle_len
-    else:
-        rle_compression_ratio_bpe = 1.0
-        overall_compression_ratio = 1.0
-
-    print(f"After RLE, token count: {rle_len} "
-          f"(RLE compression vs BPE: {rle_compression_ratio_bpe:.2f}; "
-          f"overall: {overall_compression_ratio:.2f})")
-
-    # Optionally, compute percentage of tokens reduced overall
-    overall_reduction_percent = (1 - (rle_len / original_len)) * 100
-    print(f"Overall tokens reduced by: {overall_reduction_percent:.2f}%")
-
-    print("\nSample of encoded tokens:", rle_tokens[:50], "...")
-
-    # -------------------------------------------------------------------------
-    # 5) Decode back
-    # -------------------------------------------------------------------------
-    decoded_bpe_tokens = run_length_decode(rle_tokens)
-    final_tokens = undo_bpe_merges(decoded_bpe_tokens)
-
-    # -------------------------------------------------------------------------
-    # 6) Verify correctness & show final results
-    # -------------------------------------------------------------------------
-    final_len = len(final_tokens)
-    print("\nDecoded token count:", final_len)
-
-    if final_tokens == tokens:
-        print("Round-trip successful! Decoded tokens match the original.")
-    else:
-        print("WARNING: Decoded tokens do NOT match the original!")
-
-    # Print a small sample
-    print("\nOriginal sample:", tokens[:50], "...")
-    print("Final decoded sample:", final_tokens[:50], "...")
-
+        print("RIDI")
 
 if __name__ == "__main__":
     main()
