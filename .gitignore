@@ -9,3 +9,4 @@ dataset/.DS_Store
 *.pyc
 *.json
 my_alignment_positions.txt
+/neo_tokenizer
