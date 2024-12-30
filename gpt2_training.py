@@ -169,6 +169,27 @@ class GPT(nn.Module):
                 targets.view(-1)
             )
         return logits, loss
+    def configure_optimizer(self,weight_decay,learning_rate,device):
+        param_dict = {pn:p for pn,p in self.named_parameters()}
+        param_dict = {pn:p for pn,p in param_dict.items() if p.requires_grad}
+        decay_params =  [p for n,p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params':decay_params,'weight_decay': weight_decay},
+            {'params':nodecay_params,'weight_decay':0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors {len(decay_params)} , with {num_decay_params:,} parameters ")
+        print(f"num non-decayed parameter tensors {len(nodecay_params)} , with {num_nodecay_params:,} parameters ")
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups,lr=learning_rate,betas=(0.9,0.95),eps=1e-8,fused=use_fused)
+        return optimizer
+
+
+
 
 class DataLoaderLite:
     def __init__(self, B, T):
@@ -230,7 +251,7 @@ train_loader = DataLoaderLite(B=2, T=522)
 
 model = GPT(GPTConfig())
 model.to(device)
-model = torch.compile(model )
+model = torch.compile(model)
 
 
 max_lr = 3e-4
@@ -250,8 +271,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-
-optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-1)
+optimizer = model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
     x, c, y = train_loader.next_batch()
@@ -273,7 +293,7 @@ for step in range(max_steps):
     dt = t1-t0
     tokens_processed = train_loader.B * train_loader.T
     token_per_second = tokens_processed/dt
-    print(f"Step {step}: Loss:{loss.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+    print(f"Step {step }: Loss:{loss.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
 
 
 import sys; sys.exit(0)
