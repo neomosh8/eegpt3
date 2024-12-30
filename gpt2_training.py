@@ -231,9 +231,28 @@ train_loader = DataLoaderLite(B=2, T=522)
 model = GPT(GPTConfig())
 model.to(device)
 model = torch.compile(model )
-optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-1)
 
-for i in range(146):
+
+max_lr = 3e-4
+min_lr = max_lr*0.1
+warmup_steps = 10
+max_steps = 147
+
+def get_lr(it):
+    if it<warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    if it > max_steps:
+        return min_lr
+
+    decay_ratio = ( it - warmup_steps ) / (max_steps - warmup_steps)
+    assert 0<=decay_ratio<=1
+    coeff = 0.5  * (1 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+
+
+optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-1)
+for step in range(max_steps):
     t0 = time.time()
     x, c, y = train_loader.next_batch()
     x, c, y = x.to(device), c.to(device), y.to(device)
@@ -245,13 +264,16 @@ for i in range(146):
         logits, loss = model(idx=x, channel_idx=c, targets=y)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr']=lr
     optimizer.step()
     torch.cuda.synchronize()
     t1=time.time()
     dt = t1-t0
     tokens_processed = train_loader.B * train_loader.T
     token_per_second = tokens_processed/dt
-    print(f"Step {i}: Loss:{loss.item():.6f} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+    print(f"Step {i}: Loss:{loss.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
 
 
 import sys; sys.exit(0)
