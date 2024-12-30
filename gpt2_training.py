@@ -89,11 +89,11 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # max sequence length
-    vocab_size: int = 4084 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 24 # number of layers
-    n_head: int = 16 # number of heads
-    n_embd: int = 1024 # embedding dimension
+    block_size: int = 1024  # max sequence length
+    vocab_size: int = 4084  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    n_layer: int = 24  # number of layers
+    n_head: int = 16  # number of heads
+    n_embd: int = 1024  # embedding dimension
     num_channels: int = 2  # channel number
 
 
@@ -225,16 +225,20 @@ class DataLoaderLite:
 
 
 train_loader = DataLoaderLite(B=2, T=522)
+
+torch.set_float32_matmul_precision('high')
+
 model = GPT(GPTConfig())
 model.to(device)
-optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-3)
+optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-1)
 
 for i in range(146):
     x, c, y = train_loader.next_batch()
     x, c, y = x.to(device), c.to(device), y.to(device)
 
     optimizer.zero_grad()
-    logits, loss = model(idx=x, channel_idx=c, targets=y)
+    with torch.autocast(device_type=device,dtype=torch.bfloat16)
+        logits, loss = model(idx=x, channel_idx=c, targets=y)
     loss.backward()
     optimizer.step()
 
