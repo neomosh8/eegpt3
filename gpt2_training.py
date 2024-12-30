@@ -237,7 +237,7 @@ for i in range(146):
     x, c, y = x.to(device), c.to(device), y.to(device)
 
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.bfloat16)
+    with torch.autocast(device_type=device,dtype=torch.bfloat16):
         logits, loss = model(idx=x, channel_idx=c, targets=y)
     loss.backward()
     optimizer.step()
