@@ -91,9 +91,9 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024  # max sequence length
     vocab_size: int = 4085  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 24  # number of layers
-    n_head: int = 16  # number of heads
-    n_embd: int = 1024  # embedding dimension
+    n_layer: int = 96  # GPT-3 largest model has 96 transformer layers
+    n_head: int = 96  # Number of attention heads
+    n_embd: int = 12288
     num_channels: int = 2  # channel number
 
 
