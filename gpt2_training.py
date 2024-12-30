@@ -220,29 +220,38 @@ class DataLoaderLite:
 
 
 
+if device=='cuda':
+    torch.set_float32_matmul_precision('high')
 
 
 
 
 train_loader = DataLoaderLite(B=2, T=522)
 
-torch.set_float32_matmul_precision('high')
-
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model )
 optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-1)
 
 for i in range(146):
+    t0 = time.time()
     x, c, y = train_loader.next_batch()
     x, c, y = x.to(device), c.to(device), y.to(device)
-
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.bfloat16):
+    if device == 'cuda':
+        with torch.autocast(device_type=device,dtype=torch.bfloat16):
+            logits, loss = model(idx=x, channel_idx=c, targets=y)
+    else:
         logits, loss = model(idx=x, channel_idx=c, targets=y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
     optimizer.step()
-
-    print(f"Step {i}: Loss:{loss.item()}")
+    torch.cuda.synchronize()
+    t1=time.time()
+    dt = t1-t0
+    tokens_processed = train_loader.B ** train_loader.T
+    token_per_second = tokens_processed/dt
+    print(f"Step {i}: Loss:{loss.item():.6f} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
 
 
 import sys; sys.exit(0)
