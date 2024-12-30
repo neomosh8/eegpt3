@@ -4,6 +4,8 @@ import os
 import json
 import concurrent.futures
 
+from mne.io import read_raw
+
 
 def read_tokens_from_file(filepath):
     """
@@ -239,6 +241,133 @@ class BPE_RLE_Tokenizer:
         final_tokens = self.undo_bpe_merges(decoded_bpe_tokens)
         return final_tokens
 
+    def apply_bpe_merges_with_alignment(self, tokens, indices):
+        """
+        Same logic as apply_bpe_merges(...), but also returns a parallel
+        list of 'merged_indices' so we know which original token indices
+        contributed to each newly merged token.
+
+        :param tokens: List of string tokens
+        :param indices: List of integer indices (same length as tokens),
+                        e.g. [0,1,2,3,...] or lists-of-indices
+        :return: (merged_tokens, merged_indices)
+        """
+        if not self.merges:
+            # no merges to do, just return as-is
+            return tokens, indices
+
+        merge_pairs = set(m[0] for m in self.merges)
+
+        merged_tokens = []
+        merged_indices = []
+
+        skip_next = False
+        i = 0
+        while i < len(tokens):
+            if skip_next:
+                skip_next = False
+                i += 1
+                continue
+
+            if i < len(tokens) - 1:
+                pair = (tokens[i], tokens[i + 1])
+                if pair in merge_pairs:
+                    # BPE merge
+                    new_token = tokens[i] + "_" + tokens[i + 1]
+                    merged_tokens.append(new_token)
+
+                    # the new token is formed from the union of indices[i], indices[i+1]
+                    if isinstance(indices[i], list):
+                        left_indices = indices[i]
+                    else:
+                        left_indices = [indices[i]]
+
+                    if isinstance(indices[i+1], list):
+                        right_indices = indices[i+1]
+                    else:
+                        right_indices = [indices[i+1]]
+
+                    merged_indices.append(left_indices + right_indices)
+
+                    skip_next = True
+                else:
+                    # no merge
+                    merged_tokens.append(tokens[i])
+                    merged_indices.append(indices[i])
+            else:
+                # last token in the list
+                merged_tokens.append(tokens[i])
+                merged_indices.append(indices[i])
+            i += 1
+
+        return merged_tokens, merged_indices
+
+    def run_length_encode_with_alignment(self, tokens, indices):
+        """
+        Same logic as run_length_encode(...), but also merges the alignment indices.
+        If we detect repeated tokens [T, T, T], we'll do "T, R=2" but also combine
+        their 'indices' in some way.
+        """
+        if not tokens:
+            return [], []
+
+        rle_tokens = []
+        rle_indices = []
+
+        current_token = tokens[0]
+        current_idx_list = indices[0] if isinstance(indices[0], list) else [indices[0]]
+        count = 1
+
+        for t, idx in zip(tokens[1:], indices[1:]):
+            idx_list = idx if isinstance(idx, list) else [idx]
+            if t == current_token:
+                # same token => run
+                count += 1
+                # accumulate the alignment indices too
+                current_idx_list.extend(idx_list)
+            else:
+                # flush the previous run
+                rle_tokens.append(current_token)
+                if count > 1:
+                    rle_tokens.append(f"R={count-1}")
+
+                rle_indices.append(current_idx_list)
+                if count > 1:
+                    # put a placeholder or special notation for the run-length token
+                    rle_indices.append(current_idx_list)  # or store some separate structure
+
+                # reset
+                current_token = t
+                current_idx_list = idx_list
+                count = 1
+
+        # flush last run
+        rle_tokens.append(current_token)
+        rle_indices.append(current_idx_list)
+        if count > 1:
+            rle_tokens.append(f"R={count-1}")
+            rle_indices.append(current_idx_list)
+
+        return rle_tokens, rle_indices
+
+    def encode_with_alignment(self, raw_tokens):
+        """
+        1) Apply BPE merges (with alignment)
+        2) Run-length encode (with alignment)
+        3) Return (final_rle_tokens, final_rle_indices)
+           final_rle_indices[i] => list of original token indices that contributed
+           to final token i.
+        """
+        # Step 0: build initial indices = [0, 1, 2, ..., len(raw_tokens)-1]
+        positions = list(range(len(raw_tokens)))
+
+        # Step 1: BPE merges with alignment
+        merged_tokens, merged_positions = self.apply_bpe_merges_with_alignment(raw_tokens, positions)
+
+        # Step 2: run-length encode with alignment
+        rle_tokens, rle_positions = self.run_length_encode_with_alignment(merged_tokens, merged_positions)
+
+        return rle_tokens, rle_positions
     # ---------------------------------------------------------------------
     # BPE merges save/load
     # ---------------------------------------------------------------------
@@ -305,17 +434,70 @@ class BPE_RLE_Tokenizer:
         # If you saved it as {token: int_id}, this is okay. If you saved as {str_id: token}, invert it.
         # Here, we assume we have {token: int_id}.
         self.id2token = {idx: tok for tok, idx in self.token2id.items()}
+    def save_alignment(self, alignment_positions, filepath):
+        """
+        Save the alignment (list of lists) to a file.
+        Each final token has a list of original indices. We'll store them in e.g. CSV style.
+        """
+        with open(filepath, "w", encoding="utf-8") as f:
+            for pos_list in alignment_positions:
+                # pos_list might be [12, 13, 14], or a single int, etc.
+                if isinstance(pos_list, list):
+                    s = ",".join(map(str, pos_list))
+                else:
+                    s = str(pos_list)
+                f.write(s + "\n")
+def apply_alignment_to_channels(channel_array, alignment_positions, combine_mode="first"):
+    """
+    channel_array: a list/array of shape [num_original_tokens].
+    alignment_positions: the list of lists that we saved/loaded from "my_alignment_positions.txt"
+    combine_mode: how we combine multiple original channel values that merged together.
+                  Could be "first", "mean", "sum", etc.
+
+    Returns: final_channel_array (length = len(alignment_positions))
+    """
+    final_channels = []
+    for pos_list in alignment_positions:
+        if not isinstance(pos_list, list):
+            pos_list = [pos_list]
+
+        values = [channel_array[p] for p in pos_list]
+
+        if combine_mode == "first":
+            final_val = values[0]
+        elif combine_mode == "mean":
+            final_val = sum(values) / len(values)
+        elif combine_mode == "sum":
+            final_val = sum(values)
+        else:
+            raise ValueError("Unknown combine_mode")
+
+        final_channels.append(final_val)
+
+    return final_channels
+def save_channels_as_text(channel_array, output_filepath):
+    """
+    Write the final channel array to a text file with space-delimited entries.
+    """
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        # Convert each channel value to string, then join by space
+        line = " ".join(str(ch) for ch in channel_array)
+        f.write(line + "\n")
+
 
 def main():
     # Example usage:
     filepath = 'quantized_coeffs.txt'
     tokens = read_tokens_from_file(filepath)
     tokenizer = BPE_RLE_Tokenizer()
-    merges = tokenizer.train(tokens,num_merges=5000)
+    merges = tokenizer.train(tokens,num_merges=4000)
     tokenizer.save_merges("neo_tokenizer/merges.json")
     final_tokens = tokenizer.encode(tokens)  # by default returns strings with BPE+RLE
     tokenizer.build_vocab(final_tokens, add_unk=True)
     tokenizer.save_vocab("neo_tokenizer/vocab.json")
+    final_rle_tokens, final_rle_positions = tokenizer.encode_with_alignment(tokens)
+    # Save
+    tokenizer.save_alignment(final_rle_positions, "my_alignment_positions.txt")
 
 
     tokens_as_ids = tokenizer.encode(tokens[0:30], as_ids=True)
@@ -328,5 +510,16 @@ def main():
     else:
         print("RIDI")
 
+    raw_channels = read_tokens_from_file('quantized_channels.txt')
+
+    assert len(raw_channels) == len(tokens), "Mismatch!"
+
+    # 4) Convert your channel array to final shape
+    final_channels = apply_alignment_to_channels(raw_channels, final_rle_positions, combine_mode="first")
+    save_channels_as_text(final_channels,'final_channels.txt')
+    print("Original length:", len(tokens))
+    print("Final length after merges/RLE:", len(final_rle_tokens), len(final_channels))
+
+    b=6
 if __name__ == "__main__":
     main()

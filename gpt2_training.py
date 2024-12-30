@@ -90,13 +90,14 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # max sequence length
-    vocab_size: int = 5110 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    vocab_size: int = 4084 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 24 # number of layers
     n_head: int = 16 # number of heads
     n_embd: int = 1024 # embedding dimension
+    num_channels: int = 2  # channel number
+
 
 class GPT(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -104,12 +105,11 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
+            wce = nn.Embedding(config.num_channels, config.n_embd),  # <-- new
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
-        # weight sharing scheme
         self.transformer.wte.weight = self.lm_head.weight
 
         # init params
@@ -126,57 +126,97 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        # idx is of shape (B, T)
+    # NOTE: We now take an extra argument: channel_idx
+    def forward(self, idx, channel_idx=None, targets=None):
+        """
+        idx: (B, T) tokens
+        channel_idx: (B, T) channel IDs (e.g., 0 or 1)
+        targets: (B, T) next-token predictions
+        """
         B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
-        # forward the token and posisition embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
-        x = tok_emb + pos_emb
-        # forward the blocks of the transformer
+        assert T <= self.config.block_size, (
+            f"Cannot forward sequence of length {T}, "
+            f"block size is only {self.config.block_size}"
+        )
+
+        # forward the token, position, and (optionally) channel embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T,)
+        pos_emb = self.transformer.wpe(pos)   # (T, n_embd)
+        tok_emb = self.transformer.wte(idx)   # (B, T, n_embd)
+
+        if channel_idx is not None:
+            # Make sure channel_idx is the same shape as idx
+            # channel_idx must be in [0..num_channels-1]
+            cha_emb = self.transformer.wce(channel_idx)  # (B, T, n_embd)
+            x = tok_emb + pos_emb + cha_emb
+        else:
+            # fallback if no channel_idx is provided
+            x = tok_emb + pos_emb
+
+        # pass through transformer
         for block in self.transformer.h:
             x = block(x)
-        # forward the final layernorm and the classifier
+
+        # final layernorm + linear head
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x) # (B, T, vocab_size)
+        logits = self.lm_head(x)  # (B, T, vocab_size)
+
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            # cross-entropy
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1)
+            )
         return logits, loss
 
 class DataLoaderLite:
     def __init__(self, B, T):
         self.B = B
         self.T = T
+
+        # 1) load token file
         with open('quantized_coeffs.txt', 'r') as f:
             text = f.read()
-
-        data = text
+        # tokenize
         tokenizer = Tokenizer()
         tokenizer.load_merges("neo_tokenizer/merges.json")
         tokenizer.load_vocab("neo_tokenizer/vocab.json")
+        encoded = tokenizer.encode(text.strip().split(), as_ids=True)
+        self.tokens = torch.tensor(encoded)
 
-        encoded = tokenizer.encode(data.strip().split(), as_ids=True)
-        tokens = np.array(encoded)
-        self.tokens = torch.tensor(tokens)
+        # 2) load channel file
+        with open('final_channels.txt', 'r') as f:
+            chan_text = f.read().strip().split()
+        # Convert e.g. '1' -> 0, '2' -> 1
+        self.channels = torch.tensor([int(x)-1 for x in chan_text])
+
         print(f"Loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B*T) } batches")
+        print(f"Loaded {len(self.channels)} channel-ids")
+        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        assert len(self.tokens) == len(self.channels), "Token count != channel count!"
 
         self.current_position = 0
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # targets
-        # advance the position in the tensor
+        start = self.current_position
+        end   = self.current_position + B * T + 1
+
+        buf_tokens = self.tokens[start:end]
+        buf_channels = self.channels[start:end]
+
+        x = buf_tokens[:-1].view(B, T)  # (B, T)
+        y = buf_tokens[1:].view(B, T)   # (B, T)
+
+        c = buf_channels[:-1].view(B, T)  # (B, T) for the channel IDs
+        # we won't shift c by 1, because the channel "belongs" to the same token that we feed in
+
         self.current_position += B * T
-        # if loading the next batch would be out of bounds, advance to next shard
-        if self.current_position + (B * T  + 1) > len(self.tokens):
+        if self.current_position + (B*T +1) > len(self.tokens):
             self.current_position = 0
-        return x, y
+
+        return x, c, y
 
 
 
@@ -184,17 +224,21 @@ class DataLoaderLite:
 
 
 
-train_loader = DataLoaderLite(2,532)
+train_loader = DataLoaderLite(B=2, T=522)
 model = GPT(GPTConfig())
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(),lr=3e-6)
-for i in range(50):
-    x,y = train_loader.next_batch()
-    x , y = x.to(device),y.to(device)
+optimizer = torch.optim.Adafactor(model.parameters(), lr=3e-3)
+
+for i in range(146):
+    x, c, y = train_loader.next_batch()
+    x, c, y = x.to(device), c.to(device), y.to(device)
+
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    logits, loss = model(idx=x, channel_idx=c, targets=y)
     loss.backward()
     optimizer.step()
+
     print(f"Step {i}: Loss:{loss.item()}")
+
 
 import sys; sys.exit(0)
