@@ -7,3 +7,5 @@ quantized_coeffs.txt
 quantized_channels.txt
 dataset/.DS_Store
 *.pyc
+*.json
+my_alignment_positions.txt
