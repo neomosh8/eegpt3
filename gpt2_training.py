@@ -24,7 +24,7 @@ print(f"using device: {device}")
 # added after video, pytorch can be serious about it's device vs. device_type distinction
 # device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-device = 'cpu'
+# device = 'cpu'
 
 # -----------------------------------------------------------------------------
 
@@ -91,9 +91,9 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024 # max sequence length
     vocab_size: int = 5110 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    n_layer: int = 24 # number of layers
+    n_head: int = 16 # number of heads
+    n_embd: int = 1024 # embedding dimension
 
 class GPT(nn.Module):
 
@@ -146,25 +146,51 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        with open('quantized_coeffs.txt', 'r') as f:
+            text = f.read()
 
-tokenizer = Tokenizer()
-tokenizer.load_merges("neo_tokenizer/merges.json")
-tokenizer.load_vocab("neo_tokenizer/vocab.json")
-with open('quantized_coeffs.txt','r') as f:
-    text = f.read()
+        data = text
+        tokenizer = Tokenizer()
+        tokenizer.load_merges("neo_tokenizer/merges.json")
+        tokenizer.load_vocab("neo_tokenizer/vocab.json")
 
-data = text
-encoded = tokenizer.encode(data.strip().split(),as_ids=True)
-buf = torch.tensor(np.array(encoded)[:10640+1])
-buf = buf.to(device)
-x = (buf[:-1]).view(20, 532) # inputs
-y = (buf[1:]).view(20, 532) # targets
+        encoded = tokenizer.encode(data.strip().split(), as_ids=True)
+        tokens = np.array(encoded)
+        self.tokens = torch.tensor(tokens)
+        print(f"Loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B*T) } batches")
+
+        self.current_position = 0
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T  + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
 
 
+
+
+
+
+
+train_loader = DataLoaderLite(2,532)
 model = GPT(GPTConfig())
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(),lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(),lr=3e-6)
 for i in range(50):
+    x,y = train_loader.next_batch()
+    x , y = x.to(device),y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
