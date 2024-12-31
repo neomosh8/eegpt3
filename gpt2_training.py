@@ -246,7 +246,7 @@ if device=='cuda':
 
 
 
-total_batch_size = 534528
+total_batch_size = 52200
 B = 2
 T = 522
 assert total_batch_size % (B*T) == 0
