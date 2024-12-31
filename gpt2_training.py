@@ -309,7 +309,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-optimizer = model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
+optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
     optimizer.zero_grad()
