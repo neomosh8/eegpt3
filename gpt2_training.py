@@ -246,6 +246,15 @@ if device=='cuda':
 
 
 
+total_batch_size = 512
+B = 2
+T = 522
+assert total_batch_size % (B*T) == 0
+grad_accum_steps = total_batch_size // (B*T) , "make sure Total batch size is divisible by B*T"
+print(f" Total Desired Batch size is {total_batch_size}")
+print(f"=> calculated grad accumulation steps: {grad_accum_steps}")
+
+
 
 train_loader = DataLoaderLite(B=2, T=522)
 
@@ -274,15 +283,19 @@ def get_lr(it):
 optimizer = model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
-    x, c, y = train_loader.next_batch()
-    x, c, y = x.to(device), c.to(device), y.to(device)
     optimizer.zero_grad()
-    if device == 'cuda':
-        with torch.autocast(device_type=device,dtype=torch.bfloat16):
+    loss_accum = 0.0
+    for mico_step in range(grad_accum_steps):
+        x, c, y = train_loader.next_batch()
+        x, c, y = x.to(device), c.to(device), y.to(device)
+        if device == 'cuda':
+            with torch.autocast(device_type=device,dtype=torch.bfloat16):
+                logits, loss = model(idx=x, channel_idx=c, targets=y)
+        else:
             logits, loss = model(idx=x, channel_idx=c, targets=y)
-    else:
-        logits, loss = model(idx=x, channel_idx=c, targets=y)
-    loss.backward()
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -291,9 +304,9 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1=time.time()
     dt = t1-t0
-    tokens_processed = train_loader.B * train_loader.T
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
     token_per_second = tokens_processed/dt
-    print(f"Step {step }: Loss:{loss.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+    print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
 
 
 import sys; sys.exit(0)
