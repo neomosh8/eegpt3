@@ -280,6 +280,8 @@ if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
+print(f"Hi i am gpu:{ddp_rank}")
+
 import sys; sys.exit(0)
 
 train_loader = DataLoaderLite(B=2, T=522)
