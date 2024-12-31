@@ -50,8 +50,6 @@ device_type = "cuda" if device.startswith("cuda") else "cpu"
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
-if device=='cuda':
-    torch.set_float32_matmul_precision('high')
 
 # -----------------------------------------------------------------------------
 
@@ -273,7 +271,7 @@ class DataLoaderLite:
 
 
 total_batch_size = 133632
-B = 4
+B = 2
 T = 522
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -281,6 +279,7 @@ if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
+torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size)
