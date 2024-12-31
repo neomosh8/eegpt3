@@ -50,6 +50,8 @@ device_type = "cuda" if device.startswith("cuda") else "cpu"
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
+if device=='cuda':
+    torch.set_float32_matmul_precision('high')
 
 # -----------------------------------------------------------------------------
 
@@ -267,8 +269,6 @@ class DataLoaderLite:
 
 
 
-if device=='cuda':
-    torch.set_float32_matmul_precision('high')
 
 
 
