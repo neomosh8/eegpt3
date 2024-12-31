@@ -273,7 +273,7 @@ if device=='cuda':
 
 
 total_batch_size = 133632
-B = 8
+B = 4
 T = 522
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
