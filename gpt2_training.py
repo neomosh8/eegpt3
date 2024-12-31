@@ -246,7 +246,7 @@ if device=='cuda':
 
 
 
-total_batch_size = 52200
+total_batch_size = 133632
 B = 8
 T = 522
 assert total_batch_size % (B*T) == 0 , "make sure Total batch size is divisible by B*T"
