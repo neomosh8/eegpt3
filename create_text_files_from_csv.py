@@ -13,7 +13,6 @@ from matplotlib.animation import FuncAnimation
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
 # Wavelet parameters
 wvlet = 'db2'
 level = 2
@@ -33,22 +32,27 @@ from utils import (
 )
 
 
-
 # -------------------------------------------------------------------------------
 # MAIN FUNCTION (Example: Original vs Reconstructed Plot for a Single Random Window)
 # -------------------------------------------------------------------------------
 def main_s3_pipeline(
-    bucket_name='dataframes--use1-az6--x-s3',
-    prefix='',
-    output_prefix = 'output'
+        bucket_name='dataframes--use1-az6--x-s3',
+        prefix='',
+        output_prefix=None
 ):
     # 1) List top-level folders
     all_folders = list_s3_folders(bucket_name, prefix)  # e.g. ['ds004213', 'ds003144', ...]
-    output_folders = list_s3_folders(bucket_name, output_prefix)
 
     if not all_folders:
         print("No folders found in S3.")
         return
+
+    if output_prefix:
+        if not output_prefix.endswith('/'):
+            output_prefix += '/'
+        output_folders = list_s3_folders(bucket_name, output_prefix)
+    else:
+        output_folders = []
 
     # filter out datasets that are already processed
     folders_to_process = [d for d in all_folders if d not in output_folders]
@@ -96,12 +100,13 @@ import numpy as np
 # s3 client - can be shared or re-created in each thread
 s3 = boto3.client('s3')
 
+
 def generate_quantized_files_local(
-    csv_file: str,
-    output_folder: str,
-    window_length_sec: float = 2.0,
-    wvlet: str = 'db2',
-    level: int = 2
+        csv_file: str,
+        output_folder: str,
+        window_length_sec: float = 2.0,
+        wvlet: str = 'db2',
+        level: int = 2
 ):
     """
     Iterate over a single local CSV file, wavelet-decompose+quantize
@@ -190,9 +195,9 @@ def generate_quantized_files_local(
 
                 # Wavelet Decompose
                 (decomposed_channels,
-                    coeffs_lengths,
-                    num_samples,
-                    normalized_data) = wavelet_decompose_window(
+                 coeffs_lengths,
+                 num_samples,
+                 normalized_data) = wavelet_decompose_window(
                     channel_data_2d,
                     wavelet=wvlet,
                     level=level,
@@ -201,14 +206,14 @@ def generate_quantized_files_local(
 
                 # Flatten for quantization
                 coeffs_flat = decomposed_channels.flatten()
-                q_ids = [str(quantize_number(c)) for c in coeffs_flat] # << Convert to str here
+                q_ids = [str(quantize_number(c)) for c in coeffs_flat]  # << Convert to str here
 
                 all_channel_coeffs.extend(q_ids)
                 all_channel_names.extend([ch_name_id] * len(q_ids))
 
             # Write lines (for this single window)
-            coeffs_line = " ".join(all_channel_coeffs) + " " # << Added newline
-            chans_line  = " ".join(all_channel_names)  + " " # << Added newline
+            coeffs_line = " ".join(all_channel_coeffs) + "\n"  # << Added newline
+            chans_line = " ".join(all_channel_names) + "\n"  # << Added newline
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
@@ -246,7 +251,6 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_pref
 
         output_dir = os.path.join(temp_dir, "output")
         os.makedirs(output_dir, exist_ok=True)
-
 
         # 2) List CSV keys in S3
         dataset_folder_prefix = f"{dataset_folder}/"  # e.g. "ds004213/"
@@ -291,7 +295,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_pref
         print(f"An error occurred while processing {dataset_folder}: {e}")
 
     finally:
-         # 6) Cleanup local
+        # 6) Cleanup local
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         print(f"Completed all processing for {dataset_folder}, cleaned up temp dir")
