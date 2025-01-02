@@ -11,3 +11,4 @@ dataset/.DS_Store
 my_alignment_positions.txt
 /neo_tokenizer
 /output
+.env

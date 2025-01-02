@@ -2,6 +2,8 @@
 import json
 import os
 import math
+from dotenv import load_dotenv
+
 from scipy import signal
 import numpy as np
 import pywt
@@ -304,9 +306,10 @@ def pwelch_z(data, sps):
 
     return pxx[:, 2:82] * 0.84
 
+load_dotenv()
 
 client = OpenAI(
-    api_key="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"
+    api_key=os.getenv('api_key')
 )
 
 def call_gpt_for_instructions(channel_names, dataset_id):
