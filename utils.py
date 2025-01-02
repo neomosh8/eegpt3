@@ -888,7 +888,6 @@ def validate_round_trip(
 
     print(f"Average MSE - Left Channel: {avg_mse_left:.6f}")
     print(f"Average MSE - Right Channel: {avg_mse_right:.6f}")
-    return f"Average MSE - Left Channel: {avg_mse_left:.6f}",f"Average MSE - Left Channel: {avg_mse_left:.6f}"
 def list_s3_csv_files(bucket_name, dataset_folder_prefix):
     """
     Return a list of s3 object keys that end with '.csv' within that folder prefix.

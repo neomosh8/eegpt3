@@ -2,6 +2,7 @@ import os
 import glob
 import random
 import shutil
+import tempfile
 
 import boto3
 import pandas as pd
@@ -29,10 +30,6 @@ from utils import (
     validate_round_trip, list_s3_csv_files, list_s3_folders
 
 )
-
-
-
-
 
 
 # -------------------------------------------------------------------------------
@@ -219,14 +216,14 @@ def generate_quantized_files_local(
 
                     # Flatten for quantization
                     coeffs_flat = decomposed_channels.flatten()
-                    q_ids = [quantize_number(c) for c in coeffs_flat]
+                    q_ids = [str(quantize_number(c)) for c in coeffs_flat] # << Convert to str here
 
                     all_channel_coeffs.extend(q_ids)
                     all_channel_names.extend([ch_name_id] * len(q_ids))
 
                 # Write lines (for this single window)
-                coeffs_line = " ".join(all_channel_coeffs) + " "
-                chans_line  = " ".join(all_channel_names)  + " "
+                coeffs_line = " ".join(all_channel_coeffs) + " " # << Added newline
+                chans_line  = " ".join(all_channel_names)  + " " # << Added newline
 
                 f_coeffs.write(coeffs_line)
                 f_chans.write(chans_line)
@@ -241,11 +238,9 @@ def generate_quantized_files_local(
             mse_method="pwelch",  # Use "pwelch" to compute on pwelch
             plot_welch=False  # Set to True to plot pwelch next to the time series plot
         )
-
     print(f"Done generating quantized files in {dataset_folder}.")
 
 
-import tempfile
 
 def process_single_dataset_s3(dataset_folder: str, bucket_name: str):
     """
