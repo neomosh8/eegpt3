@@ -1,7 +1,7 @@
 #utils.py
 import os
 import math
-import string
+from scipy import signal
 import numpy as np
 import pywt
 import matplotlib.pyplot as plt  # <-- needed for plotting histogram
@@ -293,3 +293,12 @@ def dequantize_number(token, resolution=77):
 
     return z_approx
 
+def pwelch_z(data, sps):
+    if len(data.shape) < 2:
+        data = np.expand_dims(data, axis=0)
+    win_len = min(2 * sps, len(data[0]))
+    f_, pxx = signal.welch(data, fs=sps, window=signal.windows.tukey(win_len, sym=False, alpha=.17),
+                           nperseg=win_len, noverlap=int(win_len * 0.75), nfft=2 * sps, return_onesided=True,
+                           scaling='spectrum', axis=-1, average='mean')
+
+    return pxx[:, 2:82] * 0.84
