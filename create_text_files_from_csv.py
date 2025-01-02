@@ -4,7 +4,7 @@ import random
 import shutil
 import tempfile
 from queue import Queue
-
+import time
 import boto3
 import pandas as pd
 import numpy as np
@@ -32,20 +32,19 @@ from utils import (
 
 )
 
-
 # -------------------------------------------------------------------------------
 # MAIN FUNCTION (Example: Original vs Reconstructed Plot for a Single Random Window)
 # -------------------------------------------------------------------------------
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
+
 def main_s3_pipeline(
-    bucket_name='dataframes--use1-az6--x-s3',
-    prefix=''
+        bucket_name='dataframes--use1-az6--x-s3',
+        prefix=''
 ):
     # 1) List top-level folders
     all_folders = list_s3_folders(bucket_name, prefix)  # e.g. ['ds004213', 'ds003144', ...]
-
 
     if not all_folders:
         print("No folders found in S3.")
@@ -53,22 +52,36 @@ def main_s3_pipeline(
 
     # 2) Use multiprocessing to process each dataset folder
     futures = []
+    queue = Queue()  # Shared Queue
     with ProcessPoolExecutor(max_workers=4) as executor:
-        # create queue
-        queue = Queue()
         for dataset_folder in all_folders:
             # Submit each dataset to a separate process, passing the queue
             fut = executor.submit(process_single_dataset_s3, dataset_folder, bucket_name, queue)
             futures.append(fut)
-        # 3) Use tqdm to track progress
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="Datasets processed"):
-            # get and print from queue
-            while not queue.empty():
-                print(queue.get())
+
+        # 3) Process queue and monitor progress
+
+        with tqdm(total=len(futures), desc="Datasets processed") as pbar:
+            completed_count = 0
+            while completed_count < len(futures):
+                # Check the queue every now and then
+                try:
+                    while True:  # Consume all available messages from the queue
+                        message = queue.get_nowait()
+                        print(message)
+                except:
+                    pass
+
+                # Check if some process has ended by getting if the Future is Done
+                completed_count = 0
+                for future in futures:
+                    if future.done():
+                        completed_count += 1
+
+                pbar.update(completed_count - pbar.n)  # update the progress bar with changes
+                time.sleep(0.1)
 
     print("All dataset folders processed.")
-
-
 
 
 # --------------------------------------------------------------------------------
@@ -107,13 +120,14 @@ import numpy as np
 # s3 client - can be shared or re-created in each process
 s3 = boto3.client('s3')
 
+
 def generate_quantized_files_local(
-    dataset_folder: str,
-    window_length_sec: float = 2.0,
-    wvlet: str = 'db2',
-    level: int = 2,
-    output_folder: str = 'output',
-    queue: Queue = None
+        dataset_folder: str,
+        window_length_sec: float = 2.0,
+        wvlet: str = 'db2',
+        level: int = 2,
+        output_folder: str = 'output',
+        queue: Queue = None
 ):
     """
     Iterate over all CSV files in a *local* `dataset_folder`, wavelet-decompose+quantize
@@ -124,7 +138,7 @@ def generate_quantized_files_local(
     csv_files = sorted(glob.glob(os.path.join(dataset_folder, "*.csv")))
     if not csv_files:
         if queue:
-          queue.put(f"No CSV files found in folder: {dataset_folder}")
+            queue.put(f"No CSV files found in folder: {dataset_folder}")
         return
 
     os.makedirs(output_folder, exist_ok=True)
@@ -147,7 +161,7 @@ def generate_quantized_files_local(
             )
             if instructions["action"] == "skip":
                 if queue:
-                  queue.put(f"Skipping dataset '{base_name}' as instructed by GPT.")
+                    queue.put(f"Skipping dataset '{base_name}' as instructed by GPT.")
                 continue
 
             channels_to_drop = instructions.get("channels_to_drop", [])
@@ -217,27 +231,27 @@ def generate_quantized_files_local(
                      coeffs_lengths,
                      num_samples,
                      normalized_data) = wavelet_decompose_window(
-                         channel_data_2d,
-                         wavelet=wvlet,
-                         level=level,
-                         normalization=True
+                        channel_data_2d,
+                        wavelet=wvlet,
+                        level=level,
+                        normalization=True
                     )
 
                     # Flatten for quantization
                     coeffs_flat = decomposed_channels.flatten()
-                    q_ids = [str(quantize_number(c)) for c in coeffs_flat] # << Convert to str here
+                    q_ids = [str(quantize_number(c)) for c in coeffs_flat]  # << Convert to str here
 
                     all_channel_coeffs.extend(q_ids)
                     all_channel_names.extend([ch_name_id] * len(q_ids))
 
                 # Write lines (for this single window)
-                coeffs_line = " ".join(all_channel_coeffs) + "\n" # << Added newline
-                chans_line  = " ".join(all_channel_names)  + "\n" # << Added newline
+                coeffs_line = " ".join(all_channel_coeffs) + "\n"  # << Added newline
+                chans_line = " ".join(all_channel_names) + "\n"  # << Added newline
 
                 f_coeffs.write(coeffs_line)
                 f_chans.write(chans_line)
         if queue:
-          queue.put(f"Validating: {csv_file}")
+            queue.put(f"Validating: {csv_file}")
         validate_round_trip(
             csv_file_path=csv_file,  # Replace with your CSV path
             output_coeffs_file=output_coeffs_file,
@@ -249,8 +263,6 @@ def generate_quantized_files_local(
         )
     if queue:
         queue.put(f"Done generating quantized files in {dataset_folder}.")
-
-
 
 
 def process_single_dataset_s3(dataset_folder: str, bucket_name: str, queue: Queue):
@@ -278,7 +290,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, queue: Queu
     # If empty, skip
     if not csv_keys:
         if queue:
-          queue.put(f"No CSVs found in {dataset_folder_prefix}")
+            queue.put(f"No CSVs found in {dataset_folder_prefix}")
         shutil.rmtree(temp_dir)  # cleanup
         return
 
@@ -295,7 +307,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, queue: Queu
         wvlet='db2',
         level=2,
         output_folder=output_dir,
-        queue = queue
+        queue=queue
     )
 
     # 5) Upload the generated outputs to S3 => "output/<dataset_folder>/..."
