@@ -9,6 +9,13 @@ import numpy as np
 import pywt
 import matplotlib.pyplot as plt  # <-- needed for plotting histogram
 from  openai import OpenAI
+
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.getenv('api_key')
+)
+
 def calculate_stats(data):
     """Calculate mean and order of magnitude."""
     mean_val = np.mean(data)
@@ -306,11 +313,7 @@ def pwelch_z(data, sps):
 
     return pxx[:, 2:82] * 0.84
 
-load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv('api_key')
-)
 
 def call_gpt_for_instructions(channel_names, dataset_id):
     """
