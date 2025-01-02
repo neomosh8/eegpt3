@@ -50,15 +50,11 @@ def main_s3_pipeline(
     if output_prefix:
         if not output_prefix.endswith('/'):
             output_prefix += '/'
-        output_folders = list_s3_folders(bucket_name, output_prefix)
     else:
-        output_folders = []
-
-    # filter out datasets that are already processed
-    folders_to_process = [d for d in all_folders if d not in output_folders]
+        output_prefix = ""  # if none, use empty
 
     # 2) Process each dataset folder sequentially
-    for dataset_folder in tqdm(folders_to_process, desc="Datasets Processed"):
+    for dataset_folder in tqdm(all_folders, desc="Datasets Processed"):
         process_single_dataset_s3(dataset_folder, bucket_name, output_prefix)
 
     print("All dataset folders processed.")
@@ -212,8 +208,8 @@ def generate_quantized_files_local(
                 all_channel_names.extend([ch_name_id] * len(q_ids))
 
             # Write lines (for this single window)
-            coeffs_line = " ".join(all_channel_coeffs) + "\n"  # << Added newline
-            chans_line = " ".join(all_channel_names) + "\n"  # << Added newline
+            coeffs_line = " ".join(all_channel_coeffs) + " "  # << Added newline
+            chans_line = " ".join(all_channel_names) + " "  # << Added newline
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
@@ -242,6 +238,17 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_pref
     temp_dir = None
     try:
         print(f"Starting processing dataset: {dataset_folder}")
+
+        if output_prefix:
+            output_folders = list_s3_folders(bucket_name, output_prefix)
+        else:
+            output_folders = []
+
+        # If output folder exists, skip
+        if dataset_folder in output_folders:
+            print(f"Dataset '{dataset_folder}' is already processed. Skipping download.")
+            return
+
         # 1) Make local temp dir
         temp_dir_name = f"{dataset_folder}_tempdir"
         temp_dir = os.path.join(tempfile.gettempdir(), temp_dir_name)
@@ -287,7 +294,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_pref
         # 5) Upload the generated outputs to S3 => "output/<dataset_folder>/..."
         for txt_file in glob.glob(os.path.join(output_dir, "*_quantized_*.txt")):
             base_txt_name = os.path.basename(txt_file)
-            s3_upload_key = f"{output_prefix}/{dataset_folder}/{base_txt_name}"
+            s3_upload_key = f"{output_prefix}{dataset_folder}/{base_txt_name}"
             print(f"Uploading {txt_file} => s3://{bucket_name}/{s3_upload_key}")
             s3.upload_file(txt_file, bucket_name, s3_upload_key)
 
