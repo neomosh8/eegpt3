@@ -19,7 +19,7 @@ from utils import (
     wavelet_reconstruct_window,
     quantize_number,
     dequantize_number,
-    pwelch_z
+    pwelch_z, call_gpt_for_instructions
 )
 
 
@@ -244,6 +244,26 @@ def main():
 #  - channel "1" for left, "2" for right.
 # --------------------------------------------------------------------------------
 
+import os
+import glob
+import json
+import pandas as pd
+import numpy as np
+
+# ----------------------------------------------------------------------
+# Assume these functions already exist somewhere in your code:
+#
+#   - calculate_sps(csv_file)
+#   - preprocess_data(data_2d, original_sps)
+#   - wavelet_decompose_window(channel_data_2d, wavelet, level, normalization)
+#   - quantize_number(c)
+#
+# Also assume you have defined call_gpt_for_instructions(channel_names, dataset_id)
+# which returns a dictionary with keys:
+#   - "action": "process" or "skip"
+#   - "channels_to_drop": [list of channel names to drop]
+# ----------------------------------------------------------------------
+
 def generate_quantized_files(
         dataset_folder="dataset",
         window_length_sec=2.0
@@ -259,7 +279,6 @@ def generate_quantized_files(
     :param window_length_sec: Window length in seconds (default 2.0)
     """
 
-    # Find all CSV files in the folder
     csv_files = sorted(glob.glob(os.path.join(dataset_folder, "*.csv")))
     if not csv_files:
         print(f"No CSV files found in folder: {dataset_folder}")
@@ -270,37 +289,60 @@ def generate_quantized_files(
     for csv_file in csv_files:
         print(f"Processing {csv_file} ...")
 
-        # --- Output files per CSV ---
         base_name = os.path.splitext(os.path.basename(csv_file))[0]
 
-        # Create full paths for the output files inside the "output" folder
+        # Create output file paths in 'output' folder
         output_coeffs_file = os.path.join('output', f"{base_name}_quantized_coeffs.txt")
         output_channels_file = os.path.join('output', f"{base_name}_quantized_channels.txt")
 
-        # Open in write mode ("w"). Overwriting previous files each time
         f_coeffs = open(output_coeffs_file, "w")
         f_chans = open(output_channels_file, "w")
 
         # 1) Load CSV
         df = pd.read_csv(csv_file)
 
-        # 2) Identify EEG channels
+        # --------------------------------------------------------------------
+        # 2) Dynamically decide on channel usage via GPT
+        # --------------------------------------------------------------------
         all_columns = list(df.columns)
-        exclude_cols = ['timestamp', 'VEOG', 'X', 'Y', 'Z', "EXG1", "EXG2", "EXG7", "EXG8"]
-        eeg_channels = [col for col in all_columns if col not in exclude_cols]
+
+        # Query GPT to see if we should skip or process,
+        # and which channels should be dropped.
+        instructions = call_gpt_for_instructions(
+            channel_names=all_columns,
+            dataset_id=base_name
+        )
+
+        # If GPT instructs to skip this dataset, bail out now
+        if instructions["action"] == "skip":
+            print(f"Skipping dataset '{base_name}' as instructed by GPT.")
+            f_coeffs.close()
+            f_chans.close()
+            continue
+
+        # Otherwise, get the channels to drop
+        channels_to_drop = instructions.get("channels_to_drop", [])
+        print(f"Channels to drop for {base_name}: {' '.join(channels_to_drop)} ")
+        # Filter columns accordingly
+        filtered_columns = [col for col in all_columns if col not in channels_to_drop]
 
         # --------------------------------------------------------------------
-        # CHANGED HERE:
-        # Determine left vs. right sets by last-digit parity
+        # 3) Now proceed with left vs. right channel determination
+        #    using the filtered columns.
         # --------------------------------------------------------------------
+        # If you still wish to skip certain known auxiliary columns, you can:
+        #    exclude_cols = [...]
+        #    filtered_columns = [c for c in filtered_columns if c not in exclude_cols]
+        #
+        # Or keep them all if GPT’s instructions suffice.
+
         left_chs_in_csv = []
         right_chs_in_csv = []
 
-        for ch in eeg_channels:
-            # skip if ends with 'z'
+        for ch in filtered_columns:
+            # skip if ends with 'z' or if last character isn't a digit, etc.
             if ch.endswith('z'):
                 continue
-            # skip if last char is not a digit
             if not ch[-1].isdigit():
                 continue
 
@@ -316,7 +358,9 @@ def generate_quantized_files(
             f_chans.close()
             continue
 
-        # 3) Create 2-channel data: [Left, Right]
+        # --------------------------------------------------------------------
+        # 4) Create the 2-channel data array: [Left, Right]
+        # --------------------------------------------------------------------
         if left_chs_in_csv:
             left_data = df[left_chs_in_csv].mean(axis=1).values
         else:
@@ -327,17 +371,16 @@ def generate_quantized_files(
         else:
             right_data = np.zeros(len(df))
 
-        # shape => (2, samples)
         data_2d = np.vstack([left_data, right_data])
 
-        # 4) Calculate original sampling rate
+        # 5) Calculate original sampling rate
         original_sps = calculate_sps(csv_file)
 
-        # 5) Preprocess (resample + bandpass)
+        # 6) Preprocess (resample + bandpass, etc.)
         preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
-        # shape => (2, total_samples)
 
-        # 6) Break into consecutive windows of length `window_length_sec`
+
+        # 7) Break into windows of size `window_length_sec`
         n_window_samples = int(window_length_sec * new_sps)
         num_channels, total_samples = preprocessed_data.shape
 
@@ -352,60 +395,58 @@ def generate_quantized_files(
             f_chans.close()
             continue
 
-        # 7) Slide through the data in blocks of `n_window_samples`
+        # 8) Sliding window
         for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_end = window_start + n_window_samples
-
-            # We'll build up a list of strings for the coefficients & channel-names
             all_channel_coeffs = []
             all_channel_names = []
 
             # Process exactly 2 channels: index 0 => left, 1 => right
             for ch_idx in range(2):
-                if ch_idx == 0:
-                    ch_name_id = "1"  # Left hemisphere
-                else:
-                    ch_name_id = "2"  # Right hemisphere
-
+                ch_name_id = "1" if ch_idx == 0 else "2"
                 channel_data = preprocessed_data[ch_idx, window_start:window_end]
                 channel_data_2d = channel_data[np.newaxis, :]
 
-                # Wavelet Decompose (with internal z-score)
+                # Wavelet Decompose
                 (decomposed_channels,
                  coeffs_lengths,
                  num_samples,
                  normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wvlet,
-                    level=level,
-                    normalization=True
+                     channel_data_2d,
+                     wavelet=wvlet,
+                     level=level,
+                     normalization=True
                 )
 
                 # Flatten for quantization
                 coeffs_flat = decomposed_channels.flatten()
-
-                # Quantize
                 q_ids = [quantize_number(c) for c in coeffs_flat]
 
-                # Append these quantized values to our "one window" list
+                # Append these quantized values
                 all_channel_coeffs.extend(q_ids)
-
-                # Repeat the channel name ID ("1" or "2") for each coefficient
+                # And the channel-IDs
                 all_channel_names.extend([ch_name_id] * len(q_ids))
 
-            # Now we have a single line representing BOTH channels for this window
             coeffs_line = " ".join(all_channel_coeffs)
             chans_line = " ".join(all_channel_names)
 
-            # Write them to the respective files
-            f_coeffs.write(coeffs_line + "\n")
-            f_chans.write(chans_line + "\n")
+            f_coeffs.write(coeffs_line + " ")
+            f_chans.write(chans_line + " ")
 
-        # Close the files
         f_coeffs.close()
         f_chans.close()
+        validate_round_trip(
+            csv_file_path='dataset/sub-000_task-proposer_run-1_eeg.csv',  # Replace with your CSV path
+            output_coeffs_file=output_coeffs_file,
+            output_channels_file=output_channels_file,
+            window_length_sec=2.0,
+            show_plot=False,  # Set to False to hide plot
+            mse_method="pwelch",  # Use "pwelch" to compute on pwelch
+            plot_welch=False  # Set to True to plot pwelch next to the time series plot
+        )
 
     print("Done generating quantized files.")
+
 
 
 # ------------------------------------------------------------------------------
@@ -414,6 +455,8 @@ def generate_quantized_files(
 # ------------------------------------------------------------------------------
 def validate_round_trip(
         csv_file_path,
+        output_coeffs_file,
+        output_channels_file,
         window_length_sec=2.0,
         show_plot=True,
         mse_method="timeseries",  # options: "timeseries" or "pwelch"
@@ -433,9 +476,9 @@ def validate_round_trip(
     :param plot_welch: Boolean, whether to plot the Welch spectrogram next to the signal,
     """
 
-    base_name = os.path.splitext(os.path.basename(csv_file_path))[0]
-    quantized_coeffs_file_path = f'{base_name}_quantized_coeffs.txt'
-    quantized_channels_file_path = f'{base_name}_quantized_channels.txt'
+    quantized_coeffs_file_path = output_coeffs_file
+    quantized_channels_file_path = output_channels_file
+
 
     def calculate_mse(original, reconstructed):
         return np.mean((np.array(original) - np.array(reconstructed)) ** 2)

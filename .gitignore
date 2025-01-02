@@ -10,3 +10,4 @@ dataset/.DS_Store
 *.json
 my_alignment_positions.txt
 /neo_tokenizer
+/output

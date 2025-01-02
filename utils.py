@@ -1,11 +1,12 @@
 #utils.py
+import json
 import os
 import math
 from scipy import signal
 import numpy as np
 import pywt
 import matplotlib.pyplot as plt  # <-- needed for plotting histogram
-
+from  openai import OpenAI
 def calculate_stats(data):
     """Calculate mean and order of magnitude."""
     mean_val = np.mean(data)
@@ -302,3 +303,69 @@ def pwelch_z(data, sps):
                            scaling='spectrum', axis=-1, average='mean')
 
     return pxx[:, 2:82] * 0.84
+
+
+client = OpenAI(
+    api_key="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"
+)
+
+def call_gpt_for_instructions(channel_names, dataset_id):
+    """
+    Calls the GPT model with channel names to decide whether to skip the dataset,
+    and which channels to drop if processing.
+
+    :param channel_names: List of channel names.
+    :param dataset_id: ID of the dataset being processed.
+    :return: A dictionary with instructions.
+    """
+    prompt = f'''
+You are an assistant that helps in processing EEG datasets.
+Based on the following channel names, specify which channels to drop.
+If there are channels that are auxiliary channels or information (like timestamp, temp, EOG, ECG, GSR, Trigger, EMG, eye signals, etc.), those channels should be dropped.
+
+
+Provide the response in the following JSON format:
+
+
+    "action": "process" 
+    "channels_to_drop": ["channelname1", "channelname2", ...]
+
+Channel Names for Dataset {dataset_id}:
+{', '.join(channel_names)}
+'''
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                },
+            ],
+            temperature=0.0,
+            response_format={
+                "type": "json_object"
+            }
+        )
+
+        # Extract the assistant's reply
+        gpt_reply = json.loads(str(response.choices[0].message.content.strip()))
+
+        # Attempt to parse the JSON from GPT's response
+        instructions = gpt_reply
+        return instructions
+    except Exception as e:
+        print(f"Error communicating with GPT: {e}")
+        # In case of error, default to processing without changes
+        return {
+            "action": "process",
+            "channels_to_drop": []
+        }
+
+
