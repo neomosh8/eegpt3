@@ -42,27 +42,17 @@ def main_s3_pipeline(
     prefix=''
 ):
     # 1) List top-level folders
-    all_folders = list_s3_folders(bucket_name, prefix)[0:10]  # e.g. ['ds004213', 'ds003144', ...]
+    all_folders = list_s3_folders(bucket_name, prefix)  # e.g. ['ds004213', 'ds003144', ...]
 
     if not all_folders:
         print("No folders found in S3.")
         return
 
-    # 2) Use multi-threading to process each dataset folder
-    futures = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for dataset_folder in all_folders:
-            # Submit each dataset to a separate thread
-            fut = executor.submit(process_single_dataset_s3, dataset_folder, bucket_name)
-            futures.append(fut)
-
-        # 3) Use tqdm to track progress
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="Datasets processed"):
-            pass
+    # 2) Process each dataset folder sequentially
+    for dataset_folder in tqdm(all_folders, desc="Datasets Processed"):
+        process_single_dataset_s3(dataset_folder, bucket_name)
 
     print("All dataset folders processed.")
-
-
 
 
 # --------------------------------------------------------------------------------
@@ -102,142 +92,132 @@ import numpy as np
 s3 = boto3.client('s3')
 
 def generate_quantized_files_local(
-    dataset_folder: str,
+    csv_file: str,
+    output_folder: str,
     window_length_sec: float = 2.0,
     wvlet: str = 'db2',
-    level: int = 2,
-    output_folder: str = 'output'
+    level: int = 2
 ):
     """
-    Iterate over all CSV files in a *local* `dataset_folder`, wavelet-decompose+quantize
+    Iterate over a single local CSV file, wavelet-decompose+quantize
     each file's [Left, Right] average EEG signals, and write
     _quantized_coeffs.txt + _quantized_channels.txt to a local `output_folder`.
     """
 
-    csv_files = sorted(glob.glob(os.path.join(dataset_folder, "*.csv")))
-    if not csv_files:
-        print(f"No CSV files found in folder: {dataset_folder}")
-        return
+    base_name = os.path.splitext(os.path.basename(csv_file))[0]
 
-    os.makedirs(output_folder, exist_ok=True)
+    # Create output file paths
+    output_coeffs_file = os.path.join(output_folder, f"{base_name}_quantized_coeffs.txt")
+    output_channels_file = os.path.join(output_folder, f"{base_name}_quantized_channels.txt")
 
-    for csv_file in tqdm(csv_files, desc=f"Processing CSVs in {dataset_folder}"):
-        base_name = os.path.splitext(os.path.basename(csv_file))[0]
+    with open(output_coeffs_file, "w") as f_coeffs, open(output_channels_file, "w") as f_chans:
+        df = pd.read_csv(csv_file)
 
-        # Create output file paths
-        output_coeffs_file = os.path.join(output_folder, f"{base_name}_quantized_coeffs.txt")
-        output_channels_file = os.path.join(output_folder, f"{base_name}_quantized_channels.txt")
-
-        with open(output_coeffs_file, "w") as f_coeffs, open(output_channels_file, "w") as f_chans:
-            df = pd.read_csv(csv_file)
-
-            # Ask GPT if we skip or process => channels to drop
-            all_columns = list(df.columns)
-            instructions = call_gpt_for_instructions(
-                channel_names=all_columns,
-                dataset_id=base_name
-            )
-            if instructions["action"] == "skip":
-                print(f"Skipping dataset '{base_name}' as instructed by GPT.")
-                continue
-
-            channels_to_drop = instructions.get("channels_to_drop", [])
-            filtered_columns = [col for col in all_columns if col not in channels_to_drop]
-
-            # Identify left vs right channels
-            left_chs_in_csv = []
-            right_chs_in_csv = []
-            for ch in filtered_columns:
-                # skip if ends with 'z' or if last character isn't a digit, etc.
-                if ch.endswith('z'):
-                    continue
-                if not ch[-1].isdigit():
-                    continue
-                # last character is digit => check odd/even
-                if int(ch[-1]) % 2 == 0:
-                    right_chs_in_csv.append(ch)
-                else:
-                    left_chs_in_csv.append(ch)
-
-            if not left_chs_in_csv and not right_chs_in_csv:
-                print(f"No valid left/right channels found in {csv_file}. Skipping.")
-                continue
-
-            # Create the 2-channel data array: [Left, Right]
-            if left_chs_in_csv:
-                left_data = df[left_chs_in_csv].mean(axis=1).values
-            else:
-                left_data = np.zeros(len(df))
-
-            if right_chs_in_csv:
-                right_data = df[right_chs_in_csv].mean(axis=1).values
-            else:
-                right_data = np.zeros(len(df))
-
-            data_2d = np.vstack([left_data, right_data])
-
-            # Original sampling rate
-            original_sps = calculate_sps(csv_file)
-            # Preprocess (resample + bandpass, etc.)
-            preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
-
-            n_window_samples = int(window_length_sec * new_sps)
-            num_channels, total_samples = preprocessed_data.shape
-
-            if n_window_samples <= 0 or total_samples < n_window_samples:
-                print(f"Skipping {csv_file} due to invalid window size or not enough samples.")
-                continue
-
-            # Slide through the data in non-overlapping windows
-            for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
-                window_end = window_start + n_window_samples
-
-                all_channel_coeffs = []
-                all_channel_names = []
-
-                # For exactly 2 channels: 0 => left, 1 => right
-                for ch_idx in range(2):
-                    ch_name_id = "1" if ch_idx == 0 else "2"
-                    channel_data = preprocessed_data[ch_idx, window_start:window_end]
-                    channel_data_2d = channel_data[np.newaxis, :]
-
-                    # Wavelet Decompose
-                    (decomposed_channels,
-                     coeffs_lengths,
-                     num_samples,
-                     normalized_data) = wavelet_decompose_window(
-                         channel_data_2d,
-                         wavelet=wvlet,
-                         level=level,
-                         normalization=True
-                    )
-
-                    # Flatten for quantization
-                    coeffs_flat = decomposed_channels.flatten()
-                    q_ids = [str(quantize_number(c)) for c in coeffs_flat] # << Convert to str here
-
-                    all_channel_coeffs.extend(q_ids)
-                    all_channel_names.extend([ch_name_id] * len(q_ids))
-
-                # Write lines (for this single window)
-                coeffs_line = " ".join(all_channel_coeffs) + " " # << Added newline
-                chans_line  = " ".join(all_channel_names)  + " " # << Added newline
-
-                f_coeffs.write(coeffs_line)
-                f_chans.write(chans_line)
-
-
-        validate_round_trip(
-            csv_file_path=csv_file,  # Replace with your CSV path
-            output_coeffs_file=output_coeffs_file,
-            output_channels_file=output_channels_file,
-            window_length_sec=2.0,
-            show_plot=False,  # Set to False to hide plot
-            mse_method="pwelch",  # Use "pwelch" to compute on pwelch
-            plot_welch=False  # Set to True to plot pwelch next to the time series plot
+        # Ask GPT if we skip or process => channels to drop
+        all_columns = list(df.columns)
+        instructions = call_gpt_for_instructions(
+            channel_names=all_columns,
+            dataset_id=base_name
         )
-    print(f"Done generating quantized files in {dataset_folder}.")
+        if instructions["action"] == "skip":
+            print(f"Skipping dataset '{base_name}' as instructed by GPT.")
+            return
 
+        channels_to_drop = instructions.get("channels_to_drop", [])
+        filtered_columns = [col for col in all_columns if col not in channels_to_drop]
+
+        # Identify left vs right channels
+        left_chs_in_csv = []
+        right_chs_in_csv = []
+        for ch in filtered_columns:
+            # skip if ends with 'z' or if last character isn't a digit, etc.
+            if ch.endswith('z'):
+                continue
+            if not ch[-1].isdigit():
+                continue
+            # last character is digit => check odd/even
+            if int(ch[-1]) % 2 == 0:
+                right_chs_in_csv.append(ch)
+            else:
+                left_chs_in_csv.append(ch)
+
+        if not left_chs_in_csv and not right_chs_in_csv:
+            print(f"No valid left/right channels found in {csv_file}. Skipping.")
+            return
+
+        # Create the 2-channel data array: [Left, Right]
+        if left_chs_in_csv:
+            left_data = df[left_chs_in_csv].mean(axis=1).values
+        else:
+            left_data = np.zeros(len(df))
+
+        if right_chs_in_csv:
+            right_data = df[right_chs_in_csv].mean(axis=1).values
+        else:
+            right_data = np.zeros(len(df))
+
+        data_2d = np.vstack([left_data, right_data])
+
+        # Original sampling rate
+        original_sps = calculate_sps(csv_file)
+        # Preprocess (resample + bandpass, etc.)
+        preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
+
+        n_window_samples = int(window_length_sec * new_sps)
+        num_channels, total_samples = preprocessed_data.shape
+
+        if n_window_samples <= 0 or total_samples < n_window_samples:
+            print(f"Skipping {csv_file} due to invalid window size or not enough samples.")
+            return
+
+        # Slide through the data in non-overlapping windows
+        for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
+            window_end = window_start + n_window_samples
+
+            all_channel_coeffs = []
+            all_channel_names = []
+
+            # For exactly 2 channels: 0 => left, 1 => right
+            for ch_idx in range(2):
+                ch_name_id = "1" if ch_idx == 0 else "2"
+                channel_data = preprocessed_data[ch_idx, window_start:window_end]
+                channel_data_2d = channel_data[np.newaxis, :]
+
+                # Wavelet Decompose
+                (decomposed_channels,
+                    coeffs_lengths,
+                    num_samples,
+                    normalized_data) = wavelet_decompose_window(
+                    channel_data_2d,
+                    wavelet=wvlet,
+                    level=level,
+                    normalization=True
+                )
+
+                # Flatten for quantization
+                coeffs_flat = decomposed_channels.flatten()
+                q_ids = [str(quantize_number(c)) for c in coeffs_flat] # << Convert to str here
+
+                all_channel_coeffs.extend(q_ids)
+                all_channel_names.extend([ch_name_id] * len(q_ids))
+
+            # Write lines (for this single window)
+            coeffs_line = " ".join(all_channel_coeffs) + "\n" # << Added newline
+            chans_line  = " ".join(all_channel_names)  + "\n" # << Added newline
+
+            f_coeffs.write(coeffs_line)
+            f_chans.write(chans_line)
+
+    validate_round_trip(
+        csv_file_path=csv_file,  # Replace with your CSV path
+        output_coeffs_file=output_coeffs_file,
+        output_channels_file=output_channels_file,
+        window_length_sec=2.0,
+        show_plot=False,  # Set to False to hide plot
+        mse_method="pwelch",  # Use "pwelch" to compute on pwelch
+        plot_welch=False  # Set to True to plot pwelch next to the time series plot
+    )
+    print(f"Done generating quantized files for {csv_file}.")
 
 
 
@@ -246,7 +226,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str):
     Process one dataset (e.g., 'ds004213') by:
     - listing CSVs in S3 at `dataset_folder/`
     - downloading to local temp
-    - running wavelet+quantization
+    - running wavelet+quantization on each CSV concurrently
     - uploading output txt files to S3
     - cleaning up
     """
@@ -258,6 +238,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str):
 
     output_dir = os.path.join(temp_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
+
 
     # 2) List CSV keys in S3
     dataset_folder_prefix = f"{dataset_folder}/"  # e.g. "ds004213/"
@@ -275,14 +256,22 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str):
         local_path = os.path.join(local_dataset_dir, filename)
         s3.download_file(bucket_name, csv_key, local_path)
 
-    # 4) Generate quantized files in local `output_dir`
-    generate_quantized_files_local(
-        dataset_folder=local_dataset_dir,
-        window_length_sec=2.0,
-        wvlet='db2',
-        level=2,
-        output_folder=output_dir
-    )
+    # 4) Process each CSV in parallel using threads
+    csv_files = sorted(glob.glob(os.path.join(local_dataset_dir, "*.csv")))
+    futures = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for csv_file in csv_files:
+            fut = executor.submit(
+                generate_quantized_files_local,
+                csv_file,
+                output_dir
+            )
+            futures.append(fut)
+
+        # Wait for all CSVs to be processed within this dataset
+        for _ in tqdm(as_completed(futures), total=len(futures), desc=f"Processing CSVs for {dataset_folder}"):
+            pass
+    print(f"Done processing all CSV files for dataset {dataset_folder}")
 
     # 5) Upload the generated outputs to S3 => "output/<dataset_folder>/..."
     for txt_file in glob.glob(os.path.join(output_dir, "*_quantized_*.txt")):
@@ -293,9 +282,7 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str):
 
     # 6) Cleanup local
     shutil.rmtree(temp_dir)
-    print(f"Completed processing for {dataset_folder}")
-
-
+    print(f"Completed all processing for {dataset_folder}")
 
 # ------------------------------------------------------------------------------
 # Example usage of the new block
