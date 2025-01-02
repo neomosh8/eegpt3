@@ -265,13 +265,17 @@ def generate_quantized_files(
         print(f"No CSV files found in folder: {dataset_folder}")
         return
 
+    os.makedirs('output', exist_ok=True)
+
     for csv_file in csv_files:
         print(f"Processing {csv_file} ...")
 
         # --- Output files per CSV ---
         base_name = os.path.splitext(os.path.basename(csv_file))[0]
-        output_coeffs_file = f"{base_name}_quantized_coeffs.txt"
-        output_channels_file = f"{base_name}_quantized_channels.txt"
+
+        # Create full paths for the output files inside the "output" folder
+        output_coeffs_file = os.path.join('output', f"{base_name}_quantized_coeffs.txt")
+        output_channels_file = os.path.join('output', f"{base_name}_quantized_channels.txt")
 
         # Open in write mode ("w"). Overwriting previous files each time
         f_coeffs = open(output_coeffs_file, "w")
@@ -843,18 +847,18 @@ if __name__ == "__main__":
     # main()
 
     # # Or run our new function to process an entire folder of CSVs
-    # generate_quantized_files(
-    #     dataset_folder="dataset",  # Folder containing your CSV files
-    #     window_length_sec=2.0
-    # )
-
-
-
-    # Example usage with different options:
-    validate_round_trip(
-        csv_file_path='dataset/sub-000_task-proposer_run-1_eeg.csv',  # Replace with your CSV path
-        window_length_sec=2.0,
-        show_plot=False,  # Set to False to hide plot
-        mse_method="timeseries",  # Use "pwelch" to compute on pwelch
-        plot_welch=True  # Set to True to plot pwelch next to the time series plot
+    generate_quantized_files(
+        dataset_folder="dataset",  # Folder containing your CSV files
+        window_length_sec=2.0
     )
+
+
+
+    # # Example usage with different options:
+    # validate_round_trip(
+    #     csv_file_path='dataset/sub-000_task-proposer_run-1_eeg.csv',  # Replace with your CSV path
+    #     window_length_sec=2.0,
+    #     show_plot=False,  # Set to False to hide plot
+    #     mse_method="timeseries",  # Use "pwelch" to compute on pwelch
+    #     plot_welch=True  # Set to True to plot pwelch next to the time series plot
+    # )
