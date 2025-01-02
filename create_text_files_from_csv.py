@@ -42,7 +42,7 @@ def main_s3_pipeline(
     prefix=''
 ):
     # 1) List top-level folders
-    all_folders = list_s3_folders(bucket_name, prefix)  # e.g. ['ds004213', 'ds003144', ...]
+    all_folders = list_s3_folders(bucket_name, prefix)[0:10]  # e.g. ['ds004213', 'ds003144', ...]
 
     if not all_folders:
         print("No folders found in S3.")
