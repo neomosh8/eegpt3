@@ -202,8 +202,8 @@ def generate_quantized_files_local(
                 all_channel_names.extend([ch_name_id] * len(q_ids))
 
             # Write lines (for this single window)
-            coeffs_line = " ".join(all_channel_coeffs) + "\n" # << Added newline
-            chans_line  = " ".join(all_channel_names)  + "\n" # << Added newline
+            coeffs_line = " ".join(all_channel_coeffs) + " " # << Added newline
+            chans_line  = " ".join(all_channel_names)  + " " # << Added newline
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
