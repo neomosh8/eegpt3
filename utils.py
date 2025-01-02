@@ -18,7 +18,7 @@ load_dotenv()
 wvlet = 'db2'
 level = 2
 client = OpenAI(
-    api_key="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"
+    api_key=os.getenv('api_key')
 )
 
 def calculate_stats(data):
