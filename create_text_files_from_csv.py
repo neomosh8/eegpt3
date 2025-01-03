@@ -164,5 +164,6 @@ def generate_quantized_files_local(
 
 folders = list_s3_folders()
 for folder in folders:
+    print(f"looking into folder: {folder}")
     csvs = list_csv_files_in_folder(folder)
 print(csvs)
