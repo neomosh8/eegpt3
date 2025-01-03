@@ -30,6 +30,18 @@ from utils import (
     calculate_sps,
     validate_round_trip, list_s3_folders, list_csv_files_in_folder
 )
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+def parallel_process_csv_files(csv_files, max_workers=4):
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_csv_file_s3, f): f for f in csv_files}
+        for future in as_completed(futures):
+            csvfile = futures[future]
+            try:
+                future.result()
+                print(f"Done: {csvfile}")
+            except Exception as e:
+                print(f"Error: {csvfile} -> {e}")
 
 
 def generate_quantized_files_local(
@@ -200,5 +212,4 @@ for folder in folders[0:6]:
     csv_files.extend(files)
 print(f"done with {len(csv_files)} files")
 
-for csvfile in csv_files[0:5]:
-    process_csv_file_s3(csvfile)
+parallel_process_csv_files(csv_files, max_workers=4)
