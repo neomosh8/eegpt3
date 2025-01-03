@@ -28,73 +28,8 @@ from utils import (
     pwelch_z, call_gpt_for_instructions,
     preprocess_data,
     calculate_sps,
-    validate_round_trip, list_s3_csv_files, list_s3_folders
+    validate_round_trip, list_s3_folders, list_csv_files_in_folder
 )
-
-
-# -------------------------------------------------------------------------------
-# MAIN FUNCTION (Example: Original vs Reconstructed Plot for a Single Random Window)
-# -------------------------------------------------------------------------------
-def main_s3_pipeline(
-        bucket_name='dataframes--use1-az6--x-s3',
-        prefix='',
-        output_prefix=None
-):
-    # 1) List top-level folders
-    all_folders = list_s3_folders(bucket_name, prefix)  # e.g. ['ds004213', 'ds003144', ...]
-
-    if not all_folders:
-        print("No folders found in S3.")
-        return
-
-    if output_prefix:
-        if not output_prefix.endswith('/'):
-            output_prefix += '/'
-    else:
-        output_prefix = ""  # if none, use empty
-
-    # 2) Process each dataset folder sequentially
-    for dataset_folder in tqdm(all_folders, desc="Datasets Processed"):
-        process_single_dataset_s3(dataset_folder, bucket_name, output_prefix)
-
-    print("All dataset folders processed.")
-
-
-# --------------------------------------------------------------------------------
-# NEW BLOCK:
-# Iterate over all CSVs in "dataset" folder
-# and create two large text files:
-# 1) quantized_coeffs.txt  (space-separated coefficients, each line = one window)
-# 2) quantized_channels.txt (space-separated channel names, repeated for each coeff)
-#
-# Default window_length_sec = 2 seconds
-#
-# Each line in both files covers BOTH HEMISPHERES in that window, concatenated:
-#  - channel "1" for left, "2" for right.
-# --------------------------------------------------------------------------------
-
-import os
-import glob
-import json
-import pandas as pd
-import numpy as np
-
-# ----------------------------------------------------------------------
-# Assume these functions already exist somewhere in your code:
-#
-#   - calculate_sps(csv_file)
-#   - preprocess_data(data_2d, original_sps)
-#   - wavelet_decompose_window(channel_data_2d, wavelet, level, normalization)
-#   - quantize_number(c)
-#
-# Also assume you have defined call_gpt_for_instructions(channel_names, dataset_id)
-# which returns a dictionary with keys:
-#   - "action": "process" or "skip"
-#   - "channels_to_drop": [list of channel names to drop]
-# ----------------------------------------------------------------------
-
-# s3 client - can be shared or re-created in each thread
-s3 = boto3.client('s3')
 
 
 def generate_quantized_files_local(
@@ -130,6 +65,7 @@ def generate_quantized_files_local(
             return
 
         channels_to_drop = instructions.get("channels_to_drop", [])
+        print(f"Dropping channels: {str(channels_to_drop)}")
         filtered_columns = [col for col in all_columns if col not in channels_to_drop]
 
         # Identify left vs right channels
@@ -226,90 +162,7 @@ def generate_quantized_files_local(
     print(f"Done generating quantized files for {csv_file}.")
 
 
-def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_prefix: str):
-    """
-    Process one dataset (e.g., 'ds004213') by:
-    - listing CSVs in S3 at `dataset_folder/`
-    - downloading to local temp
-    - running wavelet+quantization on each CSV concurrently
-    - uploading output txt files to S3
-    - cleaning up
-    """
-    temp_dir = None
-    try:
-        print(f"Starting processing dataset: {dataset_folder}")
-
-        if output_prefix:
-            output_folders = list_s3_folders(bucket_name, output_prefix)
-        else:
-            output_folders = []
-
-        # If output folder exists, skip
-        if f"{dataset_folder}" in output_folders:
-            print(f"Dataset '{dataset_folder}' is already processed in the output prefix. Skipping download.")
-            return
-
-        # 1) Make local temp dir
-        temp_dir_name = f"{dataset_folder}_tempdir"
-        temp_dir = os.path.join(tempfile.gettempdir(), temp_dir_name)
-
-        local_dataset_dir = os.path.join(temp_dir, "data")
-        os.makedirs(local_dataset_dir, exist_ok=True)
-
-        output_dir = os.path.join(temp_dir, "output")
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 2) List CSV keys in S3
-        dataset_folder_prefix = f"{dataset_folder}/"  # e.g. "ds004213/"
-        csv_keys = list_s3_csv_files(bucket_name, dataset_folder_prefix)
-
-        # If empty, skip
-        if not csv_keys:
-            print(f"No CSVs found in {dataset_folder_prefix}")
-            return
-
-        # 3) Download them locally
-        for csv_key in csv_keys:
-            filename = os.path.basename(csv_key)
-            local_path = os.path.join(local_dataset_dir, filename)
-            s3.download_file(bucket_name, csv_key, local_path)
-
-        # 4) Process each CSV in parallel using threads
-        csv_files = sorted(glob.glob(os.path.join(local_dataset_dir, "*.csv")))
-        futures = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            for csv_file in csv_files:
-                fut = executor.submit(
-                    generate_quantized_files_local,
-                    csv_file,
-                    output_dir
-                )
-                futures.append(fut)
-
-            # Wait for all CSVs to be processed within this dataset
-            for _ in tqdm(as_completed(futures), total=len(futures), desc=f"Processing CSVs for {dataset_folder}"):
-                pass
-        print(f"Done processing all CSV files for dataset {dataset_folder}")
-
-        # 5) Upload the generated outputs to S3 => "output/<dataset_folder>/..."
-        for txt_file in glob.glob(os.path.join(output_dir, "*_quantized_*.txt")):
-            base_txt_name = os.path.basename(txt_file)
-            s3_upload_key = f"{output_prefix}{dataset_folder}/{base_txt_name}"
-            print(f"Uploading {txt_file} => s3://{bucket_name}/{s3_upload_key}")
-            s3.upload_file(txt_file, bucket_name, s3_upload_key)
-
-    except Exception as e:
-        print(f"An error occurred while processing {dataset_folder}: {e}")
-
-    finally:
-        # 6) Cleanup local
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        print(f"Completed all processing for {dataset_folder}, cleaned up temp dir")
-
-
-# ------------------------------------------------------------------------------
-# Example usage of the new block
-# ------------------------------------------------------------------------------
-if __name__ == "__main__":
-    main_s3_pipeline()
+folders = list_s3_folders()
+for folder in folders:
+    csvs = list_csv_files_in_folder(folder)
+print(csvs)

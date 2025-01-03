@@ -888,35 +888,29 @@ def validate_round_trip(
 
     print(f"Average MSE - Left Channel: {avg_mse_left:.6f}")
     print(f"Average MSE - Right Channel: {avg_mse_right:.6f}")
-def list_s3_csv_files(bucket_name, dataset_folder_prefix):
+
+
+def list_csv_files_in_folder(folder_name , bucket_name='dataframes--use1-az6--x-s3', ):
     """
-    Return a list of s3 object keys that end with '.csv' within that folder prefix.
-    Example: dataset_folder_prefix = 'ds004213/'.
+    List all CSV files in a specific folder within an S3 bucket.
+
+    :param bucket_name: Name of the S3 bucket.
+    :param folder_name: Folder name (prefix) inside the bucket.
+    :return: List of CSV file keys.
     """
-    csv_keys = []
-    continuation_token = None
+    s3 = boto3.client('s3')
+    csv_files = []
 
-    while True:
-        if continuation_token:
-            resp = s3.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=dataset_folder_prefix,
-                ContinuationToken=continuation_token
-            )
-        else:
-            resp = s3.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=dataset_folder_prefix
-            )
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        response_iterator = paginator.paginate(Bucket=bucket_name, Prefix=f"{folder_name}/")
 
-        for obj in resp.get('Contents', []):
-            key = obj['Key']
-            if key.endswith('.csv'):
-                csv_keys.append(key)
+        for page in response_iterator:
+            for content in page.get('Contents', []):
+                key = content.get('Key', '')
+                if key.endswith('.csv'):
+                    csv_files.append(key)
+    except Exception as e:
+        print(f"Error listing CSV files: {e}")
 
-        if resp.get('IsTruncated'):
-            continuation_token = resp.get('NextContinuationToken')
-        else:
-            break
-
-    return csv_keys
+    return csv_files
