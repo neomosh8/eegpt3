@@ -245,8 +245,8 @@ def process_single_dataset_s3(dataset_folder: str, bucket_name: str, output_pref
             output_folders = []
 
         # If output folder exists, skip
-        if dataset_folder in output_folders:
-            print(f"Dataset '{dataset_folder}' is already processed. Skipping download.")
+        if f"{dataset_folder}" in output_folders:
+            print(f"Dataset '{dataset_folder}' is already processed in the output prefix. Skipping download.")
             return
 
         # 1) Make local temp dir
