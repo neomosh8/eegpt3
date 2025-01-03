@@ -162,8 +162,42 @@ def generate_quantized_files_local(
     print(f"Done generating quantized files for {csv_file}.")
 
 
+def process_csv_file_s3(
+    csv_key: str,
+    bucket: str = "dataframes--use1-az6--x-s3",
+    local_dir: str = "/tmp",
+    output_prefix: str = "output"
+):
+    s3 = boto3.client("s3")
+    if not os.path.exists(local_dir):
+        os.makedirs(local_dir)
+
+    # Download CSV
+    csv_name = os.path.basename(csv_key)
+    local_csv = os.path.join(local_dir, csv_name)
+    s3.download_file(bucket, csv_key, local_csv)
+
+    # Generate local files
+    generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
+    base = os.path.splitext(csv_name)[0]
+    coeffs_file = os.path.join(local_dir, f"{base}_quantized_coeffs.txt")
+    chans_file = os.path.join(local_dir, f"{base}_quantized_channels.txt")
+
+    # Upload files
+    s3.upload_file(coeffs_file, bucket, f"{output_prefix}/{os.path.basename(coeffs_file)}")
+    s3.upload_file(chans_file, bucket, f"{output_prefix}/{os.path.basename(chans_file)}")
+
+    # Cleanup
+    os.remove(local_csv)
+    os.remove(coeffs_file)
+    os.remove(chans_file)
+
 folders = list_s3_folders()
-for folder in folders:
+csv = []
+for folder in folders[0:6]:
     print(f"looking into folder: {folder}")
-    csvs = list_csv_files_in_folder(folder)
-print(csvs)
+    csv.append(list_csv_files_in_folder(folder))
+    print(f"done with {len(csv)} files")
+
+for csvfile in csv[0:5]:
+    process_csv_file_s3(csvfile)
