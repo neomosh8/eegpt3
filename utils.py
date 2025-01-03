@@ -914,3 +914,63 @@ def list_csv_files_in_folder(folder_name , bucket_name='dataframes--use1-az6--x-
         print(f"Error listing CSV files: {e}")
 
     return csv_files
+
+
+### TEMP UTILS
+import os
+import boto3
+
+def aggregate_coeffs_files_s3(
+    bucket='dataframes--use1-az6--x-s3',
+    output_prefix="output/",
+    local_dir="/tmp",
+    aggregated_name="all_coeffs.txt"
+):
+    s3 = boto3.client('s3')
+    local_agg_path = os.path.join(local_dir, aggregated_name)
+
+    print(f"\033[94mStarting aggregation of _coeffs.txt files from s3://{bucket}/{output_prefix} -> {aggregated_name}\033[0m")
+
+    if os.path.exists(local_agg_path):
+        print(f"\033[93mRemoving existing local file: {local_agg_path}\033[0m")
+        os.remove(local_agg_path)
+
+    # Gather all relevant files
+    paginator = s3.get_paginator('list_objects_v2')
+    all_keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=output_prefix):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if key.endswith('_coeffs.txt'):
+                all_keys.append(key)
+
+    total = len(all_keys)
+    if total == 0:
+        print("\033[93mNo _coeffs.txt files found.\033[0m")
+        return
+
+    print(f"\033[94mFound {total} files.\033[0m")
+
+    for i, key in enumerate(all_keys, start=1):
+        percentage = 100 * i / total
+        print(f"\033[94m[{i}/{total} | {percentage:.1f}%] {key}\033[0m")
+
+        local_temp = os.path.join(local_dir, os.path.basename(key))
+        print(f"\033[92mDownloading {key} -> {local_temp}\033[0m")
+        s3.download_file(bucket, key, local_temp)
+
+        with open(local_temp, 'r') as src, open(local_agg_path, 'a') as dst:
+            content = src.read()
+            dst.write(content)
+            print(f"\033[92mAppended {len(content)} chars from {key}\033[0m")
+
+        print(f"\033[91mRemoving temp {local_temp}\033[0m")
+        os.remove(local_temp)
+
+    print(f"\033[93mUploading aggregated file to s3://{bucket}/{aggregated_name}\033[0m")
+    s3.upload_file(local_agg_path, bucket, aggregated_name)
+
+    print(f"\033[91mRemoving local aggregated file {local_agg_path}\033[0m")
+    os.remove(local_agg_path)
+
+    print("\033[94mAll done.\033[0m")
