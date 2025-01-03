@@ -30,10 +30,13 @@ from utils import (
     calculate_sps,
     validate_round_trip, list_s3_folders, list_csv_files_in_folder
 )
+
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-def parallel_process_csv_files(csv_files, max_workers=4):
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+def parallel_process_csv_files(csv_files):
+    max_workers = multiprocessing.cpu_count()
+    with ProcessPoolExecutor(max_workers=max_workers-2) as executor:
         futures = {executor.submit(process_csv_file_s3, f): f for f in csv_files}
         for future in as_completed(futures):
             csvfile = futures[future]
