@@ -35,16 +35,18 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def parallel_process_csv_files(csv_files):
-    max_workers = multiprocessing.cpu_count()
-    with ProcessPoolExecutor(max_workers=max_workers-2) as executor:
-        futures = {executor.submit(process_csv_file_s3, f): f for f in csv_files}
+    max_workers = multiprocessing.cpu_count() - 2
+    total = len(csv_files)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_csv_file_s3, f): i for i, f in enumerate(csv_files, start=1)}
         for future in as_completed(futures):
-            csvfile = futures[future]
+            idx = futures[future]
+            csvfile = csv_files[idx - 1]
             try:
                 future.result()
-                print(f"Done: {csvfile}")
+                print(f"\033[94m[{idx}/{total}] Done: {csvfile}\033[0m")
             except Exception as e:
-                print(f"Error: {csvfile} -> {e}")
+                print(f"\033[91mError: {csvfile} -> {e}\033[0m")
 
 
 def generate_quantized_files_local(
@@ -210,9 +212,12 @@ def process_csv_file_s3(
 folders = list_s3_folders()
 csv_files = []
 for folder in folders:
+    i=1
+    print(f"f{i}/{len(folders)}")
     print(f"looking into folder: {folder}")
     files = list_csv_files_in_folder(folder)
     csv_files.extend(files)
+    i=i+1
 print(f"done with {len(csv_files)} files")
 
 parallel_process_csv_files(csv_files)
