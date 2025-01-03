@@ -193,11 +193,12 @@ def process_csv_file_s3(
     os.remove(chans_file)
 
 folders = list_s3_folders()
-csv = []
+csv_files = []
 for folder in folders[0:6]:
     print(f"looking into folder: {folder}")
-    csv.append(list_csv_files_in_folder(folder))
-    print(f"done with {len(csv)} files")
+    files = list_csv_files_in_folder(folder)
+    csv_files.extend(files)
+print(f"done with {len(csv_files)} files")
 
-for csvfile in csv[0:5]:
+for csvfile in csv_files[0:5]:
     process_csv_file_s3(csvfile)
