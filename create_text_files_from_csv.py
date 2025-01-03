@@ -209,10 +209,10 @@ def process_csv_file_s3(
 
 folders = list_s3_folders()
 csv_files = []
-for folder in folders[0:6]:
+for folder in folders:
     print(f"looking into folder: {folder}")
     files = list_csv_files_in_folder(folder)
     csv_files.extend(files)
 print(f"done with {len(csv_files)} files")
 
-parallel_process_csv_files(csv_files, max_workers=4)
+parallel_process_csv_files(csv_files)
