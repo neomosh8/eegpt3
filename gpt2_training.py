@@ -410,7 +410,7 @@ train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=dd
 
 model = GPT(GPTConfig())
 model.to(device)
-# model = torch.compile(model)
+model = torch.compile(model)
 if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
