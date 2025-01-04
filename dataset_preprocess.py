@@ -131,6 +131,6 @@ if __name__ == "__main__":
         s3_prefix=S3_PREFIX,
         local_data_dir=LOCAL_DIR,
         shard_prefix="mydata",
-        limit_files=10,
+        limit_files=None,
         val_ratio=0.1  # 10% for validation
     )
