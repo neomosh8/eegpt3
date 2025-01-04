@@ -34,6 +34,8 @@ def gather_coeffs_from_s3_with_paginator(bucket_name, prefix='', local_output='c
     Gathers all text files ending in '_coeffs.txt' under each subfolder of the given prefix,
     concatenates them, and saves the result locally to local_output.
     Also prints how many matching files were found, and shows progress.
+
+    Now displays the running total of matches found so far instead of individual filenames.
     """
     # First, get the list of top-level folders
     top_level_folders = list_s3_folders_with_paginator(bucket_name, prefix)
@@ -47,7 +49,7 @@ def gather_coeffs_from_s3_with_paginator(bucket_name, prefix='', local_output='c
     for idx, folder in enumerate(top_level_folders, start=1):
         print(f"[{idx}/{len(top_level_folders)}] Processing folder: '{folder}'")
 
-        # We'll keep track of pages for debugging
+        # Keep track of pages for debugging
         page_count = 0
 
         # Create a paginator for listing objects inside this folder
@@ -62,7 +64,8 @@ def gather_coeffs_from_s3_with_paginator(bucket_name, prefix='', local_output='c
                 # Check for matching filename
                 if key.endswith('_coeffs.txt'):
                     total_matches_found += 1
-                    print(f"      Found match: {key}")
+                    print(f"      Found a match, total so far: {total_matches_found}")
+
                     file_obj = s3.get_object(Bucket=bucket_name, Key=key)
                     file_content = file_obj['Body'].read().decode('utf-8')
                     all_text_chunks.append(file_content)
