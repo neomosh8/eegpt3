@@ -233,7 +233,7 @@ class DataLoaderLite:
                  T: int,
                  process_rank: int,
                  num_processes: int,
-                 local_data_dir: str,
+                 local_data_dir: str = "./local_shards",
                  shard_prefix: str = "mydata",
                  shuffle_shards: bool = False):
         """
