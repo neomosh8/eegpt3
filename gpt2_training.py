@@ -224,34 +224,42 @@ class GPT(nn.Module):
 
 def debug_tensor_info(tensor_dict):
     """
-    Print debug information for multiple tensors.
+    Safely print debug information for multiple tensors.
     Args:
         tensor_dict: Dictionary of tensor names and their corresponding tensors
     """
     print("\n=== Tensor Debug Information ===")
     for name, tensor in tensor_dict.items():
         print(f"\n{name}:")
-        print(f"  Shape: {tensor.shape}")
-        print(f"  Device: {tensor.device}")
-        print(f"  Dtype: {tensor.dtype}")
 
-        # Check for NaN values
-        if torch.is_floating_point(tensor):
-            nan_count = torch.isnan(tensor).sum().item()
-            print(f"  NaN count: {nan_count}")
-
-            # If there are NaNs, print some statistics
-            if nan_count > 0:
-                print("  Warning: NaN values detected!")
-
-        # Print a few sample values
+        # Basic info that should be safe to access
         try:
-            print(f"  First few values: {tensor.flatten()[:5]}")
+            print(f"  Shape: {tensor.shape}")
         except:
-            print("  Could not print sample values")
+            print("  Could not get shape")
 
-        print(f"  Memory allocated: {tensor.element_size() * tensor.nelement() / 1024 / 1024:.2f} MB")
+        try:
+            print(f"  Device: {tensor.device}")
+        except:
+            print("  Could not get device")
 
+        try:
+            print(f"  Dtype: {tensor.dtype}")
+        except:
+            print("  Could not get dtype")
+
+        # Try to safely check a small sample of values
+        try:
+            # Copy a small sample to CPU first
+            sample = tensor.detach().cpu()[:2, :2, :2].flatten()
+            print(f"  Sample values (first few): {sample}")
+
+            # Check if sample contains any inf or very large values
+            if torch.any(torch.abs(sample) > 1e6):
+                print("  Warning: Very large values detected in sample!")
+
+        except Exception as e:
+            print(f"  Could not safely sample values: {str(e)}")
 
 class DataLoaderLite:
     def __init__(self, B, T, process_rank, num_processes,
