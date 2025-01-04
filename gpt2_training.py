@@ -175,6 +175,12 @@ class GPT(nn.Module):
             # Make sure channel_idx is the same shape as idx
             # channel_idx must be in [0..num_channels-1]
             cha_emb = self.transformer.wce(channel_idx)  # (B, T, n_embd)
+            # Before the problematic addition, add this:
+            debug_tensor_info({
+                'tok_emb': tok_emb,
+                'pos_emb': pos_emb,
+                'cha_emb': cha_emb
+            })
             x = tok_emb + pos_emb + cha_emb
         else:
             # fallback if no channel_idx is provided
@@ -216,6 +222,35 @@ class GPT(nn.Module):
         return optimizer
 
 
+def debug_tensor_info(tensor_dict):
+    """
+    Print debug information for multiple tensors.
+    Args:
+        tensor_dict: Dictionary of tensor names and their corresponding tensors
+    """
+    print("\n=== Tensor Debug Information ===")
+    for name, tensor in tensor_dict.items():
+        print(f"\n{name}:")
+        print(f"  Shape: {tensor.shape}")
+        print(f"  Device: {tensor.device}")
+        print(f"  Dtype: {tensor.dtype}")
+
+        # Check for NaN values
+        if torch.is_floating_point(tensor):
+            nan_count = torch.isnan(tensor).sum().item()
+            print(f"  NaN count: {nan_count}")
+
+            # If there are NaNs, print some statistics
+            if nan_count > 0:
+                print("  Warning: NaN values detected!")
+
+        # Print a few sample values
+        try:
+            print(f"  First few values: {tensor.flatten()[:5]}")
+        except:
+            print("  Could not print sample values")
+
+        print(f"  Memory allocated: {tensor.element_size() * tensor.nelement() / 1024 / 1024:.2f} MB")
 
 
 class DataLoaderLite:
