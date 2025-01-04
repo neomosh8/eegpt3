@@ -255,6 +255,168 @@ class BPE_RLE_Tokenizer:
         final_tokens = self.undo_bpe_merges(decoded_bpe_tokens)
         return final_tokens
 
+    def apply_bpe_merges_with_alignment(self, tokens, indices):
+        """
+        Same logic as apply_bpe_merges(...), but also returns a parallel
+        list of 'merged_indices' so we know which original token indices
+        contributed to each newly merged token.
+        """
+        if not self.merges:
+            # no merges to do, just return as-is
+            return tokens, indices
+
+        merge_pairs = set(m[0] for m in self.merges)
+
+        merged_tokens = []
+        merged_indices = []
+
+        skip_next = False
+        i = 0
+        while i < len(tokens):
+            if skip_next:
+                skip_next = False
+                i += 1
+                continue
+
+            if i < len(tokens) - 1:
+                pair = (tokens[i], tokens[i + 1])
+                if pair in merge_pairs:
+                    # BPE merge
+                    new_token = tokens[i] + "_" + tokens[i + 1]
+                    merged_tokens.append(new_token)
+
+                    # the new token is formed from the union of indices[i], indices[i+1]
+                    if isinstance(indices[i], list):
+                        left_indices = indices[i]
+                    else:
+                        left_indices = [indices[i]]
+
+                    if isinstance(indices[i + 1], list):
+                        right_indices = indices[i + 1]
+                    else:
+                        right_indices = [indices[i + 1]]
+
+                    merged_indices.append(left_indices + right_indices)
+
+                    skip_next = True
+                else:
+                    merged_tokens.append(tokens[i])
+                    merged_indices.append(indices[i])
+            else:
+                # last token in the list
+                merged_tokens.append(tokens[i])
+                merged_indices.append(indices[i])
+            i += 1
+
+        return merged_tokens, merged_indices
+
+    def run_length_encode_with_alignment(self, tokens, indices):
+        """
+        Same logic as run_length_encode(...), but also merges the alignment indices.
+        If we detect repeated tokens [T, T, T], we do "T, R=2" while combining
+        their corresponding 'indices'.
+        """
+        if not tokens:
+            return [], []
+
+        rle_tokens = []
+        rle_indices = []
+
+        current_token = tokens[0]
+        current_idx_list = indices[0] if isinstance(indices[0], list) else [indices[0]]
+        count = 1
+
+        for t, idx in zip(tokens[1:], indices[1:]):
+            idx_list = idx if isinstance(idx, list) else [idx]
+            if t == current_token:
+                # same token => run
+                count += 1
+                # accumulate the alignment indices too
+                current_idx_list.extend(idx_list)
+            else:
+                # flush the previous run
+                rle_tokens.append(current_token)
+                rle_indices.append(current_idx_list)
+                if count > 1:
+                    rle_tokens.append(f"R={count - 1}")
+                    rle_indices.append(current_idx_list)
+
+                # reset
+                current_token = t
+                current_idx_list = idx_list
+                count = 1
+
+        # flush the last run
+        rle_tokens.append(current_token)
+        rle_indices.append(current_idx_list)
+        if count > 1:
+            rle_tokens.append(f"R={count - 1}")
+            rle_indices.append(current_idx_list)
+
+        return rle_tokens, rle_indices
+
+    def save_alignment(self, alignment_positions, filepath):
+        """
+        Save the alignment (list of lists) to a file.
+        Each final token has a list of original indices.
+        We'll store them in a simple line-by-line format (CSV style).
+        """
+        with open(filepath, "w", encoding="utf-8") as f:
+            for pos_list in alignment_positions:
+                if isinstance(pos_list, list):
+                    s = ",".join(map(str, pos_list))
+                else:
+                    s = str(pos_list)
+                f.write(s + "\n")
+
+    def encode_with_alignment(self, raw_tokens, as_ids=False, alignment_filepath=None):
+        """
+        1) Apply BPE merges (with alignment).
+        2) Run-length encode (with alignment).
+        3) Optionally convert to IDs if 'as_ids=True'.
+        4) If 'alignment_filepath' is provided, save the alignment.
+        5) Return (encoded_output, alignment_positions).
+
+        :param raw_tokens: list of raw string tokens to encode
+        :param as_ids: if True, convert the final RLE tokens to integer IDs
+                       (requires a built or loaded vocab).
+        :param alignment_filepath: if provided, save alignment to disk at this path.
+        :return: (encoded_output, alignment_positions) where:
+                 - encoded_output is either list of tokens or list of IDs
+                 - alignment_positions is a list of lists indicating which
+                   original token indices contributed to each output token
+        """
+        # Step 0: initial indices = [0, 1, 2, ..., len(raw_tokens)-1]
+        positions = list(range(len(raw_tokens)))
+
+        # Step 1: BPE merges with alignment
+        merged_tokens, merged_positions = self.apply_bpe_merges_with_alignment(raw_tokens, positions)
+
+        # Step 2: run-length encode with alignment
+        rle_tokens, rle_positions = self.run_length_encode_with_alignment(merged_tokens, merged_positions)
+
+        # Step 3: Optionally convert RLE tokens to IDs
+        if as_ids:
+            if not self.token2id:
+                raise ValueError("No vocabulary found. Build or load vocab before encoding as IDs.")
+            unk_id = self.token2id.get("<UNK>", None)
+            encoded_output = []
+            for t in rle_tokens:
+                if t in self.token2id:
+                    encoded_output.append(self.token2id[t])
+                elif unk_id is not None:
+                    encoded_output.append(unk_id)
+                else:
+                    raise ValueError(f"Token '{t}' not in vocab and <UNK> not defined.")
+        else:
+            encoded_output = rle_tokens
+
+        # Step 4: If a filepath is given, save the alignment
+        if alignment_filepath is not None:
+            self.save_alignment(rle_positions, alignment_filepath)
+
+        return encoded_output, rle_positions
+
     # ---------------------------------------------------------------------
     # BPE merges save/load
     # ---------------------------------------------------------------------
