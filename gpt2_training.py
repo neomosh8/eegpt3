@@ -221,174 +221,109 @@ class GPT(nn.Module):
 
 
 
-class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes,
-                 bucket_name='dataframes--use1-az6--x-s3', s3_prefix='output/'):
+class LocalDataLoaderLite:
+    """
+    A simplified version of your original DataLoaderLite that:
+      - Loads shards from a local directory
+      - Iterates through them
+      - Produces (x, c, y) batches
+    """
+    def __init__(self,
+                 B: int,
+                 T: int,
+                 process_rank: int,
+                 num_processes: int,
+                 local_data_dir: str,
+                 shard_prefix: str = "mydata",
+                 shuffle_shards: bool = False):
         """
         Args:
             B: Batch size
             T: Sequence length
             process_rank: (DDP) process rank
-            num_processes: total number of processes (DDP)
-            bucket_name: S3 bucket name
-            s3_prefix: the directory/prefix inside the bucket where data files live
+            num_processes: total DDP processes
+            local_data_dir: directory containing the preprocessed .pt shards
+            shard_prefix: prefix used in naming the shards (e.g. "mydata")
+            shuffle_shards: whether to shuffle the shard ordering
         """
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        self.total_num_tokens = 0
-        # Create S3 client; adapt as needed.
-        self.s3 = boto3.client('s3')
 
-        # 1) Find all *_coeffs.txt files in s3_prefix using a paginator to handle large listings
-        paginator = self.s3.get_paginator('list_objects_v2')
-        page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix)
+        # Find all shard files
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_*.pt")
+        self.shard_files = sorted(glob.glob(pattern))
+        if not self.shard_files:
+            raise ValueError(f"No shards found in {local_data_dir} with prefix={shard_prefix}")
 
-        all_files = []
-        page_num = 0
-        for page in page_iterator:
-            page_num += 1
-            contents = page.get('Contents', [])
-            print(f"Processing page {page_num} with {len(contents)} items ...")
-            for obj in contents:
-                key = obj['Key']
-                if key.endswith('_coeffs.txt'):
-                    all_files.append(key)
-            print(f"  -> Accumulated so far: {len(all_files)} files.")
+        if shuffle_shards:
+            import random
+            random.shuffle(self.shard_files)
 
-        print(f"Total number of *_coeffs.txt files found: {len(all_files)}")
-
-        # Optionally sort or shuffle.
-        # For demonstration, let's keep them all but limit to 10 in code for testing:
-        all_files = all_files
-
-        # 2) Prepare a list of file pairs: (coeffs_file, channels_file)
-        self.file_pairs = []
-        for coeffs_key in all_files:
-            channels_key = coeffs_key.replace('_coeffs.txt', '_channels.txt')
-            try:
-                self.s3.head_object(Bucket=bucket_name, Key=channels_key)
-                self.file_pairs.append((coeffs_key, channels_key))
-            except:
-                # If the channels file doesn't exist, skip it
-                pass
-
-        if len(self.file_pairs) == 0:
-            raise ValueError("No valid coeffs/channels file pairs found in S3 prefix.")
-
-        # Load up a tokenizer once (or pass it in)
-        self.tokenizer = Tokenizer()
-        self.tokenizer.load_merges("neo_tokenizer/merges.json")
-        self.tokenizer.load_vocab("neo_tokenizer/vocab.json")
-
-        self.bucket_name = bucket_name
-        self.s3_prefix = s3_prefix
-
-        # Initialize state
-        self.current_file_idx = 0  # which pair of files we are on
+        # We’ll load shards one by one in the background
+        self.current_shard_idx = 0
         self.tokens = None
         self.channels = None
         self.current_position = 0
 
-        # Load the first file
-        self._load_current_file()
+        # Load the first shard
+        self._load_shard(self.shard_files[self.current_shard_idx])
 
-    def _download_s3_file(self, key, local_path):
-        """Download a single key from S3 to a local path."""
-        self.s3.download_file(self.bucket_name, key, local_path)
-
-    def _load_current_file(self):
+    def _load_shard(self, shard_path: str):
         """
-        Download the current file pair from S3, tokenize and store in self.tokens / self.channels.
-        Reset self.current_position for the new file. Then remove local files.
+        Load a single shard (tokens, channels).
+        Reset current_position.
         """
-        coeffs_key, channels_key = self.file_pairs[self.current_file_idx]
+        loaded = torch.load(shard_path)
+        self.tokens = loaded['tokens']
+        self.channels = loaded['channels']
 
-        # In production, you might want to store these in /tmp
-        coeffs_local = os.path.basename(coeffs_key)
-        channels_local = os.path.basename(channels_key)
-
-        # Download both files from S3
-        self._download_s3_file(coeffs_key, coeffs_local)
-        self._download_s3_file(channels_key, channels_local)
-
-        # Read & tokenize coeffs
-        with open(coeffs_local, 'r', encoding='utf-8') as f:
-            text = f.read()
-        # Convert text to a list of tokens (words) and prepend the special token
-        raw_tokens = text.strip().split()
-        raw_tokens.insert(0, "|trial|")  # <-- add the special token here
-
-        # Now encode with alignment
-        encoded, pos = self.tokenizer.encode_with_alignment(raw_tokens, as_ids=True)
-        self.total_num_tokens += len(encoded)
-        self.tokens = torch.tensor(encoded, dtype=torch.long)
-
-        # Read channels
-        with open(channels_local, 'r', encoding='utf-8') as f:
-            chan_text = f.read().strip().split()
-            chan_text.insert(0, "1")  # or "0", or whichever makes sense
-            final_channels = apply_alignment_to_channels(chan_text, pos, combine_mode="first")
-            chan_text = final_channels
-
-        # Convert e.g. '1'->0, '2'->1, ...
-        self.channels = torch.tensor([int(x) - 1 for x in chan_text], dtype=torch.long)
-
-        # Make sure length matches
         if len(self.tokens) != len(self.channels):
-            raise ValueError("tokens and channels length mismatch!")
+            raise ValueError("tokens and channels length mismatch in shard!")
 
-        # Cleanup local files now that we've read them
-        try:
-            os.remove(coeffs_local)
-        except OSError:
-            pass
-        try:
-            os.remove(channels_local)
-        except OSError:
-            pass
-
-        # Reset position for the fresh file
+        # Reset position for the new shard
         self.current_position = self.B * self.T * self.process_rank
+
+    def _advance_shard(self):
+        """
+        Move to the next shard (cyclically).
+        """
+        self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shard_files)
+        self._load_shard(self.shard_files[self.current_shard_idx])
 
     def next_batch(self):
         """
-        Fetch the next batch of data: (x, c, y)
+        Fetch the next batch: (x, c, y)
           - x, c: the input tokens and channel IDs
           - y: the target tokens for cross-entropy
-        If the current file is exhausted, move to the next file.
+        If the current shard is exhausted, move to the next shard.
         """
         B, T = self.B, self.T
-
         start = self.current_position
-        end = self.current_position + B * T + 1
+        end = start + (B * T + 1)
 
         buf_tokens = self.tokens[start:end]
         buf_channels = self.channels[start:end]
 
-        # If we don't have enough tokens to form a full batch, move to the next file and try again.
-        if len(buf_tokens) < B * T + 1:
-            self.current_file_idx = (self.current_file_idx + 1) % len(self.file_pairs)
-            self._load_current_file()
+        # If we don't have enough tokens to form a full batch, move to the next shard and try again
+        if len(buf_tokens) < (B * T + 1):
+            self._advance_shard()
             return self.next_batch()
 
-        # x, y, c
+        # x, c, y
         x = buf_tokens[:-1].view(B, T)
         y = buf_tokens[1:].view(B, T)
         c = buf_channels[:-1].view(B, T)
 
-        # Advance the position
+        # Advance the position for the next call
         self.current_position += B * T * self.num_processes
 
-        # If next batch goes out of range, switch to the next file.
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_file_idx = (self.current_file_idx + 1) % len(self.file_pairs)
-            self._load_current_file()
-        # print(self.total_num_tokens)
-        # print(self.current_file_idx,"/",len(self.file_pairs))
-        return x, c, y
+        # If the next batch fetch would exceed this shard, cycle shards
+        if (self.current_position + (B * T * self.num_processes + 1)) > len(self.tokens):
+            self._advance_shard()
 
+        return x, c, y
 
 
 
