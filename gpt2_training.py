@@ -220,15 +220,14 @@ class GPT(nn.Module):
         return optimizer
 
 
-
-
 class DataLoaderLite:
     """
-    A simplified version of your original DataLoaderLite that:
-      - Loads shards from a local directory
-      - Iterates through them
-      - Produces (x, c, y) batches
+    A version of your DataLoaderLite that:
+      - loads .pt shard files from a local directory
+      - each shard is either 'train' or 'val'
+      - you specify which split to load
     """
+
     def __init__(self,
                  B: int,
                  T: int,
@@ -236,6 +235,7 @@ class DataLoaderLite:
                  num_processes: int,
                  local_data_dir: str = "./local_shards",
                  shard_prefix: str = "mydata",
+                 split: str = "train",
                  shuffle_shards: bool = False):
         """
         Args:
@@ -245,6 +245,7 @@ class DataLoaderLite:
             num_processes: total DDP processes
             local_data_dir: directory containing the preprocessed .pt shards
             shard_prefix: prefix used in naming the shards (e.g. "mydata")
+            split: "train" or "val"
             shuffle_shards: whether to shuffle the shard ordering
         """
         self.B = B
@@ -252,23 +253,21 @@ class DataLoaderLite:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Find all shard files
-        pattern = os.path.join(local_data_dir, f"{shard_prefix}_*.pt")
+        # Collect shards for the requested split
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
-            raise ValueError(f"No shards found in {local_data_dir} with prefix={shard_prefix}")
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
 
         if shuffle_shards:
             import random
             random.shuffle(self.shard_files)
 
-        # We’ll load shards one by one in the background
         self.current_shard_idx = 0
         self.tokens = None
         self.channels = None
         self.current_position = 0
 
-        # Load the first shard
         self._load_shard(self.shard_files[self.current_shard_idx])
 
     def _load_shard(self, shard_path: str):
@@ -276,14 +275,15 @@ class DataLoaderLite:
         Load a single shard (tokens, channels).
         Reset current_position.
         """
-        loaded = torch.load(shard_path,weights_only=False)
+        loaded = torch.load(shard_path, weights_only=False)
+        # ^ You can explicitly set weights_only=False to avoid future PyTorch warnings.
+
         self.tokens = loaded['tokens']
         self.channels = loaded['channels']
 
         if len(self.tokens) != len(self.channels):
             raise ValueError("tokens and channels length mismatch in shard!")
 
-        # Reset position for the new shard
         self.current_position = self.B * self.T * self.process_rank
 
     def _advance_shard(self):
@@ -307,27 +307,29 @@ class DataLoaderLite:
         buf_tokens = self.tokens[start:end]
         buf_channels = self.channels[start:end]
 
-        # If we don't have enough tokens to form a full batch, move to the next shard and try again
         if len(buf_tokens) < (B * T + 1):
             self._advance_shard()
             return self.next_batch()
 
-        # x, c, y
+        # x, y, c
         x = buf_tokens[:-1].view(B, T)
         y = buf_tokens[1:].view(B, T)
         c = buf_channels[:-1].view(B, T)
 
-        # Advance the position for the next call
         self.current_position += B * T * self.num_processes
 
-        # If the next batch fetch would exceed this shard, cycle shards
+        # If next batch fetch would exceed the shard, load the next shard
         if (self.current_position + (B * T * self.num_processes + 1)) > len(self.tokens):
             self._advance_shard()
 
         return x, c, y
 
-
-
+    def reset(self):
+        """
+        Reset the current shard index and position, useful for e.g. validation loops.
+        """
+        self.current_shard_idx = 0
+        self._load_shard(self.shard_files[self.current_shard_idx])
 
 
 total_batch_size = 65536
@@ -342,7 +344,8 @@ if master_process:
 torch.set_float32_matmul_precision('high')
 
 
-train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size)
+train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
+val_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -353,8 +356,8 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = max_lr*0.1
-warmup_steps = 10
-max_steps = 500
+warmup_steps = 7
+max_steps = 20
 
 def get_lr(it):
     if it<warmup_steps:
@@ -371,6 +374,26 @@ def get_lr(it):
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 for step in range(max_steps):
     t0 = time.time()
+    last_step = (step == max_steps - 1)
+    # once in a while evaluate our validation loss
+    if step % 5 == 0 or last_step:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for mico_step in range(grad_accum_steps):
