@@ -394,12 +394,12 @@ for step in range(max_steps):
         val_loader.reset()
         with torch.no_grad():
             val_loss_accum = 0.0
-            val_loss_steps = 20
+            val_loss_steps = 10
             for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
+                x_val, c_val, y_val = val_loader.next_batch()
+                x_val, c_val, y_val = x_val.to(device), c_val.to(device), y_val.to(device)
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
+                    logits_val, loss_val = model(x_val, c_val, y_val)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
