@@ -391,7 +391,7 @@ class DataLoaderLite:
 
 
 
-total_batch_size = 47090
+total_batch_size = 49152
 B = 4
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
