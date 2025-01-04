@@ -295,34 +295,47 @@ class DataLoaderLite:
 
     def next_batch(self):
         """
-        Fetch the next batch: (x, c, y)
-          - x, c: the input tokens and channel IDs
-          - y: the target tokens for cross-entropy
+        Fetch the next batch: (x, c, y).
         If the current shard is exhausted, move to the next shard.
         """
         B, T = self.B, self.T
-        start = self.current_position
-        end = start + (B * T + 1)
 
-        buf_tokens = self.tokens[start:end]
-        buf_channels = self.channels[start:end]
+        attempt_count = 0
+        max_attempts = len(self.shard_files)  # how many times we'll try loading
 
-        if len(buf_tokens) < (B * T + 1):
+        while True:
+            start = self.current_position
+            end = start + (B * T + 1)
+
+            buf_tokens = self.tokens[start:end]
+            buf_channels = self.channels[start:end]
+
+            if len(buf_tokens) >= (B * T + 1):
+                # We have enough tokens. Make the batch
+                x = buf_tokens[:-1].view(B, T)
+                y = buf_tokens[1:].view(B, T)
+                c = buf_channels[:-1].view(B, T)
+
+                # Advance position
+                self.current_position += B * T * self.num_processes
+
+                # If the next batch fetch would exceed the current shard,
+                # we move to the next shard for subsequent calls
+                if (self.current_position + (B * T * self.num_processes + 1)) > len(self.tokens):
+                    self._advance_shard()
+
+                return x, c, y
+
+            # If not enough tokens, move on to the next shard
             self._advance_shard()
-            return self.next_batch()
+            attempt_count += 1
 
-        # x, y, c
-        x = buf_tokens[:-1].view(B, T)
-        y = buf_tokens[1:].view(B, T)
-        c = buf_channels[:-1].view(B, T)
-
-        self.current_position += B * T * self.num_processes
-
-        # If next batch fetch would exceed the shard, load the next shard
-        if (self.current_position + (B * T * self.num_processes + 1)) > len(self.tokens):
-            self._advance_shard()
-
-        return x, c, y
+            if attempt_count > max_attempts:
+                # We’ve tried all shards and none has enough tokens
+                raise RuntimeError(
+                    f"Unable to get a full batch of size {B}x{T} from any shard. "
+                    f"All shards may be too small."
+                )
 
     def reset(self):
         """
