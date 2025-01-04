@@ -406,7 +406,8 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
-    model.train()
+            model.train()
+
     optimizer.zero_grad()
     loss_accum = 0.0
     for mico_step in range(grad_accum_steps):
