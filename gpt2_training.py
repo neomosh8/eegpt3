@@ -358,7 +358,7 @@ torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+# val_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -388,25 +388,25 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,de
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
-    # once in a while evaluate our validation loss
-    if step % 5 == 0 or last_step:
-        model.eval()
-        val_loader.reset()
-        with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = 20
-            for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach()
-        if ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
-        if master_process:
-            print(f"validation loss: {val_loss_accum.item():.4f}")
-    model.train()
+    # # once in a while evaluate our validation loss
+    # if step % 5 == 0 or last_step:
+    #     model.eval()
+    #     val_loader.reset()
+    #     with torch.no_grad():
+    #         val_loss_accum = 0.0
+    #         val_loss_steps = 20
+    #         for _ in range(val_loss_steps):
+    #             x, y = val_loader.next_batch()
+    #             x, y = x.to(device), y.to(device)
+    #             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+    #                 logits, loss = model(x, y)
+    #             loss = loss / val_loss_steps
+    #             val_loss_accum += loss.detach()
+    #     if ddp:
+    #         dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+    #     if master_process:
+    #         print(f"validation loss: {val_loss_accum.item():.4f}")
+    # model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for mico_step in range(grad_accum_steps):
