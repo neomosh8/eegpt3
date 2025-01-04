@@ -221,7 +221,7 @@ class GPT(nn.Module):
 
 
 
-class LocalDataLoaderLite:
+class DataLoaderLite:
     """
     A simplified version of your original DataLoaderLite that:
       - Loads shards from a local directory
