@@ -385,8 +385,8 @@ class DataLoaderLite:
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_file_idx = (self.current_file_idx + 1) % len(self.file_pairs)
             self._load_current_file()
-        print(self.total_num_tokens)
-        print(self.current_file_idx,"/",len(self.file_pairs))
+        # print(self.total_num_tokens)
+        # print(self.current_file_idx,"/",len(self.file_pairs))
         return x, c, y
 
 
@@ -395,8 +395,8 @@ class DataLoaderLite:
 
 
 total_batch_size = 49152
-B = 2
-T = 512
+B = 4
+T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
