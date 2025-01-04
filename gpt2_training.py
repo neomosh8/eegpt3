@@ -276,7 +276,7 @@ class DataLoaderLite:
         Load a single shard (tokens, channels).
         Reset current_position.
         """
-        loaded = torch.load(shard_path)
+        loaded = torch.load(shard_path,weights_only=False)
         self.tokens = loaded['tokens']
         self.channels = loaded['channels']
 
