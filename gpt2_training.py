@@ -10,7 +10,7 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
-from tokenizer import BPE_RLE_Tokenizer as Tokenizer
+from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
