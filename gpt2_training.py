@@ -261,7 +261,7 @@ class DataLoaderLite:
 
         # Optionally sort or shuffle.
         # For demonstration, let's keep them all but limit to 10 in code for testing:
-        all_files = all_files[0:10]
+        all_files = all_files
 
         # 2) Prepare a list of file pairs: (coeffs_file, channels_file)
         self.file_pairs = []
