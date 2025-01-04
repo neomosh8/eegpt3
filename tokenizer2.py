@@ -520,6 +520,34 @@ class BPE_RLE_Tokenizer:
                 # If partial tokens across chunk boundaries matter,
                 # you'd do more advanced leftover handling here.
 
+def apply_alignment_to_channels(channel_array, alignment_positions, combine_mode="first"):
+    """
+    channel_array: a list/array of shape [num_original_tokens].
+    alignment_positions: the list of lists that we saved/loaded from "my_alignment_positions.txt"
+    combine_mode: how we combine multiple original channel values that merged together.
+                  Could be "first", "mean", "sum", etc.
+
+    Returns: final_channel_array (length = len(alignment_positions))
+    """
+    final_channels = []
+    for pos_list in alignment_positions:
+        if not isinstance(pos_list, list):
+            pos_list = [pos_list]
+
+        values = [channel_array[p] for p in pos_list]
+
+        if combine_mode == "first":
+            final_val = values[0]
+        elif combine_mode == "mean":
+            final_val = sum(values) / len(values)
+        elif combine_mode == "sum":
+            final_val = sum(values)
+        else:
+            raise ValueError("Unknown combine_mode")
+
+        final_channels.append(final_val)
+
+    return final_channels
 
 def main():
     # Example usage:

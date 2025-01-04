@@ -9,13 +9,15 @@ from torch.ao.quantization.backend_config.onednn import rnn_op_dtype_configs
 from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
-
+import boto3
 from tokenizer import BPE_RLE_Tokenizer as Tokenizer
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+
+from tokenizer2 import apply_alignment_to_channels
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
@@ -217,52 +219,171 @@ class GPT(nn.Module):
 
 
 class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes):
+    def __init__(self, B, T, process_rank, num_processes,
+                 bucket_name='dataframes--use1-az6--x-s3', s3_prefix='output/'):
+        """
+        Args:
+            B: Batch size
+            T: Sequence length
+            process_rank: (DDP) process rank
+            num_processes: total number of processes (DDP)
+            bucket_name: S3 bucket name
+            s3_prefix: the directory/prefix inside the bucket where data files live
+        """
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        # 1) load token file
-        with open('quantized_coeffs.txt', 'r') as f:
+        self.total_num_tokens = 0
+        # Create S3 client; adapt as needed.
+        self.s3 = boto3.client('s3')
+
+        # 1) Find all *_coeffs.txt files in s3_prefix using a paginator to handle large listings
+        paginator = self.s3.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix)
+
+        all_files = []
+        page_num = 0
+        for page in page_iterator:
+            page_num += 1
+            contents = page.get('Contents', [])
+            print(f"Processing page {page_num} with {len(contents)} items ...")
+            for obj in contents:
+                key = obj['Key']
+                if key.endswith('_coeffs.txt'):
+                    all_files.append(key)
+            print(f"  -> Accumulated so far: {len(all_files)} files.")
+
+        print(f"Total number of *_coeffs.txt files found: {len(all_files)}")
+
+        # Optionally sort or shuffle.
+        # For demonstration, let's keep them all but limit to 10 in code for testing:
+        all_files = all_files
+
+        # 2) Prepare a list of file pairs: (coeffs_file, channels_file)
+        self.file_pairs = []
+        for coeffs_key in all_files:
+            channels_key = coeffs_key.replace('_coeffs.txt', '_channels.txt')
+            try:
+                self.s3.head_object(Bucket=bucket_name, Key=channels_key)
+                self.file_pairs.append((coeffs_key, channels_key))
+            except:
+                # If the channels file doesn't exist, skip it
+                pass
+
+        if len(self.file_pairs) == 0:
+            raise ValueError("No valid coeffs/channels file pairs found in S3 prefix.")
+
+        # Load up a tokenizer once (or pass it in)
+        self.tokenizer = Tokenizer()
+        self.tokenizer.load_merges("neo_tokenizer/merges.json")
+        self.tokenizer.load_vocab("neo_tokenizer/vocab.json")
+
+        self.bucket_name = bucket_name
+        self.s3_prefix = s3_prefix
+
+        # Initialize state
+        self.current_file_idx = 0  # which pair of files we are on
+        self.tokens = None
+        self.channels = None
+        self.current_position = 0
+
+        # Load the first file
+        self._load_current_file()
+
+    def _download_s3_file(self, key, local_path):
+        """Download a single key from S3 to a local path."""
+        self.s3.download_file(self.bucket_name, key, local_path)
+
+    def _load_current_file(self):
+        """
+        Download the current file pair from S3, tokenize and store in self.tokens / self.channels.
+        Reset self.current_position for the new file. Then remove local files.
+        """
+        coeffs_key, channels_key = self.file_pairs[self.current_file_idx]
+
+        # In production, you might want to store these in /tmp
+        coeffs_local = os.path.basename(coeffs_key)
+        channels_local = os.path.basename(channels_key)
+
+        # Download both files from S3
+        self._download_s3_file(coeffs_key, coeffs_local)
+        self._download_s3_file(channels_key, channels_local)
+
+        # Read & tokenize coeffs
+        with open(coeffs_local, 'r', encoding='utf-8') as f:
             text = f.read()
-        # tokenize
-        tokenizer = Tokenizer()
-        tokenizer.load_merges("neo_tokenizer/merges.json")
-        tokenizer.load_vocab("neo_tokenizer/vocab.json")
-        encoded = tokenizer.encode(text.strip().split(), as_ids=True)
-        self.tokens = torch.tensor(encoded)
+        # Convert text to a list of tokens (words) and prepend the special token
+        raw_tokens = text.strip().split()
+        raw_tokens.insert(0, "|trial|")  # <-- add the special token here
 
-        # 2) load channel file
-        with open('final_channels.txt', 'r') as f:
+        # Now encode with alignment
+        encoded, pos = self.tokenizer.encode_with_alignment(raw_tokens, as_ids=True)
+        self.total_num_tokens += len(encoded)
+        self.tokens = torch.tensor(encoded, dtype=torch.long)
+
+        # Read channels
+        with open(channels_local, 'r', encoding='utf-8') as f:
             chan_text = f.read().strip().split()
-        # Convert e.g. '1' -> 0, '2' -> 1
-        self.channels = torch.tensor([int(x)-1 for x in chan_text])
+            chan_text.insert(0, "1")  # or "0", or whichever makes sense
+            final_channels = apply_alignment_to_channels(chan_text, pos, combine_mode="first")
+            chan_text = final_channels
 
-        print(f"Loaded {len(self.tokens)} tokens")
-        print(f"Loaded {len(self.channels)} channel-ids")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
-        assert len(self.tokens) == len(self.channels), "Token count != channel count!"
+        # Convert e.g. '1'->0, '2'->1, ...
+        self.channels = torch.tensor([int(x) - 1 for x in chan_text], dtype=torch.long)
 
+        # Make sure length matches
+        if len(self.tokens) != len(self.channels):
+            raise ValueError("tokens and channels length mismatch!")
+
+        # Cleanup local files now that we've read them
+        try:
+            os.remove(coeffs_local)
+        except OSError:
+            pass
+        try:
+            os.remove(channels_local)
+        except OSError:
+            pass
+
+        # Reset position for the fresh file
         self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
+        """
+        Fetch the next batch of data: (x, c, y)
+          - x, c: the input tokens and channel IDs
+          - y: the target tokens for cross-entropy
+        If the current file is exhausted, move to the next file.
+        """
         B, T = self.B, self.T
+
         start = self.current_position
-        end   = self.current_position + B * T + 1
+        end = self.current_position + B * T + 1
 
         buf_tokens = self.tokens[start:end]
         buf_channels = self.channels[start:end]
 
-        x = buf_tokens[:-1].view(B, T)  # (B, T)
-        y = buf_tokens[1:].view(B, T)   # (B, T)
+        # If we don't have enough tokens to form a full batch, move to the next file and try again.
+        if len(buf_tokens) < B * T + 1:
+            self.current_file_idx = (self.current_file_idx + 1) % len(self.file_pairs)
+            self._load_current_file()
+            return self.next_batch()
 
-        c = buf_channels[:-1].view(B, T)  # (B, T) for the channel IDs
-        # we won't shift c by 1, because the channel "belongs" to the same token that we feed in
+        # x, y, c
+        x = buf_tokens[:-1].view(B, T)
+        y = buf_tokens[1:].view(B, T)
+        c = buf_channels[:-1].view(B, T)
 
+        # Advance the position
         self.current_position += B * T * self.num_processes
-        if self.current_position + (B*T * self.num_processes +1) > len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank
 
+        # If next batch goes out of range, switch to the next file.
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_file_idx = (self.current_file_idx + 1) % len(self.file_pairs)
+            self._load_current_file()
+        print(self.total_num_tokens)
+        print(self.current_file_idx,"/",len(self.file_pairs))
         return x, c, y
 
 
@@ -270,9 +391,9 @@ class DataLoaderLite:
 
 
 
-total_batch_size = 133632
-B = 2
-T = 522
+total_batch_size = 47090
+B = 4
+T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
