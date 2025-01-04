@@ -376,7 +376,7 @@ for step in range(max_steps):
     for mico_step in range(grad_accum_steps):
         x, c, y = train_loader.next_batch()
         x, c, y = x.to(device), c.to(device), y.to(device)
-        if device == 'cuda':
+        if device == 'cuda' and False:
             with torch.autocast(device_type=device,dtype=torch.bfloat16):
                 logits, loss = model(idx=x, channel_idx=c, targets=y)
         else:
