@@ -523,7 +523,8 @@ class BPE_RLE_Tokenizer:
 
 def main():
     # Example usage:
-    large_text_file = s3.get_object(Bucket="dataframes--use1-az6--x-s3", Key="combined_coeffs.txt")["Body"].read().decode("utf-8")
+    # large_text_file = s3.get_object(Bucket="dataframes--use1-az6--x-s3", Key="combined_coeffs.txt")["Body"].read().decode("utf-8")
+    large_text_file = 'coeffs_combined.txt'
     tokenizer = BPE_RLE_Tokenizer()
 
     # 1) TRAIN BPE merges on a large file in streaming mode
