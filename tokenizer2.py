@@ -2,9 +2,12 @@ import collections
 import sys
 import os
 import json
+
 from tqdm import tqdm
 
+import boto3
 
+s3 = boto3.client('s3')
 def read_tokens_in_chunks(filepath, chunk_size=1024 * 1024):
     """
     Generator that reads a large file in stream fashion and yields tokens in
@@ -520,7 +523,7 @@ class BPE_RLE_Tokenizer:
 
 def main():
     # Example usage:
-    large_text_file = 'all_coeffs.txt'
+    large_text_file = s3.get_object(Bucket="dataframes--use1-az6--x-s3", Key="combined_coeffs.txt")["Body"].read().decode("utf-8")
     tokenizer = BPE_RLE_Tokenizer()
 
     # 1) TRAIN BPE merges on a large file in streaming mode
