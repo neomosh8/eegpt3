@@ -175,12 +175,6 @@ class GPT(nn.Module):
             # Make sure channel_idx is the same shape as idx
             # channel_idx must be in [0..num_channels-1]
             cha_emb = self.transformer.wce(channel_idx)  # (B, T, n_embd)
-            # Before the problematic addition, add this:
-            debug_tensor_info({
-                'tok_emb': tok_emb,
-                'pos_emb': pos_emb,
-                'cha_emb': cha_emb
-            })
             x = tok_emb + pos_emb + cha_emb
         else:
             # fallback if no channel_idx is provided
@@ -222,44 +216,7 @@ class GPT(nn.Module):
         return optimizer
 
 
-def debug_tensor_info(tensor_dict):
-    """
-    Safely print debug information for multiple tensors.
-    Args:
-        tensor_dict: Dictionary of tensor names and their corresponding tensors
-    """
-    print("\n=== Tensor Debug Information ===")
-    for name, tensor in tensor_dict.items():
-        print(f"\n{name}:")
 
-        # Basic info that should be safe to access
-        try:
-            print(f"  Shape: {tensor.shape}")
-        except:
-            print("  Could not get shape")
-
-        try:
-            print(f"  Device: {tensor.device}")
-        except:
-            print("  Could not get device")
-
-        try:
-            print(f"  Dtype: {tensor.dtype}")
-        except:
-            print("  Could not get dtype")
-
-        # Try to safely check a small sample of values
-        try:
-            # Copy a small sample to CPU first
-            sample = tensor.detach().cpu()[:2, :2, :2].flatten()
-            print(f"  Sample values (first few): {sample}")
-
-            # Check if sample contains any inf or very large values
-            if torch.any(torch.abs(sample) > 1e6):
-                print("  Warning: Very large values detected in sample!")
-
-        except Exception as e:
-            print(f"  Could not safely sample values: {str(e)}")
 
 class DataLoaderLite:
     def __init__(self, B, T, process_rank, num_processes,
@@ -435,8 +392,8 @@ class DataLoaderLite:
 
 
 total_batch_size = 49152
-B = 4
-T = 1024
+B = 2
+T = 512
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
