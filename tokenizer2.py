@@ -528,7 +528,7 @@ def main():
 
     # 1) TRAIN BPE merges on a large file in streaming mode
     #    We learn the top 4000 bigrams, with a 1MB chunk size (adjust as needed).
-    merges = tokenizer.train(large_text_file, num_merges=4000, chunk_size=1024 * 1024)
+    merges = tokenizer.train(large_text_file, num_merges=4000, chunk_size=4*4096 * 4*4096)
     tokenizer.save_merges("neo_tokenizer/merges.json")
 
     # 2) Demonstrate how you'd build the vocab using a (relatively small) snippet
