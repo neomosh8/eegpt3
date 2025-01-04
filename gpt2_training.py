@@ -358,7 +358,7 @@ torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B//8, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+val_loader = DataLoaderLite(B=1/ddp_world_size, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
