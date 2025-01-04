@@ -487,30 +487,28 @@ def save_channels_as_text(channel_array, output_filepath):
 
 def main():
     # Example usage:
-    filepath = 'all_coeffs.txt'
+    filepath = 'quantized_coeffs.txt'
     tokens = read_tokens_from_file(filepath)
     print("num of tokens: ",len(tokens))
-    tokenizer = BPE_RLE_Tokenizer()
-    merges = tokenizer.train(tokens,num_merges=4000)
-    tokenizer.save_merges("neo_tokenizer/merges.json")
-    final_tokens = tokenizer.encode(tokens)  # by default returns strings with BPE+RLE
-    tokenizer.build_vocab(final_tokens, add_unk=True)
-    tokenizer.save_vocab("neo_tokenizer/vocab.json")
+    # tokenizer = BPE_RLE_Tokenizer()
+    # merges = tokenizer.train(tokens,num_merges=4000)
+    # tokenizer.save_merges("neo_tokenizer/merges.json")
+    # final_tokens = tokenizer.encode(tokens)  # by default returns strings with BPE+RLE
+    # tokenizer.build_vocab(final_tokens, add_unk=True)
+    # tokenizer.save_vocab("neo_tokenizer/vocab.json")
     # final_rle_tokens, final_rle_positions = tokenizer.encode_with_alignment(tokens)
     # # Save
     # tokenizer.save_alignment(final_rle_positions, "my_alignment_positions.txt")
+    tokenizer = BPE_RLE_Tokenizer()
+    tokenizer.load_merges("neo_tokenizer/merges.json")
+    tokenizer.load_vocab("neo_tokenizer/vocab.json")
+    keke= tokenizer.encode(tokens,as_ids=True)
+    final_rle_tokens, final_rle_positions = tokenizer.encode_with_alignment(tokens)
+    tokenizer.save_alignment(final_rle_positions, "my_alignment_positions.txt")
+    final_channels = apply_alignment_to_channels(tokens, final_rle_positions, combine_mode="first")
+    save_channels_as_text(final_channels, 'final_channels.txt')
 
-
-    tokens_as_ids = tokenizer.encode(tokens[0:30], as_ids=True)
-    print(tokens_as_ids)
-    decoded_tokens = tokenizer.decode(tokens_as_ids, from_ids=True)
-    print(decoded_tokens)
-
-    if tokens[0:30] == decoded_tokens:
-        print("GOOD!")
-    else:
-        print("RIDI")
-
+    print(len(final_channels),len(keke))
     # raw_channels = read_tokens_from_file('quantized_channels.txt')
     #
     # assert len(raw_channels) == len(tokens), "Mismatch!"
@@ -521,6 +519,5 @@ def main():
     # print("Original length:", len(tokens))
     # print("Final length after merges/RLE:", len(final_rle_tokens), len(final_channels))
 
-    b=6
 if __name__ == "__main__":
     main()
