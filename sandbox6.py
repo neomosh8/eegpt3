@@ -2,42 +2,49 @@ import math
 import matplotlib.pyplot as plt
 
 max_lr = 3e-4
-min_lr = 1e-6
-warmup_steps = 150
-max_steps = 5000
+min_lr = 3e-6
+warmup_steps = 220
+max_steps = 1175
 
 
-def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps,
-                         scale_factor=1.5, dynamic_boost=1, power=5):
+def get_lr_exponential_decay(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
     """
-    Calculate the learning rate for a given iteration with dynamic range adjustments.
+    Calculate the learning rate for a given iteration using simple exponential decay.
 
     Parameters:
         it (int): Current iteration.
-        max_lr (float): Maximum learning rate.
-        min_lr (float): Minimum learning rate.
+        max_lr (float): Initial maximum learning rate.
+        min_lr (float): Minimum learning rate after decay.
         warmup_steps (int): Number of warmup steps.
         max_steps (int): Total number of steps.
-        scale_factor (float): Factor to scale the cosine frequency.
-        dynamic_boost (float): Boost factor for increasing the dynamic range.
-        power (float): Power to amplify the decay effect.
 
     Returns:
         float: Learning rate at the given iteration.
     """
     if it < warmup_steps:
-        return max_lr * (it + 1) / warmup_steps
-    if it > max_steps:
-        return min_lr
+        # Linear warmup
+        lr = max_lr * (it + 1) / warmup_steps
+    elif it > max_steps:
+        # After max_steps, maintain min_lr
+        lr = min_lr
+    else:
+        # Exponential decay
+        decay_steps = it - warmup_steps
+        total_decay_steps = max_steps - warmup_steps
 
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
-    coeff = (0.5 * (1 + math.cos(math.pi * decay_ratio * scale_factor)) * dynamic_boost) ** power
-    return min_lr + coeff * (max_lr - min_lr)
+        # Calculate decay rate to reach min_lr at max_steps
+        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
 
+        # Apply exponential decay
+        lr = max_lr * math.exp(decay_rate * decay_steps)
+
+        # Ensure lr does not go below min_lr
+        lr = max(lr, min_lr)
+
+    return lr
 # Generate learning rate values for iterations
 iterations = list(range(0, max_steps))
-learning_rates = [get_lr_dynamic_range(it) for it in iterations]
+learning_rates = [get_lr_exponential_decay(it) for it in iterations]
 
 # Plot the learning rate schedule
 plt.figure(figsize=(10, 6))
@@ -48,3 +55,5 @@ plt.title("Learning Rate Schedule with Increased Dynamic Range")
 plt.grid(True)
 plt.legend()
 plt.show()
+
+

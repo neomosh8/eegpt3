@@ -371,20 +371,45 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 3e-4
-min_lr = 1e-6
+min_lr = 3e-6
 warmup_steps = 220
 max_steps = 1175
 
-def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps, scale_factor=1.5, dynamic_boost=1.2, power=5):
-    if it < warmup_steps:
-        return max_lr * (it + 1) / warmup_steps
-    if it > max_steps:
-        return min_lr
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
+    """
+    Calculate the learning rate for a given iteration using simple exponential decay.
 
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
-    coeff = (0.5 * (1 + math.cos(math.pi * decay_ratio * scale_factor)) * dynamic_boost) ** power
-    return min_lr + coeff * (max_lr - min_lr)
+    Parameters:
+        it (int): Current iteration.
+        max_lr (float): Initial maximum learning rate.
+        min_lr (float): Minimum learning rate after decay.
+        warmup_steps (int): Number of warmup steps.
+        max_steps (int): Total number of steps.
+
+    Returns:
+        float: Learning rate at the given iteration.
+    """
+    if it < warmup_steps:
+        # Linear warmup
+        lr = max_lr * (it + 1) / warmup_steps
+    elif it > max_steps:
+        # After max_steps, maintain min_lr
+        lr = min_lr
+    else:
+        # Exponential decay
+        decay_steps = it - warmup_steps
+        total_decay_steps = max_steps - warmup_steps
+
+        # Calculate decay rate to reach min_lr at max_steps
+        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
+
+        # Apply exponential decay
+        lr = max_lr * math.exp(decay_rate * decay_steps)
+
+        # Ensure lr does not go below min_lr
+        lr = max(lr, min_lr)
+
+    return lr
 
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
@@ -458,7 +483,7 @@ for step in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
-    lr = get_lr_dynamic_range(step)
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr']=lr
     optimizer.step()
