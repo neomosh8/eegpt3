@@ -1,14 +1,14 @@
 import math
 import matplotlib.pyplot as plt
 
-# Parameters
-max_lr = 3e-3
-min_lr = 4e-6
-warmup_steps = 100
-max_steps = 2400
+max_lr = 3e-4
+min_lr = 1e-6
+warmup_steps = 150
+max_steps = 5000
 
-# Function definition
-def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps, scale_factor=1.5, dynamic_boost=1.2, power=5):
+
+def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps,
+                         scale_factor=1.5, dynamic_boost=1, power=5):
     """
     Calculate the learning rate for a given iteration with dynamic range adjustments.
 
@@ -36,7 +36,7 @@ def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_s
     return min_lr + coeff * (max_lr - min_lr)
 
 # Generate learning rate values for iterations
-iterations = list(range(0, 2301))
+iterations = list(range(0, max_steps))
 learning_rates = [get_lr_dynamic_range(it) for it in iterations]
 
 # Plot the learning rate schedule
