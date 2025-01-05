@@ -211,11 +211,13 @@ class GPT(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors {len(decay_params)} , with {num_decay_params:,} parameters ")
-        print(f"num non-decayed parameter tensors {len(nodecay_params)} , with {num_nodecay_params:,} parameters ")
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and 'cuda' in device
-        print(f"using fused AdamW: {use_fused}")
+        if master_process:
+            print(f"num decayed parameter tensors {len(decay_params)} , with {num_decay_params:,} parameters ")
+            print(f"num non-decayed parameter tensors {len(nodecay_params)} , with {num_nodecay_params:,} parameters ")
+            print(f"using fused AdamW: {use_fused}")
+
         optimizer = torch.optim.AdamW(optim_groups,lr=learning_rate,betas=(0.9,0.95),eps=1e-8,fused=use_fused)
         return optimizer
 
@@ -367,9 +369,9 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 3e-4
+max_lr = 3e-3
 min_lr = max_lr*0.1
-warmup_steps = 1000
+warmup_steps = 900
 max_steps = 21360
 
 def get_lr(it):
@@ -385,6 +387,14 @@ def get_lr(it):
 
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
+
+# create the log directory we will write checkpoints to and log to
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
+
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
@@ -406,7 +416,20 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
             model.train()
+        if step > 0 and (step % 5000 == 0 or last_step):
+            # optionally write model checkpoints
+            checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'config': raw_model.config,
+                'step': step,
+                'val_loss': val_loss_accum.item(),
+                'optimizer_state':optimizer.state_dict()
+            }
+            torch.save(checkpoint, checkpoint_path)
 
     optimizer.zero_grad()
     loss_accum = 0.0
@@ -437,7 +460,8 @@ for step in range(max_steps):
     token_per_second = tokens_processed/dt
     if master_process:
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
-
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 if ddp:
     destroy_process_group()
 
