@@ -369,8 +369,8 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = max_lr*0.1
-warmup_steps = 7
-max_steps = 500
+warmup_steps = 1000
+max_steps = 21360
 
 def get_lr(it):
     if it<warmup_steps:
