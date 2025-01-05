@@ -6,6 +6,7 @@ import inspect
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
+from matplotlib import pyplot as plt
 from torch.ao.quantization.backend_config.onednn import rnn_op_dtype_configs
 from torch.nn import functional as F
 import numpy as np
@@ -360,7 +361,7 @@ torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B//4, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+val_loader = DataLoaderLite(B=B//2, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -387,6 +388,12 @@ def get_lr(it):
 
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
+
+# keep track of losses to plot later  ### ADDED LINES ###
+train_losses = []
+val_losses   = []
+train_steps  = []
+val_steps    = []
 
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
@@ -417,7 +424,11 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
+                val_loss_val = val_loss_accum.item()
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                # update val_losses and steps  ### ADDED LINES ###
+                val_losses.append(val_loss_val)
+                val_steps.append(step)
             model.train()
         if step > 0 and (step % 5000 == 0 or last_step):
             # optionally write model checkpoints
@@ -461,7 +472,25 @@ for step in range(max_steps):
     if master_process:
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
+            train_loss_val = loss_accum.item()
+            f.write(f"{step} train {train_loss_val:.6f}\n")
+        # update train_losses and steps  ### ADDED LINES ###
+        train_losses.append(train_loss_val)
+        train_steps.append(step)
+        # Plot every 50 steps  ### ADDED LINES ###
+        if step % 50 == 0:
+            plt.figure(figsize=(10, 6))
+            plt.plot(train_steps, train_losses, label='Train Loss')
+            plt.plot(val_steps, val_losses, label='Val Loss')
+            plt.xlabel('Steps')
+            plt.ylabel('Loss')
+            plt.title('Training and Validation Loss')
+            plt.legend()
+            plt.grid(True)
+            # Save a single PNG (overwrites each time)
+            png_path = os.path.join(log_dir, "loss_plot.png")
+            plt.savefig(png_path)
+            plt.close()
 if ddp:
     destroy_process_group()
 
