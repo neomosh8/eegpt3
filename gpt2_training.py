@@ -122,7 +122,7 @@ class GPTConfig:
     vocab_size: int = 4140  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 48  # Number of transformer layers
     n_head: int = 25  # Number of attention heads
-    n_embd: int = 1600
+    n_embd: int = 1600 #Big Model
     # n_layer: int = 12 # number of layers
     # n_head: int = 12 # number of heads
     # n_embd: int = 768 # embedding dimension
