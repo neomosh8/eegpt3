@@ -120,12 +120,12 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024  # max sequence length
     vocab_size: int = 4140  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    # n_layer: int = 48  # Number of transformer layers
-    # n_head: int = 25  # Number of attention heads
-    # n_embd: int = 1600
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    n_layer: int = 48  # Number of transformer layers
+    n_head: int = 25  # Number of attention heads
+    n_embd: int = 1600
+    # n_layer: int = 12 # number of layers
+    # n_head: int = 12 # number of heads
+    # n_embd: int = 768 # embedding dimension
     num_channels: int = 2  # channel number
 
 
@@ -361,7 +361,7 @@ torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B//2, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+val_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -411,12 +411,12 @@ for step in range(max_steps):
         val_loader.reset()
         with torch.no_grad():
             val_loss_accum = 0.0
-            val_loss_steps = 10
+            val_loss_steps = 100
             for _ in range(val_loss_steps):
                 x_val, c_val, y_val = val_loader.next_batch()
                 x_val, c_val, y_val = x_val.to(device), c_val.to(device), y_val.to(device)
-                # with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                logits, loss = model(x_val, c_val, y_val)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x_val, c_val, y_val)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
@@ -426,7 +426,6 @@ for step in range(max_steps):
             with open(log_file, "a") as f:
                 val_loss_val = val_loss_accum.item()
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-                # update val_losses and steps  ### ADDED LINES ###
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
         if step > 0 and (step % 5000 == 0 or last_step):
@@ -446,7 +445,7 @@ for step in range(max_steps):
     for mico_step in range(grad_accum_steps):
         x, c, y = train_loader.next_batch()
         x, c, y = x.to(device), c.to(device), y.to(device)
-        if device == 'cuda' and False:
+        if device == 'cuda':
             with torch.autocast(device_type=device,dtype=torch.bfloat16):
                 logits, loss = model(idx=x, channel_idx=c, targets=y)
         else:
