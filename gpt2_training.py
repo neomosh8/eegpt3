@@ -429,7 +429,6 @@ for step in range(max_steps):
                 # update val_losses and steps  ### ADDED LINES ###
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-            model.train()
         if step > 0 and (step % 5000 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
@@ -441,7 +440,7 @@ for step in range(max_steps):
                 'optimizer_state':optimizer.state_dict()
             }
             torch.save(checkpoint, checkpoint_path)
-
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for mico_step in range(grad_accum_steps):
