@@ -349,7 +349,7 @@ class DataLoaderLite:
 
 
 total_batch_size = 65536
-B = 8
+B = 16
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -406,7 +406,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 250 == 0 or last_step:
+    if step % 50 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
