@@ -348,7 +348,7 @@ class DataLoaderLite:
         self._load_shard(self.shard_files[self.current_shard_idx])
 
 
-total_batch_size = 655360
+total_batch_size = 2*655360
 B = 32
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
