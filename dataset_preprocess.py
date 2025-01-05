@@ -8,8 +8,7 @@ import torch
 from pathlib import Path
 from typing import List
 
-from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer,apply_alignment_to_channels
-
+from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer, apply_alignment_to_channels
 
 
 def download_and_preprocess_s3(
@@ -66,8 +65,7 @@ def download_and_preprocess_s3(
     val_count = int(len(file_pairs) * val_ratio)
     val_pairs = file_pairs[:val_count]
     train_pairs = file_pairs[val_count:]
-    print(f"Total pairs: {len(file_pairs)} | "
-          f"Train: {len(train_pairs)} | Val: {len(val_pairs)}")
+    print(f"Total pairs: {len(file_pairs)} | Train: {len(train_pairs)} | Val: {len(val_pairs)}")
 
     # Load tokenizer
     tokenizer = Tokenizer()
@@ -79,13 +77,16 @@ def download_and_preprocess_s3(
         shard_id = 0
         total_pairs = len(pairs)
         for i, (coeffs_key, channels_key) in enumerate(pairs, start=1):
-            # Download local
             print(f"[{split_name.upper()}] Processing pair {i}/{total_pairs}:")
             print(f"  - Coeffs: {coeffs_key}")
             print(f"  - Channels: {channels_key}")
+
+            # Download local
             coeffs_local = os.path.join(local_data_dir, os.path.basename(coeffs_key))
             channels_local = os.path.join(local_data_dir, os.path.basename(channels_key))
+            print("  - Downloading coeffs file...")
             s3.download_file(bucket_name, coeffs_key, coeffs_local)
+            print("  - Downloading channels file...")
             s3.download_file(bucket_name, channels_key, channels_local)
 
             # Read & tokenize
@@ -109,14 +110,16 @@ def download_and_preprocess_s3(
             # Save shard
             shard_path = os.path.join(local_data_dir, f"{shard_prefix}_{split_name}_{shard_id}.pt")
             torch.save({'tokens': tokens_tensor, 'channels': channels_tensor}, shard_path)
+            print(f"  - Shard saved: {shard_path}")
             shard_id += 1
 
             # Clean up
             try:
                 os.remove(coeffs_local)
                 os.remove(channels_local)
-            except OSError:
-                pass
+                print("  - Temporary files removed.")
+            except OSError as e:
+                print(f"  - Error removing temporary files: {e}")
 
         print(f"Saved {shard_id} {split_name} shards.")
 
@@ -126,10 +129,11 @@ def download_and_preprocess_s3(
 
     print("Finished preprocessing.")
 
+
 if __name__ == "__main__":
     BUCKET_NAME = "dataframes--use1-az6--x-s3"
-    S3_PREFIX   = "output/"
-    LOCAL_DIR   = "./local_shards"
+    S3_PREFIX = "output/"
+    LOCAL_DIR = "./local_shards"
 
     download_and_preprocess_s3(
         bucket_name=BUCKET_NAME,
