@@ -348,7 +348,7 @@ class DataLoaderLite:
         self._load_shard(self.shard_files[self.current_shard_idx])
 
 
-total_batch_size = 65536
+total_batch_size = 655360
 B = 16
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
@@ -370,10 +370,10 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 3e-3
+max_lr = 3e-4
 min_lr = max_lr*0.1
 warmup_steps = 900
-max_steps = 21360
+max_steps = 2400
 
 def get_lr(it):
     if it<warmup_steps:
