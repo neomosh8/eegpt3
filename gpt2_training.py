@@ -348,8 +348,8 @@ class DataLoaderLite:
         self._load_shard(self.shard_files[self.current_shard_idx])
 
 
-total_batch_size = 3*655360
-B = 24
+total_batch_size = 2*655360
+B = 16
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -372,8 +372,8 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = 1e-6
-warmup_steps = 150
-max_steps = 772
+warmup_steps = 220
+max_steps = 1175
 
 def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps, scale_factor=1.5, dynamic_boost=1.2, power=5):
     if it < warmup_steps:
@@ -428,7 +428,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 2500 == 0 or last_step):
+        if step > 0 and (step % 588 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
