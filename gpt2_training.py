@@ -370,9 +370,9 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 3e-4
+max_lr = 3e-3
 min_lr = max_lr*0.1
-warmup_steps = 900
+warmup_steps = 100
 max_steps = 2400
 
 def get_lr(it):
