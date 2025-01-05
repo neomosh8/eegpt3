@@ -371,19 +371,19 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 3e-3
-min_lr = max_lr*0.1
+min_lr = 4e-6
 warmup_steps = 100
 max_steps = 2400
 
-def get_lr(it):
-    if it<warmup_steps:
-        return max_lr * (it+1) / warmup_steps
+def get_lr_dynamic_range(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=100, max_steps=2400, scale_factor=1.5, dynamic_boost=1.2, power=5):
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
     if it > max_steps:
         return min_lr
 
-    decay_ratio = ( it - warmup_steps ) / (max_steps - warmup_steps)
-    assert 0<=decay_ratio<=1
-    coeff = 0.5  * (1 + math.cos(math.pi * decay_ratio))
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = (0.5 * (1 + math.cos(math.pi * decay_ratio * scale_factor)) * dynamic_boost) ** power
     return min_lr + coeff * (max_lr - min_lr)
 
 
@@ -458,7 +458,7 @@ for step in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
-    lr = get_lr(step)
+    lr = get_lr_dynamic_range(step)
     for param_group in optimizer.param_groups:
         param_group['lr']=lr
     optimizer.step()
