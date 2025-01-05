@@ -35,8 +35,9 @@ def download_and_preprocess_s3(
     page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=s3_prefix)
 
     all_files = []
-    for page in page_iterator:
+    for page_index, page in enumerate(page_iterator, start=1):
         contents = page.get('Contents', [])
+        print(f"[Page {page_index}] Found {len(contents)} items in this S3 page.")  # Added print
         for obj in contents:
             key = obj['Key']
             if key.endswith('_coeffs.txt'):
@@ -76,8 +77,12 @@ def download_and_preprocess_s3(
     # Helper to process and save a list of pairs
     def process_split(pairs, split_name):
         shard_id = 0
-        for coeffs_key, channels_key in pairs:
+        total_pairs = len(pairs)
+        for i, (coeffs_key, channels_key) in enumerate(pairs, start=1):
             # Download local
+            print(f"[{split_name.upper()}] Processing pair {i}/{total_pairs}:")
+            print(f"  - Coeffs: {coeffs_key}")
+            print(f"  - Channels: {channels_key}")
             coeffs_local = os.path.join(local_data_dir, os.path.basename(coeffs_key))
             channels_local = os.path.join(local_data_dir, os.path.basename(channels_key))
             s3.download_file(bucket_name, coeffs_key, coeffs_local)
