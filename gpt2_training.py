@@ -457,7 +457,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 100 == 0 or last_step):
+        if step > 0 and (step % 2000 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
