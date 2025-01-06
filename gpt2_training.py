@@ -13,6 +13,8 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
+
+from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
 # run the training loop
@@ -376,6 +378,7 @@ min_lr = 7e-6
 warmup_steps = 500
 max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 print("Max Steps: ",max_steps)
+max_steps = 100
 def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
@@ -455,7 +458,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 1000 == 0 or last_step):
+        if step > 0 and (step % 100 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
@@ -519,4 +522,9 @@ for step in range(max_steps):
 if ddp:
     destroy_process_group()
 
+upload_folder_to_s3(
+    local_folder_path="./log",
+    bucket_name="dataframes--use1-az6--x-s3",
+    s3_prefix="training/log"
+)
 import sys; sys.exit(0)
