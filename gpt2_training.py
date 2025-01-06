@@ -351,7 +351,7 @@ class DataLoaderLite:
         self._load_shard(self.shard_files[self.current_shard_idx])
 
 epoch_num = 4
-total_batch_size = 655360
+total_batch_size = 2*655360
 B = 16
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
@@ -375,9 +375,11 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = 7e-6
-warmup_steps = 500
+warmup_steps = (300000000//total_batch_size)
 max_steps = math.ceil(771479260/total_batch_size) * epoch_num
-print("Max Steps: ",max_steps)
+if master_process:
+    print("Max Steps: ",max_steps)
+
 def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
@@ -486,7 +488,7 @@ for step in range(max_steps):
         loss.backward()
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr']=lr

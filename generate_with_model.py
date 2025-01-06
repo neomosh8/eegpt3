@@ -163,7 +163,7 @@ device='cpu'
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 model = GPT(GPTConfig)
 
-checkpoint = torch.load('log/model_02944.pt', map_location=torch.device('cpu'),weights_only=False)
+checkpoint = torch.load('log/model_00099.pt', map_location=torch.device('cpu'),weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
