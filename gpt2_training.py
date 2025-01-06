@@ -201,27 +201,53 @@ class GPT(nn.Module):
                 targets.view(-1)
             )
         return logits, loss
-    def configure_optimizer(self,weight_decay,learning_rate,device):
-        param_dict = {pn:p for pn,p in self.named_parameters()}
-        param_dict = {pn:p for pn,p in param_dict.items() if p.requires_grad}
-        decay_params =  [p for n,p in param_dict.items() if p.dim() >= 2]
+    def configure_optimizer(
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        device: str,
+        master_process: bool = True,
+        # Optional Adafactor-specific hyperparameters:
+        beta2_decay: float = -0.8,
+        eps: Tuple[Optional[float], float] = (None, 1e-3),
+        d: float = 1.0,
+        maximize: bool = False,
+    ):
+        # 1. Collect all parameters that require grad
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        # 2. Separate parameters that get weight decay from those that don't
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
         optim_groups = [
-            {'params':decay_params,'weight_decay': weight_decay},
-            {'params':nodecay_params,'weight_decay':0.0}
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
         ]
+
+        # Optional: count parameters for logging
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' in device
         if master_process:
-            print(f"num decayed parameter tensors {len(decay_params)} , with {num_decay_params:,} parameters ")
-            print(f"num non-decayed parameter tensors {len(nodecay_params)} , with {num_nodecay_params:,} parameters ")
-            print(f"using fused AdamW: {use_fused}")
+            print(f"num decayed parameter tensors {len(decay_params)}, "
+                  f"with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors {len(nodecay_params)}, "
+                  f"with {num_nodecay_params:,} parameters")
 
-        optimizer = torch.optim.AdamW(optim_groups,lr=learning_rate,betas=(0.9,0.95),eps=1e-8,fused=use_fused)
+        # 3. Create the Adafactor optimizer
+        #    Replace AdamW arguments with Adafactor equivalents
+        optimizer = torch.optim.Adafactor(
+            optim_groups,
+            lr=learning_rate,
+            beta2_decay=beta2_decay,
+            eps=eps,
+            d=d,
+            weight_decay=weight_decay,  # This will apply only to 'decay_params'
+            maximize=maximize,
+        )
+
         return optimizer
-
 
 class DataLoaderLite:
     """
@@ -454,7 +480,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 588 == 0 or last_step):
+        if step > 0 and (step % 1000 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
