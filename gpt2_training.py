@@ -348,8 +348,8 @@ class DataLoaderLite:
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
 
-epoch_num = 5
-total_batch_size = 2*655360
+epoch_num = 3
+total_batch_size = 655360
 B = 16
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
@@ -373,7 +373,7 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = 7e-6
-warmup_steps = 220
+warmup_steps = 500
 max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 
 def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
@@ -464,10 +464,6 @@ for step in range(max_steps):
                 'step': step,
                 'val_loss': val_loss_accum.item(),
                 'optimizer_state':optimizer.state_dict(),
-                'rng_python': random.getstate(),
-                'rng_torch': torch.get_rng_state(),
-                'rng_torch_cuda': torch.cuda.get_rng_state_all(),
-                'rng_numpy': np.random.get_state(),
             }
             torch.save(checkpoint, checkpoint_path)
     model.train()
