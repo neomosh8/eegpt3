@@ -18,6 +18,7 @@ from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from typing import Union, Tuple, List, Optional
 
 from tokenizer2 import apply_alignment_to_channels
 
