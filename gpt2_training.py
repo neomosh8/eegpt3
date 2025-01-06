@@ -412,8 +412,8 @@ def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_step
     return lr
 
 
-# optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
-optimizer = torch.optim.Adafactor(weight_decay=0.1,lr=6e-4)
+optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
+# optimizer = torch.optim.Adafactor(weight_decay=0.1,lr=6e-4)
 
 # keep track of losses to plot later  ### ADDED LINES ###
 train_losses = []
