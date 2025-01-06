@@ -350,7 +350,7 @@ class DataLoaderLite:
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
 
-epoch_num = 4
+epoch_num = 10
 total_batch_size = 2*655360
 B = 16
 T = 1024
