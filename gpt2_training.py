@@ -1,6 +1,7 @@
 import glob
 import os
 import math
+import random
 import time
 import inspect
 from dataclasses import dataclass
@@ -51,9 +52,9 @@ else:
 # added after video, pytorch can be serious about it's device vs. device_type distinction
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-torch.manual_seed(1337)
+torch.manual_seed(9259)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
+    torch.cuda.manual_seed(9259)
 
 # -----------------------------------------------------------------------------
 
@@ -347,7 +348,7 @@ class DataLoaderLite:
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
 
-
+epoch_num = 5
 total_batch_size = 2*655360
 B = 16
 T = 1024
@@ -371,9 +372,9 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 3e-4
-min_lr = 8e-6
+min_lr = 7e-6
 warmup_steps = 220
-max_steps = 4000
+max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 
 def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
     """
@@ -462,7 +463,11 @@ for step in range(max_steps):
                 'config': raw_model.config,
                 'step': step,
                 'val_loss': val_loss_accum.item(),
-                'optimizer_state':optimizer.state_dict()
+                'optimizer_state':optimizer.state_dict(),
+                'rng_python': random.getstate(),
+                'rng_torch': torch.get_rng_state(),
+                'rng_torch_cuda': torch.cuda.get_rng_state_all(),
+                'rng_numpy': np.random.get_state(),
             }
             torch.save(checkpoint, checkpoint_path)
     model.train()
