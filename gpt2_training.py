@@ -350,7 +350,7 @@ class DataLoaderLite:
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
 
-epoch_num = 3
+epoch_num = 4
 total_batch_size = 655360
 B = 16
 T = 1024
@@ -378,7 +378,6 @@ min_lr = 7e-6
 warmup_steps = 500
 max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 print("Max Steps: ",max_steps)
-max_steps = 100
 def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
@@ -519,12 +518,12 @@ for step in range(max_steps):
             png_path = os.path.join(log_dir, "loss_plot.png")
             plt.savefig(png_path)
             plt.close()
+if master_process:
+    upload_folder_to_s3(
+        local_folder_path="./log",
+        bucket_name="dataframes--use1-az6--x-s3",
+        s3_prefix="training/log"
+    )
 if ddp:
     destroy_process_group()
 
-upload_folder_to_s3(
-    local_folder_path="./log",
-    bucket_name="dataframes--use1-az6--x-s3",
-    s3_prefix="training/log"
-)
-import sys; sys.exit(0)
