@@ -168,12 +168,12 @@ level = 2     # decomposition level; change as needed
 
 # File paths for saving coefficients and channel information
 # Right Hand
-coeffs_right_hand_path = "validation_datasets/right_hand_coeffs.txt"
-chans_right_hand_path = "validation_datasets/right_hand_channels.txt"
+coeffs_right_hand_path = "validation_datasets/right_hand_coeffs_1.txt"
+chans_right_hand_path = "validation_datasets/right_hand_channels_1.txt"
 
 # Feet
-coeffs_feet_path = "validation_datasets/feet_coeffs.txt"
-chans_feet_path = "validation_datasets/feet_channels.txt"
+coeffs_feet_path = "validation_datasets/feet_coeffs_1.txt"
+chans_feet_path = "validation_datasets/feet_channels_1.txt"
 
 # Function to process and save data
 def process_and_save(data, sps, coeffs_path, chans_path, wavelet, level, window_len):
@@ -222,7 +222,7 @@ def process_and_save(data, sps, coeffs_path, chans_path, wavelet, level, window_
 
 if __name__ == "__main__":
     # 1) Load the structured data from your .mat
-    mat_file_path = "S01T.mat"
+    mat_file_path = "S02T.mat"
     structured_data = load_structured_data(mat_file_path)
 
     # 2) Extract all samples corresponding to "right hand" trials.
