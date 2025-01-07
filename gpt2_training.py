@@ -123,10 +123,9 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 2048
     vocab_size: int = 4140
-    n_layer: int = 18
-    n_head: int = 24  # Increased from 16 to allow more parallel attention patterns
-    head_dim: int = 64  # Keep this reasonable (n_embd / n_head)
-    n_embd: int = 1536  # Increased to maintain head_dim with more heads
+    n_layer: int = 20
+    n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
+    n_embd: int = 2304  # Increased to maintain head_dim with more heads
     num_channels: int = 2
 
 
