@@ -377,7 +377,7 @@ max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*1.5):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*1.8):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 
