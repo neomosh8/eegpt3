@@ -1,13 +1,14 @@
 import math
 import matplotlib.pyplot as plt
 
+epoch_num = 10
+total_batch_size = 2*655360
 max_lr = 3e-4
-min_lr = 3e-6
-warmup_steps = 220
-max_steps = 1175
+min_lr = 7e-6
+warmup_steps = (300000000//total_batch_size)
+max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 
-
-def get_lr_exponential_decay(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
+def get_lr_exponential_decay(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=2*max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 

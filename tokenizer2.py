@@ -520,6 +520,84 @@ class BPE_RLE_Tokenizer:
                 # If partial tokens across chunk boundaries matter,
                 # you'd do more advanced leftover handling here.
 
+    def decode_with_alignment(self, encoded, channels, from_ids=False):
+        """
+        Decodes `encoded` tokens (or IDs) back to the raw tokens while also expanding the
+        `channels` array so that every decoded subtoken has the correct channel.
+
+        :param encoded: list of tokens (strings) or IDs (ints), exactly like in `decode(...)`.
+        :param channels: list of integers, same length as `encoded`, representing the channel
+                         for each encoded token.
+        :param from_ids: if True, interpret `encoded` as vocabulary IDs; else interpret as tokens.
+
+        :return: (decoded_tokens, expanded_channels)
+                 where decoded_tokens is the list of fully expanded raw tokens,
+                 and expanded_channels is a list of the same length, with the corresponding channel.
+        """
+
+        if len(encoded) != len(channels):
+            raise ValueError("encoded and channels must have the same length.")
+
+        # -------------------------------------------------------------------------
+        # Step 1: Convert IDs -> RLE tokens if needed
+        # -------------------------------------------------------------------------
+        if from_ids:
+            if not self.id2token:
+                raise ValueError("No reverse vocab found. Call build_vocab() or load_vocab() first.")
+            # Convert each ID back to its string token
+            rle_tokens = [self.id2token[i] for i in encoded]
+        else:
+            # Assume already string tokens
+            rle_tokens = encoded
+
+        # -------------------------------------------------------------------------
+        # Step 2: Run-length decode WITH channel expansion
+        # -------------------------------------------------------------------------
+        # We'll maintain two lists: `decoded_bpe_tokens` and `decoded_bpe_channels`.
+        decoded_bpe_tokens = []
+        decoded_bpe_channels = []
+
+        for token, ch in zip(rle_tokens, channels):
+            if token.startswith("R="):
+                # This indicates a run-length code, e.g. "R=3".
+                repeat_count = int(token.split("=")[1])
+                if not decoded_bpe_tokens:
+                    # This would be unusual, but we can handle or raise an error.
+                    raise ValueError("Encountered R=... but no previous token to repeat.")
+
+                # The last token/channel that was appended:
+                last_token = decoded_bpe_tokens[-1]
+                last_ch = decoded_bpe_channels[-1]
+
+                # We replicate that last token `repeat_count` more times
+                for _ in range(repeat_count):
+                    decoded_bpe_tokens.append(last_token)
+                    decoded_bpe_channels.append(last_ch)
+            else:
+                # A normal token
+                decoded_bpe_tokens.append(token)
+                decoded_bpe_channels.append(ch)
+
+        # -------------------------------------------------------------------------
+        # Step 3: Undo BPE merges WITH channel expansion
+        #         e.g. "A_B" => ["A", "B"], replicating the channel for both pieces
+        # -------------------------------------------------------------------------
+        final_tokens = []
+        final_channels = []
+        for token, ch in zip(decoded_bpe_tokens, decoded_bpe_channels):
+            if "_" in token:
+                # e.g. "D23_D44" => ["D23", "D44"]
+                sub_parts = token.split("_")
+                for sp in sub_parts:
+                    final_tokens.append(sp)
+                    final_channels.append(ch)
+            else:
+                final_tokens.append(token)
+                final_channels.append(ch)
+
+        return final_tokens, final_channels
+
+
 def apply_alignment_to_channels(channel_array, alignment_positions, combine_mode="first"):
     """
     channel_array: a list/array of shape [num_original_tokens].

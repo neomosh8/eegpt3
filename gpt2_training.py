@@ -121,15 +121,12 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024  # max sequence length
-    vocab_size: int = 4140  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 36          # number of transformer blocks
-    n_head: int = 20           # number of attention heads
-    n_embd: int = 1280         # embedding (hidden) dimension
-    # n_layer: int = 12 # number of layers
-    # n_head: int = 12 # number of heads
-    # n_embd: int = 768 # embedding dimension
-    num_channels: int = 2  # channel number
+    block_size: int = 1024
+    vocab_size: int = 4140
+    n_layer: int = 18
+    n_head: int = 12
+    n_embd: int = 768
+    num_channels: int = 2
 
 
 class GPT(nn.Module):
@@ -380,7 +377,7 @@ max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*2):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 

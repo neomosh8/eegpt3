@@ -18,7 +18,7 @@ from utils import (
 
 def main():
     # === 1. Load the CSV data ===
-    path = 'dataset/sub-000_task-proposer_run-1_eeg.csv'
+    path = 'dataset/sub-002_task-AudioCueWalkingStudy_run-12_eeg.csv'
     df = pd.read_csv(path)
     fs = int(calculate_sps(path))  # sampling rate (Hz)
     print(fs)
