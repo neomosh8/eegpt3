@@ -22,8 +22,8 @@ def main():
     df = pd.read_csv(path)
     fs = int(calculate_sps(path))  # sampling rate (Hz)
     print(fs)
-
-    num_samples_4sec = 1 * fs
+    fs = 128
+    num_samples_4sec = 2 * fs
     # Identify possible EEG channels
     all_columns = list(df.columns)
     exclude_cols = ['timestamp','VEOG','X','Y','Z',"EXG1","EXG2","EXG7","EXG8"]  # adjust as needed
