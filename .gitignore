@@ -19,3 +19,5 @@ final_channels.txt
 final_channels.txt
 /log
 goh
+/validation_datasets
+*.mat
