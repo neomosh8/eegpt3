@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+import time
 
-generate = False
+generate = True
 import pickle
 from dataclasses import dataclass
 import numpy as np
@@ -80,15 +81,12 @@ class Block(nn.Module):
         return x
 @dataclass
 class GPTConfig:
-    block_size: int = 1024  # max sequence length
-    vocab_size: int = 4140  # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 36          # number of transformer blocks
-    n_head: int = 20           # number of attention heads
-    n_embd: int = 1280         # embedding (hidden) dimension
-    # n_layer: int = 12 # number of layers
-    # n_head: int = 12 # number of heads
-    # n_embd: int = 768 # embedding dimension
-    num_channels: int = 2  # channel number
+    block_size: int = 1024
+    vocab_size: int = 4140
+    n_layer: int = 18
+    n_head: int = 12
+    n_embd: int = 768
+    num_channels: int = 2
 
 
 class GPT(nn.Module):
@@ -169,7 +167,7 @@ if generate:
     from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
     model = GPT(GPTConfig)
 
-    checkpoint = torch.load('log/model_04000.pt', map_location=torch.device('cpu'),weights_only=False)
+    checkpoint = torch.load('log/model_14000.pt', map_location=torch.device('cpu'), weights_only=False)
     # retrieve the state_dict
     orig_sd = checkpoint['model']
 
@@ -213,7 +211,8 @@ if generate:
     while xgen.size(1) < max_length:
         print(k)
         with torch.no_grad():
-                # forward pass with channels
+            t0 = time.time()
+            # forward pass with channels
             logits, _ = model(idx=xgen, channel_idx=cgen)  # (B, T, vocab_size)
 
             # take the logits at the last position
@@ -233,7 +232,9 @@ if generate:
             xgen = torch.cat((xgen, xcol), dim=1)  # shape (B, T+1)
             cgen = torch.cat((cgen, ccol), dim=1)  # shape (B, T+1)
             k += 1
-
+            t1 = time.time()
+            dt=t1-t0
+            print( f"dt: {1000*dt:.2f}ms")
     import numpy as np
     import matplotlib.pyplot as plt
 

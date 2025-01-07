@@ -121,7 +121,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 4096
     vocab_size: int = 4140
     n_layer: int = 18
     n_head: int = 12
@@ -349,8 +349,8 @@ class DataLoaderLite:
 
 epoch_num = 10
 total_batch_size = 524288
-B = 64
-T = 1024
+B = 32
+T = 4096
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
@@ -371,13 +371,13 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 3e-4
-min_lr = 7e-6
+min_lr = 1e-6
 warmup_steps = (300000000//total_batch_size)
 max_steps = math.ceil(771479260/total_batch_size) * epoch_num
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*2):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*1.5):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 
