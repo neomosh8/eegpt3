@@ -350,7 +350,7 @@ class DataLoaderLite:
 epoch_num = 10
 total_batch_size = 2*524288
 B = 8
-T = 4096
+T = 2048
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
