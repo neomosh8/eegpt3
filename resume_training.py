@@ -305,7 +305,7 @@ class DataLoaderLite:
 # 4. Training Configuration
 # -----------------------------------------------------------------------------
 
-epoch_num = 10
+epoch_num = 13
 total_batch_size = 524288
 B = 64
 T = 1024
@@ -402,7 +402,7 @@ for step in range(start_step, max_steps):
     last_step = (step == max_steps - 1)
 
     # Evaluate on validation set periodically
-    if step % 200 == 0 or last_step:
+    if False:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -513,7 +513,7 @@ if master_process:
     upload_folder_to_s3(
         local_folder_path="./log",
         bucket_name="dataframes--use1-az6--x-s3",
-        s3_prefix="training/log"
+        s3_prefix="training_small_cont/log"
     )
 
 if ddp:
