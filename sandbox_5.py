@@ -175,13 +175,15 @@ class DataLoaderLite:
         return x, c, y
 
 train_loader = DataLoaderLite(B=32, T=1024 , process_rank=0, num_processes=1)
-for i in range(1000000):
-    print(i,"\n")
-    (train_loader.next_batch())
-b=6
+# for i in range(1000000):
+#     print(i,"\n")
+#     (train_loader.next_batch())
+# b=6
 
 """
 771479260 tokens
 44386 / 44389 files
 13098 steps
 """
+
+

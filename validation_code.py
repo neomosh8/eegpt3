@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import random
 import time
 
 generate = True
@@ -81,11 +82,20 @@ class Block(nn.Module):
         return x
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    # # for 14000 steps 150M model (1.7GB)
+    # block_size: int = 1024
+    # vocab_size: int = 4140
+    # n_layer: int = 18
+    # n_head: int = 12
+    # n_embd: int = 768
+    # num_channels: int = 2
+
+    # for steps 1.3B Large model 14.4GB
+    block_size: int = 2048
     vocab_size: int = 4140
-    n_layer: int = 18
-    n_head: int = 12
-    n_embd: int = 768
+    n_layer: int = 20
+    n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
+    n_embd: int = 2304  # Increased to maintain head_dim with more heads
     num_channels: int = 2
 
 
@@ -289,8 +299,13 @@ def evaluate_shards_with_channels(
         # Prompt and correct continuation from shard0
         prompt_0_tokens = tokens0[i: i + segment_size]
         prompt_0_chans = chan0[i: i + segment_size]
-        correct_0_tokens = tokens0[i + segment_size: i + 2 * segment_size]
-        correct_0_chans = chan0[i + segment_size: i + 2 * segment_size]
+        max_gap_multiplier = 0 # Adjust this to control the max gap size in terms of segment_size
+        gap_multiplier = random.randint(0, max_gap_multiplier)  # Random multiplier for the gap
+        gap_size = gap_multiplier * segment_size
+
+        # gap_size = 0  # Uncomment to make consecutive
+        correct_0_tokens = tokens0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
+        correct_0_chans = chan0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
 
         # "Wrong" completion from shard1
         if i + segment_size <= len1:
@@ -396,7 +411,7 @@ def evaluate_shards_with_channels(
 
 model = GPT(GPTConfig)
 
-checkpoint = torch.load('log/model_14000.pt', map_location=torch.device('cpu'), weights_only=False)
+checkpoint = torch.load('log/model_14000_150M_small.pt', map_location=torch.device('cpu'), weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
@@ -412,8 +427,8 @@ model.config(checkpoint['config'])
 model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
-    shard0_path="validation_datasets/shards/shard_train_0.pt",
-    shard1_path="validation_datasets/shards/shard_train_1.pt",
+    shard0_path="validation_datasets/shards/shard_train_1.pt",
+    shard1_path="validation_datasets/shards/shard_train_0.pt",
     device="cpu",
-    segment_size=500
+    segment_size=512
 )

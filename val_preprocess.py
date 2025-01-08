@@ -108,7 +108,7 @@ def VAL_preprocess(
 
 # Example usage:
 VAL_preprocess(
-    source_dir="validation_datasets",
+    source_dir="output",
     target_data_dir="validation_datasets/shards",
     shard_prefix="shard",
     limit_files=100  # or None to process all files

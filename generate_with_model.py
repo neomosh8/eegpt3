@@ -167,7 +167,7 @@ if generate:
     from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
     model = GPT(GPTConfig)
 
-    checkpoint = torch.load('log/model_14000.pt', map_location=torch.device('cpu'), weights_only=False)
+    checkpoint = torch.load('log/model_14000_150M_small.pt', map_location=torch.device('cpu'), weights_only=False)
     # retrieve the state_dict
     orig_sd = checkpoint['model']
 

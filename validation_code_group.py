@@ -415,7 +415,7 @@ def evaluate_shard_groups_with_channels(
 
 model = GPT(GPTConfig)
 
-checkpoint = torch.load('log/model_14000.pt', map_location=torch.device('cpu'), weights_only=False)
+checkpoint = torch.load('log/model_14000_150M_small.pt', map_location=torch.device('cpu'), weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
@@ -432,13 +432,11 @@ model.eval()
 
 group_a_shards = [
     "validation_datasets/shards/shard_train_0.pt",
-    "validation_datasets/shards/shard_train_2.pt",
+    "validation_datasets/shards/shard_train_1.pt",
     # etc...
 ]
 group_b_shards = [
-    "validation_datasets/shards/shard_train_1.pt",
-    "validation_datasets/shards/shard_train_3.pt",
-    # etc...
+    "validation_datasets/shards/shard_train_2.pt",
 ]
 
 
