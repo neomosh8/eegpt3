@@ -408,7 +408,7 @@ def evaluate_shards_with_channels(
 
 model = GPT(GPTConfig)
 
-checkpoint = torch.load('log/model_07359.pt', map_location=torch.device('cuda'), weights_only=False)
+checkpoint = torch.load('log/model_07359.pt', map_location=torch.device('cpu'), weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
@@ -426,6 +426,6 @@ acc = evaluate_shards_with_channels(
     model=model,
     shard0_path="validation_datasets/shards/shard_train_1.pt",
     shard1_path="validation_datasets/shards/shard_train_0.pt",
-    device="cuda",
+    device="cpu",
     segment_size=512
 )
