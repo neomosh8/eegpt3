@@ -406,10 +406,9 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-model = GPT(GPTConfig)
+device = torch.device('cuda')
 model = GPT(GPTConfig).to(device)
-
-checkpoint = torch.load('log/model_07359.pt', map_location=torch.device('cuda'), weights_only=False)
+checkpoint = torch.load('log/model_07359.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
