@@ -114,12 +114,13 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 1024
     vocab_size: int = 4140
-    n_layer: int = 20
-    n_head: int = 36
-    n_embd: int = 2304
+    n_layer: int = 18
+    n_head: int = 12
+    n_embd: int = 768
     num_channels: int = 2
+
 
 class GPT(nn.Module):
     def __init__(self, config):
