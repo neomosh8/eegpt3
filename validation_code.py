@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 import tokenizer2
-from sandbox3 import tokenizer
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 from utils import wavelet_reconstruct_window, dequantize_number
 
