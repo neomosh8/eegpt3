@@ -431,13 +431,13 @@ model.config(checkpoint['config'])
 model.eval()
 
 group_a_shards = [
-    "validation_datasets/shards/shard_train_0.pt",
-    "validation_datasets/shards/shard_train_1.pt",
+    "validation_datasets_imageNet/shards/shard_train_610.pt",
+    "validation_datasets_imageNet/shards/shard_train_634.pt",
     # etc...
 ]
 group_b_shards = [
-    "validation_datasets/shards/shard_train_2.pt",
-]
+    "validation_datasets_imageNet/shards/shard_train_600.pt",
+    "validation_datasets_imageNet/shards/shard_train_243.pt",]
 
 
 accuracy = evaluate_shard_groups_with_channels(

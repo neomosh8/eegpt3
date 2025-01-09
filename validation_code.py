@@ -306,8 +306,10 @@ def evaluate_shards_with_channels(
 
         # "Wrong" completion from shard1
         if i + segment_size <= len1:
-            wrong_1_tokens = tokens1[i: i + segment_size]
-            wrong_1_chans = chan1[i: i + segment_size]
+            idx_random = random.randint(0, len1 - segment_size - 1)
+            wrong_1_tokens = tokens1[idx_random: idx_random + segment_size]
+            wrong_1_chans = chan1[idx_random: idx_random + segment_size]
+
         else:
             # If shard1 doesn't have enough tokens at index i
             if len1 >= segment_size:
@@ -406,7 +408,7 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-device = torch.device('cuda')
+device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
 checkpoint = torch.load('log/model_14000_150M_small.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
@@ -424,8 +426,8 @@ model.config(checkpoint['config'])
 model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
-    shard0_path="validation_datasets/shards/shard_train_1.pt",
-    shard1_path="validation_datasets/shards/shard_train_0.pt",
-    device="cuda",
+    shard0_path="validation_datasets_imageNet/shards/shard_train_610.pt",
+    shard1_path="validation_datasets_imageNet/shards/shard_train_636.pt",
+    device="cpu",
     segment_size=512
 )

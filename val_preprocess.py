@@ -96,10 +96,14 @@ def VAL_preprocess(
         if len(tokens_tensor) != len(channels_tensor):
             raise ValueError(f"Token / channel length mismatch in pair {coeffs_path} and {channels_path}.")
 
-        # Save the processed data as a shard
+        # Save the processed data as a shard (added original pair info below)
         shard_filename = f"{shard_prefix}_train_{shard_id}.pt"
         shard_path = os.path.join(target_data_dir, shard_filename)
-        torch.save({'tokens': tokens_tensor, 'channels': channels_tensor}, shard_path)
+        torch.save({
+            'tokens': tokens_tensor,
+            'channels': channels_tensor,
+            'original_pair': (os.path.basename(coeffs_path), os.path.basename(channels_path))
+        }, shard_path)
         print(f"  - Shard saved: {shard_path}")
         shard_id += 1
 
@@ -108,8 +112,8 @@ def VAL_preprocess(
 
 # Example usage:
 VAL_preprocess(
-    source_dir="output",
-    target_data_dir="validation_datasets/shards",
+    source_dir="validation_datasets_imageNet",
+    target_data_dir="validation_datasets_imageNet/shards",
     shard_prefix="shard",
-    limit_files=100  # or None to process all files
+    limit_files=2000  # or None to process all files
 )

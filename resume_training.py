@@ -402,7 +402,7 @@ for step in range(start_step, max_steps):
     last_step = (step == max_steps - 1)
 
     # Evaluate on validation set periodically
-    if False:
+    if True:
         model.eval()
         val_loader.reset()
         with torch.no_grad():

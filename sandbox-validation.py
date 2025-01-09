@@ -230,7 +230,7 @@ if __name__ == "__main__":
     right_hand_df = extract_task_data(structured_data, task_label=1)
     prep,new_sps = preprocess_data(np.array(right_hand_df).transpose(),512)
     twoch = average_alternate_channels(prep)
-    # plot_eeg_channels(pd.DataFrame(twoch.transpose()), fs=new_sps, title="Right Hand EEG")
+    plot_eeg_channels(pd.DataFrame(twoch.transpose()), fs=new_sps, title="Right Hand EEG")
     # 3) Do the same for "feet" if you want:
     feet_df = extract_task_data(structured_data, task_label=2)
     prep_f,new_sps = preprocess_data(np.array(feet_df).transpose(),512)

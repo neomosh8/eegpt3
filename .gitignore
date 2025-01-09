@@ -21,3 +21,5 @@ final_channels.txt
 goh
 /validation_datasets
 *.mat
+/validation_datasets_imageNet
+dataset/EEG-ImageNet_1.pth
