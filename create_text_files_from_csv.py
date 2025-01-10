@@ -235,7 +235,7 @@ def process_csv_file_s3(
 folders = list_s3_folders()
 csv_files = []
 i = 1
-for folder in folders:
+for folder in folders[0:1]:
     print(f"{i}/{len(folders)}")
     print(f"looking into folder: {folder}")
     files = list_csv_files_in_folder(folder)
