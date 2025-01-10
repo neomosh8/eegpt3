@@ -304,19 +304,13 @@ def evaluate_shards_with_channels(
         correct_0_tokens = tokens0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
         correct_0_chans = chan0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
 
-        # "Wrong" completion from shard1
-        if i + segment_size <= len1:
-            idx_random = random.randint(0, len1 - segment_size - 1)
+        if len1 >= segment_size:
+            # pick any random offset in shard1
+            idx_random = random.randint(0, len1 - segment_size)
             wrong_1_tokens = tokens1[idx_random: idx_random + segment_size]
             wrong_1_chans = chan1[idx_random: idx_random + segment_size]
-
         else:
-            # If shard1 doesn't have enough tokens at index i
-            if len1 >= segment_size:
-                wrong_1_tokens = tokens1[0: segment_size]
-                wrong_1_chans = chan1[0: segment_size]
-            else:
-                break
+            break
 
         # 2) Compute the average cross-entropy loss for correct vs. wrong
         loss_correct = compute_completion_loss_with_channels(
@@ -364,15 +358,14 @@ def evaluate_shards_with_channels(
         correct_1_chans = chan1[j + segment_size: j + 2 * segment_size]
 
         # "Wrong" from shard0
-        if j + segment_size <= len0:
-            wrong_0_tokens = tokens0[j: j + segment_size]
-            wrong_0_chans = chan0[j: j + segment_size]
+        if len0 >= segment_size:
+            # pick any random offset in shard0
+            wrong_offset = random.randint(0, len0 - segment_size)
+            wrong_0_tokens = tokens0[wrong_offset: wrong_offset + segment_size]
+            wrong_0_chans = chan0[wrong_offset: wrong_offset + segment_size]
         else:
-            if len0 >= segment_size:
-                wrong_0_tokens = tokens0[0: segment_size]
-                wrong_0_chans = chan0[0: segment_size]
-            else:
-                break
+            # shard0 doesn't even have segment_size tokens, skip
+            break
 
         loss_correct = compute_completion_loss_with_channels(
             model,
@@ -427,7 +420,7 @@ model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
     shard0_path="validation_datasets_imageNet/shards/shard_train_1.pt",
-    shard1_path="validation_datasets_imageNet/shards/shard_train_2.pt",
+    shard1_path="validation_datasets_imageNet/shards/shard_train_1.pt",
     device="cpu",
     segment_size=512
 )
