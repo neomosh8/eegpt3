@@ -463,41 +463,28 @@ def calculate_sps(csv_file_path):
 def validate_round_trip(
         csv_file_path,
         output_coeffs_file,
-        output_channels_file,
+        output_channels_file,   # you can ignore or remove this if not needed
         window_length_sec=2.0,
         show_plot=True,
-        mse_method="timeseries",  # options: "timeseries" or "pwelch"
+        mse_method="timeseries",  # "timeseries" or "pwelch"
         plot_welch=False
 ):
     """
-    Loads data from original CSV, quantized coeffs, and channel txt files.
-    It then performs the round trip (decompose->quantize->dequantize->reconstruct)
-    and optionally generates an animation of the original vs reconstructed signal.
-    It also calculates and prints the average MSE between original and reconstructed data.
-    :param csv_file_path: path of the input csv
-    :param output_coeffs_file: path to the quantized_coeffs.txt file
-    :param output_channels_file: path to the quantized_channels.txt file
-    :param window_length_sec: Window length for plotting
-    :param show_plot: Boolean, whether to show animation plot (default: True).
-    :param mse_method: String, method for MSE calculation ("timeseries" or "pwelch").
-    :param plot_welch: Boolean, whether to plot the Welch spectrogram next to the signal,
+    Loads data from original CSV and from a single (or few) lines of quantized wavelet coeffs
+    that contain all windows back-to-back. Each window = 256 tokens (128 for channel-0, 128 for channel-1).
+    Reconstructs signals and optionally plots or calculates MSE.
     """
-
-    quantized_coeffs_file_path = output_coeffs_file
-    quantized_channels_file_path = output_channels_file
-
     def calculate_mse(original, reconstructed):
         return np.mean((np.array(original) - np.array(reconstructed)) ** 2)
 
     # 1) Load CSV and Preprocess Data
     df = pd.read_csv(csv_file_path)
-
-    # Identify EEG channels
     all_columns = list(df.columns)
+
+    # Identify left vs. right channels
     exclude_cols = ['timestamp', 'VEOG', 'X', 'Y', 'Z', "EXG1", "EXG2", "EXG7", "EXG8"]
     eeg_channels = [col for col in all_columns if col not in exclude_cols]
 
-    # Determine left vs. right sets by last-digit parity
     left_chs_in_csv = []
     right_chs_in_csv = []
     for ch in eeg_channels:
@@ -528,47 +515,51 @@ def validate_round_trip(
 
     # Calculate sampling rate
     original_sps = calculate_sps(csv_file_path)
-
-    # Preprocess (resample + bandpass)
+    # Preprocess (resample + bandpass) => shape = [2, total_samples]
     preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
 
-    # Break into consecutive windows
+    # Determine how many windows from the raw data
     n_window_samples = int(window_length_sec * new_sps)
     num_channels, total_samples = preprocessed_data.shape
-
     if n_window_samples <= 0:
         raise ValueError(f"Invalid window_length_sec: {window_length_sec}")
     if total_samples < n_window_samples:
-        raise ValueError(f"Not enough samples to form even one window in {csv_file_path}.")
+        raise ValueError("Not enough samples for even one window.")
 
-    # Load quantized coeffs and channels
-    with open(quantized_coeffs_file_path, 'r') as f_coeffs, open(quantized_channels_file_path, 'r') as f_chans:
-        coeffs_lines = f_coeffs.readlines()
-        chans_lines = f_chans.readlines()
+    # The number of windows in the raw signal
+    num_windows = total_samples // n_window_samples
 
-    # Basic checks
-    if len(coeffs_lines) != len(chans_lines):
+    # 2) Load all quantized tokens from the file (single line or few lines)
+    with open(output_coeffs_file, 'r') as f_coeffs:
+        all_text = f_coeffs.read().strip()
+    # Split into tokens
+    all_tokens = all_text.split()
+
+    # We expect exactly `num_windows * 256` tokens (128 for channel0 + 128 for channel1 per window)
+    TOKENS_PER_WINDOW = 128 * 2  # 256
+    expected_total_tokens = num_windows * TOKENS_PER_WINDOW
+    if len(all_tokens) < expected_total_tokens:
         raise ValueError(
-            "Quantized coeffs and channels files have a different number of lines."
+            f"Not enough tokens in {output_coeffs_file}. "
+            f"Expected at least {expected_total_tokens}, got {len(all_tokens)}."
+        )
+    if len(all_tokens) > expected_total_tokens:
+        print(
+            f"WARNING: More tokens ({len(all_tokens)}) than expected "
+            f"({expected_total_tokens}). We'll only parse the first {expected_total_tokens} tokens."
         )
 
-    num_windows = len(coeffs_lines)
-    if num_windows * n_window_samples > total_samples:
-        raise ValueError(
-            "There are more windows in the coeff files than available samples in the data."
-        )
+    # We'll parse exactly num_windows windows from the token list
+    all_tokens = all_tokens[:expected_total_tokens]
 
-    # initialize variables to store MSEs
-    channel_mses = {
-        "Left": [],
-        "Right": []
-    }
+    # We'll store the MSE for each channel across windows
+    channel_mses = {"Left": [], "Right": []}
 
-    # ---------------------------------------------------
-    #                  PLOTTING SECTION
-    # ---------------------------------------------------
+    # -----------------------------------------
+    #  OPTIONAL: PLOTTING / ANIMATION SETUP
+    # -----------------------------------------
     if show_plot:
-        # Setup for animation
+        # For animation
         if plot_welch:
             fig, axes = plt.subplots(2, 2, figsize=(15, 8))
             ax_time_left = axes[0, 0]
@@ -596,22 +587,22 @@ def validate_round_trip(
         ax_time_right.set_title('Right Channel')
 
         if plot_welch:
-            ax_welch_left.set_xlabel('Frequency (Hz)')
-            ax_welch_left.set_ylabel('Power Spectral Density')
-            ax_welch_left.set_title('Welch PSD Left')
-            ax_welch_right.set_xlabel('Frequency (Hz)')
-            ax_welch_right.set_ylabel('Power Spectral Density')
-            ax_welch_right.set_title('Welch PSD Right')
             line5, = ax_welch_left.plot([], [], label='Original Welch Left', alpha=0.7)
             line6, = ax_welch_left.plot([], [], label='Reconstructed Welch Left', alpha=0.7)
             line7, = ax_welch_right.plot([], [], label='Original Welch Right', alpha=0.7)
             line8, = ax_welch_right.plot([], [], label='Reconstructed Welch Right', alpha=0.7)
+            ax_welch_left.set_xlabel('Frequency (Hz)')
+            ax_welch_left.set_ylabel('PSD')
+            ax_welch_right.set_xlabel('Frequency (Hz)')
+            ax_welch_right.set_ylabel('PSD')
+            ax_welch_left.set_title('Welch PSD Left')
+            ax_welch_right.set_title('Welch PSD Right')
             ax_welch_left.legend()
             ax_welch_right.legend()
 
         time_axis = np.arange(n_window_samples) / float(new_sps)
 
-        # Manual Y-Axis Limits across all windows
+        # Manual Y-limits for time plots
         min_val = np.min(preprocessed_data)
         max_val = np.max(preprocessed_data)
         ax_time_left.set_ylim(min_val, max_val)
@@ -619,255 +610,153 @@ def validate_round_trip(
 
         def update(frame):
             """
-            Updates the plot for a single window (frame).
-            Now uses the interleaved approach to parse tokens for each channel.
+            frame => which window from 0 to num_windows-1
+            We'll read 256 tokens from all_tokens for the given window, parse channel0 vs channel1.
             """
             window_start = frame * n_window_samples
             window_end = window_start + n_window_samples
 
-            # Read one line of quantized coeffs and channels
-            coeffs_line = coeffs_lines[frame].strip()
-            chans_line = chans_lines[frame].strip()
-            coeffs_list = coeffs_line.split()
-            chans_list = chans_line.split()
+            # Extract chunk of tokens for THIS window
+            start_tok = frame * TOKENS_PER_WINDOW
+            end_tok = start_tok + TOKENS_PER_WINDOW
+            chunk = all_tokens[start_tok:end_tok]
+            if len(chunk) != TOKENS_PER_WINDOW:
+                raise ValueError(f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}")
 
-            if len(coeffs_list) != len(chans_list):
-                raise ValueError(f"Coeff and channel length mismatch at frame {frame}")
+            # Split into ch0 vs ch1
+            ch0_coefs_str = chunk[:128]
+            ch1_coefs_str = chunk[128:]
 
-            # ### INTERLEAVING CHANGES HERE ###
-            # Separate tokens by channel using the channel IDs from chans_list
-            channel0Coeffs = []  # for "Left" => ID '1'
-            channel1Coeffs = []  # for "Right" => ID '2'
-            for c_token, c_id in zip(coeffs_list, chans_list):
-                if c_id == '1':
-                    channel0Coeffs.append(c_token)
-                elif c_id == '2':
-                    channel1Coeffs.append(c_token)
-                else:
-                    raise ValueError(f"Unexpected channel ID '{c_id}' at frame={frame}. Expect '1' or '2'.")
+            # Reconstruct Left
+            ch0_data = preprocessed_data[0, window_start:window_end]
+            left_orig, left_recon = wavelet_reconstruct_one_window(
+                ch0_data, ch0_coefs_str, new_sps, mse_method
+            )
+            channel_mses["Left"].append(calculate_mse(left_orig, left_recon))
 
-            # Prepare storage for original/reconstructed signals
-            original_signals = []
-            reconstructed_signals = []
-            welch_originals = []
-            welch_reconstructed = []
+            # Reconstruct Right
+            ch1_data = preprocessed_data[1, window_start:window_end]
+            right_orig, right_recon = wavelet_reconstruct_one_window(
+                ch1_data, ch1_coefs_str, new_sps, mse_method
+            )
+            channel_mses["Right"].append(calculate_mse(right_orig, right_recon))
 
-            # Process the 2 channels [0 => left, 1 => right]
-            for ch_idx in range(2):
-                if ch_idx == 0:
-                    ch_name = "Left"
-                    ch_coeffs = channel0Coeffs
-                else:
-                    ch_name = "Right"
-                    ch_coeffs = channel1Coeffs
+            # Update lines
+            line1.set_data(time_axis, left_orig)
+            line2.set_data(time_axis, left_recon)
+            line3.set_data(time_axis, right_orig)
+            line4.set_data(time_axis, right_recon)
 
-                # Original data for this window
-                channel_data = preprocessed_data[ch_idx, window_start:window_end]
-                original_signals.append(channel_data)
+            if plot_welch:
+                # compute PSD
+                welch_orig_left = pwelch_z(left_orig, new_sps)
+                welch_rec_left = pwelch_z(left_recon, new_sps)
+                line5.set_data(np.arange(len(welch_orig_left[0])), welch_orig_left[0])
+                line6.set_data(np.arange(len(welch_rec_left[0])), welch_rec_left[0])
 
-                # Decompose the original data to get shape/stats
-                channel_data_2d = channel_data[np.newaxis, :]
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wvlet,
-                    level=level,
-                    normalization=True
-                )
+                welch_orig_right = pwelch_z(right_orig, new_sps)
+                welch_rec_right = pwelch_z(right_recon, new_sps)
+                line7.set_data(np.arange(len(welch_orig_right[0])), welch_orig_right[0])
+                line8.set_data(np.arange(len(welch_rec_right[0])), welch_rec_right[0])
 
-                # Now we have a shape for the wavelet coefficients => Flatten length
-                # We'll "dequantize" from the portion of ch_coeffs
-                # ch_coeffs should match exactly the size of decomposed_channels.flatten()
-                if len(ch_coeffs) != decomposed_channels.flatten().shape[0]:
-                    raise ValueError(
-                        f"Channel '{ch_name}' token count ({len(ch_coeffs)}) does not match "
-                        f"expected wavelet-decomposed length {decomposed_channels.flatten().shape[0]}"
-                    )
-
-                # Dequantize
-                dequantized_coeffs = [dequantize_number(qid) for qid in ch_coeffs]
-                dequantized_coeffs = np.array(dequantized_coeffs).reshape(decomposed_channels.shape)
-
-                # Wavelet Reconstruct
-                reconstructed_window = wavelet_reconstruct_window(
-                    dequantized_coeffs,
-                    coeffs_lengths,
-                    num_samples,
-                    wavelet=wvlet
-                )
-                reconstructed_signal_z = reconstructed_window[0, :]
-
-                # (Optional) use stats from previous window to invert normalization
-                # For demo, we do a simple shift/scale from the previous window
-                prev_window_start = window_start - n_window_samples
-                if prev_window_start >= 0:
-                    prev_window_end = window_start
-                    prev_window_data = preprocessed_data[ch_idx, prev_window_start:prev_window_end]
-                    prev_mean = np.mean(prev_window_data)
-                    prev_std = np.std(prev_window_data)
-                else:
-                    prev_mean = 0.0
-                    prev_std = 1.0
-                if prev_std == 0:
-                    prev_std = 1.0
-
-                reconstructed_signal_scaled = reconstructed_signal_z * prev_std + prev_mean
-                reconstructed_signals.append(reconstructed_signal_scaled)
-
-                # If using Welch or plotting it, compute PSD
-                if mse_method == "pwelch" or plot_welch:
-                    welch_orig = pwelch_z(channel_data, new_sps)
-                    welch_rec = pwelch_z(reconstructed_signal_scaled, new_sps)
-                    welch_originals.append(welch_orig)
-                    welch_reconstructed.append(welch_rec)
-
-                # Calculate MSE
-                if mse_method == "timeseries":
-                    mse_val = calculate_mse(channel_data, reconstructed_signal_scaled)
-                elif mse_method == "pwelch":
-                    mse_val = calculate_mse(welch_orig.flatten(), welch_rec.flatten())
-                else:
-                    raise ValueError("Invalid MSE method for validate_round_trip()")
-
-                channel_mses[ch_name].append(mse_val)
-
-            # Update time-domain lines
-            line1.set_data(time_axis, original_signals[0])       # Left Original
-            line2.set_data(time_axis, reconstructed_signals[0])  # Left Reconstructed
-            line3.set_data(time_axis, original_signals[1])       # Right Original
-            line4.set_data(time_axis, reconstructed_signals[1])  # Right Reconstructed
-
-            # Update Welch lines (if requested)
-            if plot_welch and len(welch_originals) == 2:
-                line5.set_data(np.arange(welch_originals[0].shape[-1]),
-                               welch_originals[0].flatten())
-                line6.set_data(np.arange(welch_reconstructed[0].shape[-1]),
-                               welch_reconstructed[0].flatten())
-
-                line7.set_data(np.arange(welch_originals[1].shape[-1]),
-                               welch_originals[1].flatten())
-                line8.set_data(np.arange(welch_reconstructed[1].shape[-1]),
-                               welch_reconstructed[1].flatten())
-
-                # Auto-scale Welch subplots
+                # Auto-scale PSD
                 ax_welch_left.relim()
                 ax_welch_left.autoscale_view()
                 ax_welch_right.relim()
                 ax_welch_right.autoscale_view()
 
-            if plot_welch:
                 return line1, line2, line3, line4, line5, line6, line7, line8
-            else:
-                return line1, line2, line3, line4
+
+            return line1, line2, line3, line4
 
         ani = FuncAnimation(fig, update, frames=num_windows, blit=True)
         plt.tight_layout()
         plt.show()
 
-    # ---------------------------------------------------
-    #           OFFLINE (NON-ANIMATED) SECTION
-    # ---------------------------------------------------
     else:
+        # Non-animated version: just loop over windows
         for frame in range(num_windows):
             window_start = frame * n_window_samples
             window_end = window_start + n_window_samples
 
-            coeffs_line = coeffs_lines[frame].strip()
-            chans_line = chans_lines[frame].strip()
-            coeffs_list = coeffs_line.split()
-            chans_list = chans_line.split()
+            start_tok = frame * TOKENS_PER_WINDOW
+            end_tok = start_tok + TOKENS_PER_WINDOW
+            chunk = all_tokens[start_tok:end_tok]
+            if len(chunk) != TOKENS_PER_WINDOW:
+                raise ValueError(f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}")
 
-            if len(coeffs_list) != len(chans_list):
-                raise ValueError(f"Coeff and channel length mismatch at frame {frame}")
+            # ch0 vs ch1
+            ch0_coefs_str = chunk[:128]
+            ch1_coefs_str = chunk[128:]
 
-            # ### INTERLEAVING CHANGES HERE ###
-            # Separate tokens by channel using IDs
-            channel0Coeffs = []
-            channel1Coeffs = []
-            for c_token, c_id in zip(coeffs_list, chans_list):
-                if c_id == '1':
-                    channel0Coeffs.append(c_token)
-                elif c_id == '2':
-                    channel1Coeffs.append(c_token)
-                else:
-                    raise ValueError(f"Unexpected channel ID '{c_id}' at frame={frame}. Expect '1' or '2'.")
+            # Left
+            ch0_data = preprocessed_data[0, window_start:window_end]
+            left_orig, left_recon = wavelet_reconstruct_one_window(
+                ch0_data, ch0_coefs_str, new_sps, mse_method
+            )
+            channel_mses["Left"].append(calculate_mse(left_orig, left_recon))
 
-            # Process exactly 2 channels: [0 => left, 1 => right]
-            for ch_idx in range(2):
-                if ch_idx == 0:
-                    ch_name = "Left"
-                    ch_coeff_list = channel0Coeffs
-                else:
-                    ch_name = "Right"
-                    ch_coeff_list = channel1Coeffs
+            # Right
+            ch1_data = preprocessed_data[1, window_start:window_end]
+            right_orig, right_recon = wavelet_reconstruct_one_window(
+                ch1_data, ch1_coefs_str, new_sps, mse_method
+            )
+            channel_mses["Right"].append(calculate_mse(right_orig, right_recon))
 
-                channel_data = preprocessed_data[ch_idx, window_start:window_end]
-
-                channel_data_2d = channel_data[np.newaxis, :]
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wvlet,
-                    level=level,
-                    normalization=True
-                )
-
-                # Check length
-                if len(ch_coeff_list) != decomposed_channels.flatten().shape[0]:
-                    raise ValueError(
-                        f"Channel '{ch_name}' token count ({len(ch_coeff_list)}) mismatch "
-                        f"with wavelet-decomposed length {decomposed_channels.flatten().shape[0]}"
-                    )
-
-                # Dequantize
-                dequantized_coeffs = [dequantize_number(x) for x in ch_coeff_list]
-                dequantized_coeffs = np.array(dequantized_coeffs).reshape(decomposed_channels.shape)
-
-                # Reconstruct
-                reconstructed_window = wavelet_reconstruct_window(
-                    dequantized_coeffs,
-                    coeffs_lengths,
-                    num_samples,
-                    wavelet=wvlet
-                )
-                reconstructed_signal_z = reconstructed_window[0, :]
-
-                # Rescale with stats from the previous window
-                prev_window_start = window_start - n_window_samples
-                if prev_window_start >= 0:
-                    prev_window_data = preprocessed_data[ch_idx, prev_window_start:window_start]
-                    prev_mean = np.mean(prev_window_data)
-                    prev_std = np.std(prev_window_data)
-                else:
-                    prev_mean = 0.0
-                    prev_std = 1.0
-                if prev_std == 0:
-                    prev_std = 1.0
-
-                reconstructed_signal_scaled = reconstructed_signal_z * prev_std + prev_mean
-
-                # Compute MSE
-                if mse_method == "pwelch":
-                    orig_welch = pwelch_z(channel_data, new_sps).flatten()
-                    rec_welch = pwelch_z(reconstructed_signal_scaled, new_sps).flatten()
-                    mse_val = calculate_mse(orig_welch, rec_welch)
-                else:
-                    mse_val = calculate_mse(channel_data, reconstructed_signal_scaled)
-
-                channel_mses[ch_name].append(mse_val)
-
-    # Finally, print average MSE per channel
+    # Print final average MSE
     avg_mse_left = np.mean(channel_mses["Left"])
     avg_mse_right = np.mean(channel_mses["Right"])
-
     print(f"Average MSE - Left Channel: {avg_mse_left:.6f}")
     print(f"Average MSE - Right Channel: {avg_mse_right:.6f}")
 
 
+def wavelet_reconstruct_one_window(original_data, coeffs_str_list, new_sps, mse_method):
+    """
+    Helper function: takes the original_data for one window and the *stringified* wavelet coeffs.
+    Dequantizes, wavelet-reconstructs, and returns (original_data, reconstructed_data).
+    If needed, you can incorporate the "previous window's mean/std" logic here as well.
+    """
+    # Flatten length must match the wavelet decomposition length
+    # You likely know the wavelet level in advance, or we can deduce it
+    # from wavelet_decompose_window. For simplicity, let's do the same steps:
+
+    channel_data_2d = original_data[np.newaxis, :]
+    (decomposed_channels,
+     coeffs_lengths,
+     num_samples,
+     normalized_data) = wavelet_decompose_window(
+        channel_data_2d,
+        wavelet='db2',   # or your wavelet
+        level=2,         # or your wavelet level
+        normalization=True
+    )
+
+    # Check size
+    flatten_len = decomposed_channels.flatten().shape[0]
+    if len(coeffs_str_list) != flatten_len:
+        raise ValueError(f"Got {len(coeffs_str_list)} tokens, expected {flatten_len} for wavelet reconst.")
+
+    # Dequantize
+    dequantized_coeffs = [dequantize_number(x) for x in coeffs_str_list]
+    dequantized_coeffs = np.array(dequantized_coeffs).reshape(decomposed_channels.shape)
+
+    # Reconstruct
+    reconstructed_window = wavelet_reconstruct_window(
+        dequantized_coeffs,
+        coeffs_lengths,
+        num_samples,
+        wavelet='db2'
+    )
+    reconstructed_signal_z = reconstructed_window[0, :]
+
+    # If you want to incorporate "previous window" stats, you can do it here
+    # For now, we do a naive approach => assume we keep the same normalization as wavelet_decompose_window
+    # or do some final rescaling if needed.
+
+    # Example of no extra scaling:
+    reconstructed_signal = reconstructed_signal_z
+
+    return original_data, reconstructed_signal
 
 def list_csv_files_in_folder(folder_name , bucket_name='dataframes--use1-az6--x-s3', ):
     """
