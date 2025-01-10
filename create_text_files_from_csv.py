@@ -69,6 +69,8 @@ def generate_quantized_files_local(
     output_channels_file = os.path.join(output_folder, f"{base_name}_quantized_channels.txt")
 
     with open(output_coeffs_file, "w") as f_coeffs, open(output_channels_file, "w") as f_chans:
+        f_coeffs.write("trial ")
+        f_chans.write("trial ")
         df = pd.read_csv(csv_file)
 
         # Ask GPT if we skip or process => channels to drop
@@ -182,8 +184,8 @@ def generate_quantized_files_local(
             ### END INTERLEAVING CHANGES ###
 
             # Now write the interleaved tokens to file
-            coeffs_line = " ".join(interleaved_ids) + "|"
-            chans_line = " ".join(interleaved_channels) + "|"
+            coeffs_line = " ".join(interleaved_ids) + " "
+            chans_line = " ".join(interleaved_channels) + " "
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
