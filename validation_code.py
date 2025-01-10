@@ -79,21 +79,21 @@ class Block(nn.Module):
         return x
 @dataclass
 class GPTConfig:
-    # for 14000 steps 150M model (1.7GB)
-    block_size: int = 1024
-    vocab_size: int = 4140
-    n_layer: int = 18
-    n_head: int = 12
-    n_embd: int = 768
-    num_channels: int = 2
-
-    # # for steps 1.3B Large model 14.4GB
-    # block_size: int = 2048
+    # # for 14000 steps 150M model (1.7GB)
+    # block_size: int = 1024
     # vocab_size: int = 4140
-    # n_layer: int = 20
-    # n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
-    # n_embd: int = 2304  # Increased to maintain head_dim with more heads
+    # n_layer: int = 18
+    # n_head: int = 12
+    # n_embd: int = 768
     # num_channels: int = 2
+
+    # for steps 1.3B Large model 14.4GB
+    block_size: int = 2048
+    vocab_size: int = 4140
+    n_layer: int = 20
+    n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
+    n_embd: int = 2304  # Increased to maintain head_dim with more heads
+    num_channels: int = 2
 
 
 class GPT(nn.Module):
@@ -262,10 +262,10 @@ def evaluate_shards_with_channels(
     from time import time
 
     # 1) Load tokens & channels from each shard
-    shard0 = torch.load(shard0_path)  # e.g. {'tokens': ..., 'channels': ...}
+    shard0 = torch.load(shard0_path,weights_only=False)  # e.g. {'tokens': ..., 'channels': ...}
     tokens0 = shard0['tokens']  # shape (N0,)
     chan0 = shard0['channels']  # shape (N0,)
-    shard1 = torch.load(shard1_path)
+    shard1 = torch.load(shard1_path,weights_only=False)
     tokens1 = shard1['tokens']  # shape (N1,)
     chan1 = shard1['channels']  # shape (N1,)
 
@@ -293,22 +293,41 @@ def evaluate_shards_with_channels(
 
         t0 = time()
 
-        # Prompt and correct continuation from shard0
-        prompt_0_tokens = tokens0[i: i + segment_size]
-        prompt_0_chans = chan0[i: i + segment_size]
-        max_gap_multiplier = 0 # Adjust this to control the max gap size in terms of segment_size
-        gap_multiplier = random.randint(0, max_gap_multiplier)  # Random multiplier for the gap
-        gap_size = gap_multiplier * segment_size
+        # Ensure segment size is less than length with the specified stride
+        if segment_size >= len0:
+            raise ValueError("Segment size must be smaller than the sequence length.")
 
-        # gap_size = 0  # Uncomment to make consecutive
-        correct_0_tokens = tokens0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
-        correct_0_chans = chan0[i + segment_size + gap_size: i + 2 * segment_size + gap_size]
+        while True:  # Start of the iterative loop for correct offset
+            # Pick initial prompt offset
+            prompt_offset_candidates = list(range(0, len0 - segment_size + 1, 261))
+            if not prompt_offset_candidates:
+                raise ValueError("No valid prompt offsets possible with given parameters")
+            prompt_offset = random.choice(prompt_offset_candidates)
+            print(f"Prompt Offset: {prompt_offset}")
+            prompt_0_tokens = tokens0[prompt_offset: prompt_offset + segment_size]
+            prompt_0_chans = chan0[prompt_offset: prompt_offset + segment_size]
 
+            # Pick correct offset, ensuring it starts after the prompt
+            correct_offset_candidates = list(range(prompt_offset + segment_size, len0 - segment_size + 1, 261))
+
+            if not correct_offset_candidates:
+                print("No valid correct offsets, retrying with new prompt offset")  # Print a retry message
+                continue  # Go back to the beginning of the while loop
+
+            correct_offset = random.choice(correct_offset_candidates)
+            print(f"Correct Offset: {correct_offset}")
+            correct_0_tokens = tokens0[correct_offset: correct_offset + segment_size]
+            correct_0_chans = chan0[correct_offset: correct_offset + segment_size]
+
+            break  # break out of the loop only when a valid correct offset has been generated.
+
+        # Example prints
+
+       # "Wrong" from shard1 (random offset there too):
         if len1 >= segment_size:
-            # pick any random offset in shard1
-            idx_random = random.randint(0, len1 - segment_size)
-            wrong_1_tokens = tokens1[idx_random: idx_random + segment_size]
-            wrong_1_chans = chan1[idx_random: idx_random + segment_size]
+            wrong_offset = random.randint(0, len1 - segment_size)
+            wrong_1_tokens = tokens1[wrong_offset: wrong_offset + segment_size]
+            wrong_1_chans = chan1[wrong_offset: wrong_offset + segment_size]
         else:
             break
 
@@ -351,20 +370,43 @@ def evaluate_shards_with_channels(
 
         t0 = time()
 
-        # Prompt and correct continuation from shard1
-        prompt_1_tokens = tokens1[j: j + segment_size]
-        prompt_1_chans = chan1[j: j + segment_size]
-        correct_1_tokens = tokens1[j + segment_size: j + 2 * segment_size]
-        correct_1_chans = chan1[j + segment_size: j + 2 * segment_size]
+        # Ensure segment size is less than length with the specified stride
+        if segment_size >= len1:
+            raise ValueError("Segment size must be smaller than the sequence length.")
 
-        # "Wrong" from shard0
-        if len0 >= segment_size:
-            # pick any random offset in shard0
+        while True:  # Start of the iterative loop for correct offset
+            # Instead of contiguous prompt/correct, pick everything at random
+            # Pick initial prompt offset
+            prompt_offset_candidates = list(range(0, len1 - segment_size + 1, 261))
+            if not prompt_offset_candidates:
+                raise ValueError("No valid prompt offsets possible with given parameters")
+            prompt_offset = random.choice(prompt_offset_candidates)
+            print(f"Prompt Offset 1: {prompt_offset}")
+            prompt_1_tokens = tokens1[prompt_offset: prompt_offset + segment_size]
+            prompt_1_chans = chan1[prompt_offset: prompt_offset + segment_size]
+
+            # Pick correct offset, ensuring it starts after the prompt
+            correct_offset_candidates = list(
+                range(prompt_offset + segment_size, len1 - segment_size + 1, 261)
+            )
+
+            if not correct_offset_candidates:
+                print("No valid correct offsets, retrying with new prompt offset")  # Print a retry message
+                continue  # Go back to the beginning of the while loop
+
+            correct_offset = random.choice(correct_offset_candidates)
+            print(f"Correct Offset 1: {correct_offset}")
+            correct_1_tokens = tokens1[correct_offset: correct_offset + segment_size]
+            correct_1_chans = chan1[correct_offset: correct_offset + segment_size]
+
+            break  # break out of the loop only when a valid correct offset has been generated.
+
+        # "Wrong" from shard1 (random offset there too):
+        if len1 >= segment_size:
             wrong_offset = random.randint(0, len0 - segment_size)
             wrong_0_tokens = tokens0[wrong_offset: wrong_offset + segment_size]
             wrong_0_chans = chan0[wrong_offset: wrong_offset + segment_size]
         else:
-            # shard0 doesn't even have segment_size tokens, skip
             break
 
         loss_correct = compute_completion_loss_with_channels(
@@ -401,9 +443,9 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-device = torch.device('cpu')
+device = torch.device('mps')
 model = GPT(GPTConfig).to(device)
-checkpoint = torch.load('log/model_14000_150M_small.pt', map_location=device, weights_only=False)
+checkpoint = torch.load('log/model_07359.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
@@ -419,8 +461,8 @@ model.config(checkpoint['config'])
 model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
-    shard0_path="validation_datasets_imageNet/shards/shard_train_1.pt",
-    shard1_path="validation_datasets_imageNet/shards/shard_train_1.pt",
-    device="cpu",
+    shard0_path="validation_datasets/shards/shard_train_0.pt",
+    shard1_path="validation_datasets/shards/shard_train_1.pt",
+    device="mps",
     segment_size=512
 )

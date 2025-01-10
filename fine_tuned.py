@@ -135,7 +135,7 @@ class GPT(nn.Module):
         return logits, loss
 
 # ------------------------------------------------------------------
-# 2) Utility: compute_completion_loss_with_channels
+# Utility: compute_completion_loss_with_channels
 # ------------------------------------------------------------------
 def compute_completion_loss_with_channels(
     model,
@@ -188,7 +188,167 @@ def compute_completion_loss_with_channels(
     return avg_loss.item()
 
 # ------------------------------------------------------------------
-# 3) Multi-Class Forced Choice Evaluation
+# 1) Gather fine-tuning data first (same as before)
+# ------------------------------------------------------------------
+def gather_finetuning_data(
+    shards_dir="validation_datasets_imageNet/shards",
+    segment_size=512,
+    num_samples_per_subject=5,
+    device="cpu"
+):
+    """
+    Loads shards from `shards_dir`.
+    For each subject, tries to pick 'num_samples_per_subject' random (prompt, correct) pairs
+    to fine-tune on (these are the "correct completions").
+    Returns a list of dicts with {prompt_tokens, prompt_chans, completion_tokens, completion_chans}.
+    """
+    all_pt_files = [
+        f for f in os.listdir(shards_dir)
+        if f.endswith(".pt") and "shard_train_" in f
+    ]
+    if not all_pt_files:
+        print(f"No .pt files found in {shards_dir}")
+        return []
+
+    data_by_subject = {}
+    for pt_file in all_pt_files:
+        full_path = os.path.join(shards_dir, pt_file)
+        shard_data = torch.load(full_path)
+
+        tokens = shard_data['tokens']
+        channels = shard_data['channels']
+        pair_info = shard_data['original_pair']
+
+        # parse subject + image from the file info
+        coeffs_filename = pair_info[0]
+        basename = coeffs_filename.replace('_coeffs.txt', '')
+        parts = basename.split('_image_')
+        if len(parts) != 2:
+            continue
+        subject_str = parts[0]   # e.g. "subject_0"
+        image_str   = parts[1]   # e.g. "n02492035_gran_coarse"
+
+        if subject_str not in data_by_subject:
+            data_by_subject[subject_str] = []
+        data_by_subject[subject_str].append((tokens, channels))
+
+    finetune_data = []
+    for subject, shards_list in data_by_subject.items():
+        if not shards_list:
+            continue
+        count = 0
+        attempts = 0
+        max_attempts = 50 * num_samples_per_subject
+        while count < num_samples_per_subject and attempts < max_attempts:
+            attempts += 1
+            tokens_shard, chans_shard = random.choice(shards_list)
+            if tokens_shard.size(0) < 2*segment_size:
+                # not enough tokens in this shard
+                continue
+            total_len = tokens_shard.size(0)
+
+            # randomly pick prompt chunk
+            start_idx_prompt = random.randint(0, total_len - segment_size)
+            prompt_tokens = tokens_shard[start_idx_prompt : start_idx_prompt + segment_size]
+            prompt_chans  = chans_shard[start_idx_prompt : start_idx_prompt + segment_size]
+
+            # randomly pick correct chunk
+            start_idx_correct = random.randint(0, total_len - segment_size)
+            correct_tokens = tokens_shard[start_idx_correct : start_idx_correct + segment_size]
+            correct_chans  = chans_shard[start_idx_correct : start_idx_correct + segment_size]
+
+            finetune_data.append({
+                'prompt_tokens': prompt_tokens.clone(),
+                'prompt_chans': prompt_chans.clone(),
+                'completion_tokens': correct_tokens.clone(),
+                'completion_chans': correct_chans.clone(),
+                'subject': subject
+            })
+            count += 1
+
+    random.shuffle(finetune_data)
+    return finetune_data
+
+# ------------------------------------------------------------------
+# 2) Minimal Fine-Tuning Loop (replaces the old function)
+# ------------------------------------------------------------------
+def minimal_finetune_loop(
+    model,
+    data_list,
+    device='cpu',
+    max_steps=1000,
+    grad_accum_steps=1,
+    lr=1e-5,
+    clip_grad=1.0
+):
+    """
+    A minimal training loop that imitates your original structure:
+      - total of 'max_steps' updates
+      - optional gradient accumulation
+      - random sampling from data_list each step (batch size = 1 for simplicity)
+      - no checkpoint saving or logging
+    """
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    data_index = 0
+    random.shuffle(data_list)
+
+    for step in range(max_steps):
+        print(step)
+        # 1) If we've reached the end of data_list, reshuffle and reset
+        if data_index >= len(data_list):
+            random.shuffle(data_list)
+            data_index = 0
+
+        # 2) Grab the current example and increment data_index
+        example = data_list[data_index]
+        data_index += 1
+
+        # Zero the gradients once per outer step
+        optimizer.zero_grad()
+
+        # We'll accumulate gradients over grad_accum_steps
+        loss_accum = 0.0
+        for micro_step in range(grad_accum_steps):
+            # 3) Build the training sequence (prompt+completion)
+            prompt_tokens = example['prompt_tokens'].to(device)
+            prompt_chans = example['prompt_chans'].to(device)
+            completion_tokens = example['completion_tokens'].to(device)
+            completion_chans = example['completion_chans'].to(device)
+
+            full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0)
+            full_chans = torch.cat([prompt_chans, completion_chans], dim=0).unsqueeze(0)
+
+            # 4) Forward pass
+            logits, loss = model(
+                idx=full_tokens[:, :-1],
+                channel_idx=full_chans[:, :-1],
+                targets=full_tokens[:, 1:]
+            )
+
+            # If gradient accumulation is used, scale the loss
+            loss = loss / grad_accum_steps
+            loss_accum += loss.item()
+
+            # Backward
+            loss.backward()
+
+        # 5) Clip gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+
+        # 6) Optimizer step
+        optimizer.step()
+
+        # 7) Print minimal info each step (optional)
+        if (step % 100) == 0:
+            print(f"[Step {step}] Train Loss (avg over micro-steps): {loss_accum:.4f}")
+
+    # End of fine-tuning
+    model.eval()
+
+# ------------------------------------------------------------------
+# 3) Multi-Class Forced Choice Evaluation (same as before)
 # ------------------------------------------------------------------
 def evaluate_multi_class_forced_choice(
     model,
@@ -197,21 +357,6 @@ def evaluate_multi_class_forced_choice(
     num_trials_per_subject=5,
     device="cpu"
 ):
-    """
-    1) Loads all .pt shards from `shards_dir`.
-    2) Extracts subject, image_id from 'original_pair'.
-    3) Groups data by (subject -> image_id -> list_of_shards).
-    4) For each subject:
-       - Repeatedly pick a random (subject, image_id_correct, shard) as the "correct" image.
-       - From that shard, pick prompt chunk + correct chunk (non-overlapping).
-       - Gather "wrong" completions from *other images* of the same subject (one random chunk each).
-       - Compute loss for correct completion and for each wrong completion.
-       - If correct_loss < min(all_wrong_losses), we count +1 to the correct_count.
-    5) Return overall accuracy across all subjects.
-
-    NOTE: You can also compute per-subject accuracy if desired.
-    """
-    # 3.1) Load shards
     all_pt_files = [
         f for f in os.listdir(shards_dir)
         if f.endswith(".pt") and "shard_train_" in f
@@ -220,10 +365,7 @@ def evaluate_multi_class_forced_choice(
         print(f"No .pt files found in {shards_dir}")
         return 0.0
 
-    print(f"Found {len(all_pt_files)} shard files in '{shards_dir}'. Loading...")
-
     data_by_subject = {}
-
     for pt_file in all_pt_files:
         full_path = os.path.join(shards_dir, pt_file)
         shard_data = torch.load(full_path)
@@ -231,28 +373,16 @@ def evaluate_multi_class_forced_choice(
         tokens = shard_data['tokens']
         channels = shard_data['channels']
         pair_info = shard_data['original_pair']
-        # example: pair_info = (
-        #    "subject_0_image_n02492035_gran_coarse_coeffs.txt",
-        #    "subject_0_image_n02492035_gran_coarse_channels.txt"
-        # )
-        # We parse the first part, typically "..._coeffs.txt"
 
-        # 3.2) Parse subject + image from the filename string
-        #     "subject_0_image_n02492035_gran_coarse_coeffs.txt"
-        #      subject_0
-        #      image_n02492035_gran_coarse
-        coeffs_filename = pair_info[0]  # e.g. subject_0_image_n02492035_gran_coarse_coeffs.txt
-        # remove the trailing '_coeffs.txt'
+        # parse subject + image
+        coeffs_filename = pair_info[0]
         basename = coeffs_filename.replace('_coeffs.txt', '')
-        # now we have something like "subject_0_image_n02492035_gran_coarse"
-        parts = basename.split('_image_')  # e.g. ["subject_0", "n02492035_gran_coarse"]
+        parts = basename.split('_image_')
         if len(parts) != 2:
-            print(f"Warning: unexpected file format: {basename}")
             continue
-        subject_str = parts[0]   # e.g. "subject_0"
-        image_str   = parts[1]   # e.g. "n02492035_gran_coarse"
+        subject_str = parts[0]
+        image_str   = parts[1]
 
-        # We'll store it in a dict: data_by_subject[subject_str][image_str] -> list of dicts
         if subject_str not in data_by_subject:
             data_by_subject[subject_str] = {}
         if image_str not in data_by_subject[subject_str]:
@@ -262,67 +392,47 @@ def evaluate_multi_class_forced_choice(
             'channels': channels
         })
 
-    # ------------------------------------------------------------------
-    # 4) For each subject, do multi-class forced choice
-    # ------------------------------------------------------------------
     total_trials = 0
     correct_count = 0
 
     subjects = list(data_by_subject.keys())
-    print(f"Subjects found: {subjects}")
-
-    for subject in subjects:
-        images_dict = data_by_subject[subject]  # { image_id: [list_of_shards], ... }
+    for subject in subjects[0:1]:
+        images_dict = data_by_subject[subject]
         image_ids = list(images_dict.keys())
 
-        # If there's only 1 image for that subject, we can't do multi-class with "other images"
+        # We require at least 2 images to do multi-class forced choice
         if len(image_ids) < 2:
-            print(f"Subject {subject} has only {len(image_ids)} images. Skipping multi-class for this subject.")
             continue
 
-        print(f"\n=== Subject {subject} has {len(image_ids)} images: {image_ids}")
-
-        # We'll do num_trials_per_subject attempts
         for trial_i in range(num_trials_per_subject):
             print(trial_i)
-            # 4.1) Pick a random correct image
             correct_image_id = random.choice(image_ids)
             shards_for_correct_image = images_dict[correct_image_id]
-
-            # 4.2) Pick a random shard from the correct_image
             correct_shard = random.choice(shards_for_correct_image)
             tokens_correct_shard = correct_shard['tokens']
             chans_correct_shard  = correct_shard['channels']
 
-            # 4.3) We need to pick a random chunk for the prompt + a chunk for the correct completion
-            #     Each chunk has length = segment_size. So we need at least 2*segment_size tokens available.
             total_len = tokens_correct_shard.size(0)
             if total_len < 2 * segment_size:
-                # not enough tokens for prompt+completion
-                # skip this trial
                 continue
 
-            # pick a random start that allows 2*segment_size tokens
-            max_start = total_len - 2*segment_size
-            start_idx = random.randint(0, max_start)
+            # Prompt
+            import random
 
-            # prompt chunk at random offset
-            start_idx_prompt = random.randint(0, total_len - segment_size)
+            start_idx_prompt = random.randrange(0, total_len - segment_size + 1, 130)
             prompt_tokens = tokens_correct_shard[start_idx_prompt: start_idx_prompt + segment_size]
-            prompt_chans = chans_correct_shard[start_idx_prompt: start_idx_prompt + segment_size]
+            prompt_chans  = chans_correct_shard[start_idx_prompt: start_idx_prompt + segment_size]
 
-            start_idx_correct = random.randint(0, total_len - segment_size)
-
+            # Correct completion
+            start_idx_correct = random.randrange(0, total_len - segment_size + 1, 130)
             correct_tokens = tokens_correct_shard[start_idx_correct: start_idx_correct + segment_size]
-            correct_chans = chans_correct_shard[start_idx_correct: start_idx_correct + segment_size]
-            # 4.4) Get "wrong" completions from the other images of the same subject
-            #      We'll gather one random chunk from each other image
+            correct_chans  = chans_correct_shard[start_idx_correct: start_idx_correct + segment_size]
+
+            # Wrong completions
             wrong_losses = []
             for other_image_id in image_ids:
                 if other_image_id == correct_image_id:
-                    continue  # skip the correct image
-
-                # pick a random shard from that other image
+                    continue
                 shards_for_other_image = images_dict[other_image_id]
                 other_shard = random.choice(shards_for_other_image)
                 tokens_other_shard = other_shard['tokens']
@@ -330,18 +440,12 @@ def evaluate_multi_class_forced_choice(
 
                 total_len_other = tokens_other_shard.size(0)
                 if total_len_other < segment_size:
-                    # can't pick a chunk of length segment_size
-                    # skip
                     continue
-
                 max_start_other = total_len_other - segment_size
                 start_idx_other = random.randint(0, max_start_other)
-
-                # "wrong" chunk from other image
                 wrong_tokens = tokens_other_shard[start_idx_other : start_idx_other + segment_size]
                 wrong_chans  = chans_other_shard[start_idx_other : start_idx_other + segment_size]
 
-                # compute loss
                 lw = compute_completion_loss_with_channels(
                     model,
                     prompt_tokens,
@@ -352,12 +456,10 @@ def evaluate_multi_class_forced_choice(
                 )
                 wrong_losses.append(lw)
 
-            # If we ended up with no wrong completions (e.g., all other images had insufficient tokens),
-            # we skip
             if len(wrong_losses) == 0:
                 continue
 
-            # 4.5) Now compute the correct completion loss
+            # correct_loss
             correct_loss = compute_completion_loss_with_channels(
                 model,
                 prompt_tokens,
@@ -367,26 +469,22 @@ def evaluate_multi_class_forced_choice(
                 device=device
             )
 
-            # 4.6) Multi-class decision
-            # We count as correct if correct_loss < min(wrong_losses)
             total_trials += 1
             if correct_loss < min(wrong_losses):
                 correct_count += 1
-            print(correct_count/total_trials)
-    # 5) Final results
+            print(correct_loss, (wrong_losses))
     if total_trials == 0:
-        print("No valid multi-class trials were performed.")
         return 0.0
     accuracy = correct_count / total_trials
     print(f"\nMulti-class forced-choice accuracy: {correct_count}/{total_trials} = {accuracy:.4f}")
     return accuracy
 
 # ------------------------------------------------------------------
-# 4) Main: load model, run evaluation
+# 4) Main
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    device = torch.device('cpu')
-    model = GPT(GPTConfig).to(device)
+    device = torch.device('mps')
+    model = GPT(GPTConfig()).to(device)
 
     # Load your checkpoint
     checkpoint_path = 'log/model_14000_150M_small.pt'
@@ -401,16 +499,36 @@ if __name__ == "__main__":
         fixed_sd[new_key] = v
     model.load_state_dict(fixed_sd, strict=True)
 
-    model.config(checkpoint['config'])
+    # Optional: if your checkpoint has config updates
+    # model.config(checkpoint['config'])
 
-    model.eval()
-
-    # Finally, run multi-class forced choice
-    acc = evaluate_multi_class_forced_choice(
-        model=model,
+    # 1) Gather random (prompt, correct) pairs from your dataset
+    finetune_data = gather_finetuning_data(
         shards_dir="validation_datasets_imageNet/shards",
-        segment_size=512,         # or another chunk size
-        num_trials_per_subject=5, # how many random attempts per subject
+        segment_size=512,
+        num_samples_per_subject=1000,
         device=device
     )
-    print(f"\nFinal multi-class forced-choice accuracy = {acc:.4f}")
+    print(f"Gathered {len(finetune_data)} total fine-tuning examples.")
+
+    # # 2) Fine-tune the model in memory using our minimal loop
+    # if len(finetune_data) > 0:
+    #     minimal_finetune_loop(
+    #         model=model,
+    #         data_list=finetune_data,
+    #         device=device,
+    #         max_steps=1000,       # total steps
+    #         grad_accum_steps=2,  # example of gradient accumulation
+    #         lr=1e-6,
+    #         clip_grad=1.0
+    #     )
+
+    # 3) Evaluate with multi-class forced choice *using the finetuned model*
+    accuracy = evaluate_multi_class_forced_choice(
+        model=model,
+        shards_dir="validation_datasets_imageNet/shards",
+        segment_size=512,
+        num_trials_per_subject=5,
+        device=device
+    )
+    print(f"\nFinal multi-class forced-choice accuracy (fine-tuned) = {accuracy:.4f}")

@@ -157,7 +157,7 @@ import numpy as np
 # wavelet_decompose_window, quantize_number
 
 # Parameters for processing
-window_len = 1  # window length in seconds (adjust as needed)
+window_len = 2  # window length in seconds (adjust as needed)
 # Assuming 'new_sps' is the sampling rate returned from preprocess_data
 # If 'new_sps' is not defined yet, ensure it's set appropriately
 n_window_samples = window_len * 512  # using the original sampling rate; adjust if 'new_sps' is different
@@ -168,12 +168,12 @@ level = 2     # decomposition level; change as needed
 
 # File paths for saving coefficients and channel information
 # Right Hand
-coeffs_right_hand_path = "validation_datasets/right_hand_coeffs_1.txt"
-chans_right_hand_path = "validation_datasets/right_hand_channels_1.txt"
+coeffs_right_hand_path = "validation_datasets/right_hand_coeffs.txt"
+chans_right_hand_path = "validation_datasets/right_hand_channels.txt"
 
 # Feet
-coeffs_feet_path = "validation_datasets/feet_coeffs_1.txt"
-chans_feet_path = "validation_datasets/feet_channels_1.txt"
+coeffs_feet_path = "validation_datasets/feet_coeffs.txt"
+chans_feet_path = "validation_datasets/feet_channels.txt"
 
 # Function to process and save data
 def process_and_save(data, sps, coeffs_path, chans_path, wavelet, level, window_len):
@@ -230,7 +230,7 @@ if __name__ == "__main__":
     right_hand_df = extract_task_data(structured_data, task_label=1)
     prep,new_sps = preprocess_data(np.array(right_hand_df).transpose(),512)
     twoch = average_alternate_channels(prep)
-    plot_eeg_channels(pd.DataFrame(twoch.transpose()), fs=new_sps, title="Right Hand EEG")
+    # plot_eeg_channels(pd.DataFrame(twoch.transpose()), fs=new_sps, title="Right Hand EEG")
     # 3) Do the same for "feet" if you want:
     feet_df = extract_task_data(structured_data, task_label=2)
     prep_f,new_sps = preprocess_data(np.array(feet_df).transpose(),512)
