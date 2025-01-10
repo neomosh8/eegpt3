@@ -59,11 +59,11 @@ def generate_quantized_files_local(
     """
     Iterate over a single local CSV file, wavelet-decompose+quantize
     each file's [Left, Right] average EEG signals, and write
-    _quantized_coeffs.txt + _quantized_channels.txt to a local `output_folder`.
+    _quantized_coeffs.txt + _quantized_channels.txt to a local `output_folder`,
+    but with interleaved channel tokens.
     """
 
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
-
     # Create output file paths
     output_coeffs_file = os.path.join(output_folder, f"{base_name}_quantized_coeffs.txt")
     output_channels_file = os.path.join(output_folder, f"{base_name}_quantized_channels.txt")
@@ -89,7 +89,6 @@ def generate_quantized_files_local(
         left_chs_in_csv = []
         right_chs_in_csv = []
         for ch in filtered_columns:
-            # skip if ends with 'z' or if last character isn't a digit, etc.
             if ch.endswith('z'):
                 continue
             if not ch[-1].isdigit():
@@ -133,8 +132,9 @@ def generate_quantized_files_local(
         for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_end = window_start + n_window_samples
 
-            all_channel_coeffs = []
-            all_channel_names = []
+            # We will store channel-0 tokens in one list, channel-1 tokens in another
+            channel0_tokens = []
+            channel1_tokens = []
 
             # For exactly 2 channels: 0 => left, 1 => right
             for ch_idx in range(2):
@@ -155,28 +155,51 @@ def generate_quantized_files_local(
 
                 # Flatten for quantization
                 coeffs_flat = decomposed_channels.flatten()
-                q_ids = [str(quantize_number(c)) for c in coeffs_flat]  # << Convert to str here
+                q_ids = [str(quantize_number(c)) for c in coeffs_flat]  # Convert to str
 
-                all_channel_coeffs.extend(q_ids)
-                all_channel_names.extend([ch_name_id] * len(q_ids))
+                # Instead of extending a single list, we place them in the channel-specific list
+                if ch_idx == 0:
+                    channel0_tokens = q_ids
+                else:
+                    channel1_tokens = q_ids
 
-            # Write lines (for this single window)
-            coeffs_line = " ".join(all_channel_coeffs) + " "  # << Added newline
-            chans_line = " ".join(all_channel_names) + " "  # << Added newline
+            ### INTERLEAVING CHANGES HERE ###
+            # Now we interleave channel0_tokens and channel1_tokens
+            interleaved_ids = []
+            interleaved_channels = []
+
+            # In principle, wavelet decomposition for each channel
+            # should yield the same length. But let's be safe:
+            max_len = max(len(channel0_tokens), len(channel1_tokens))
+
+            for i in range(max_len):
+                if i < len(channel0_tokens):
+                    interleaved_ids.append(channel0_tokens[i])
+                    interleaved_channels.append("1")  # channel 0 => "1"
+                if i < len(channel1_tokens):
+                    interleaved_ids.append(channel1_tokens[i])
+                    interleaved_channels.append("2")  # channel 1 => "2"
+            ### END INTERLEAVING CHANGES ###
+
+            # Now write the interleaved tokens to file
+            coeffs_line = " ".join(interleaved_ids) + " "
+            chans_line = " ".join(interleaved_channels) + " "
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
 
+    # Validate round trip
     validate_round_trip(
-        csv_file_path=csv_file,  # Replace with your CSV path
+        csv_file_path=csv_file,
         output_coeffs_file=output_coeffs_file,
         output_channels_file=output_channels_file,
         window_length_sec=2.0,
-        show_plot=False,  # Set to False to hide plot
-        mse_method="pwelch",  # Use "pwelch" to compute on pwelch
-        plot_welch=False  # Set to True to plot pwelch next to the time series plot
+        show_plot=False,
+        mse_method="pwelch",
+        plot_welch=False
     )
     print(f"Done generating quantized files for {csv_file}.")
+
 
 
 def process_csv_file_s3(
