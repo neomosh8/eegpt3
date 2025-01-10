@@ -191,16 +191,16 @@ def generate_quantized_files_local(
             f_chans.write(chans_line)
 
     # Validate round trip
-    # validate_round_trip(
-    #     csv_file_path=csv_file,
-    #     output_coeffs_file=output_coeffs_file,
-    #     output_channels_file=output_channels_file,
-    #     window_length_sec=2.0,
-    #     show_plot=False,
-    #     mse_method="pwelch",
-    #     plot_welch=False
-    # )
-    print(f"Done generating quantized files for {csv_file}.")
+    validate_round_trip(
+        csv_file_path=csv_file,
+        output_coeffs_file=output_coeffs_file,
+        output_channels_file=output_channels_file,
+        window_length_sec=2.0,
+        show_plot=False,
+        mse_method="pwelch",
+        plot_welch=False
+    )
+    # print(f"Done generating quantized files for {csv_file}.")
 
 
 

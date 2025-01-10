@@ -683,7 +683,7 @@ def validate_round_trip(
                 start_idx = ch_idx * total_coeffs_for_one_channel
                 end_idx = start_idx + total_coeffs_for_one_channel
                 coeffs_flat_from_file = coeffs_list[start_idx:end_idx]
-
+                coeffs_flat_from_file.pop[0]
                 # Dequantize
                 dequantized_coeffs = [dequantize_number(qid) for qid in coeffs_flat_from_file]
                 dequantized_coeffs = np.array(dequantized_coeffs).reshape(decomposed_channels.shape)
