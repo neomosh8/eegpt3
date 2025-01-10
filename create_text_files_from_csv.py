@@ -195,7 +195,7 @@ def generate_quantized_files_local(
         csv_file_path=csv_file,
         output_coeffs_file=output_coeffs_file,
         output_channels_file=output_channels_file,
-        window_length_sec=2.0,
+        window_length_sec=1.0,
         show_plot=False,
         mse_method="pwelch",
         plot_welch=False
