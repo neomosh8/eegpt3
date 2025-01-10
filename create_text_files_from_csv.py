@@ -15,8 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Wavelet parameters
 wvlet = 'db2'
-level = 2
-
+level = 4
+epoch_len = 1.18
 # --------------------------------------------------------------------------------
 # Import your custom wavelet/quantization utils (or define them here if needed)
 # --------------------------------------------------------------------------------
@@ -52,9 +52,9 @@ def parallel_process_csv_files(csv_files):
 def generate_quantized_files_local(
         csv_file: str,
         output_folder: str,
-        window_length_sec: float = 1,
+        window_length_sec: float = epoch_len,
         wvlet: str = 'db2',
-        level: int = 2
+        level: int = level
 ):
     """
     Iterate over a single local CSV file, wavelet-decompose+quantize
@@ -191,14 +191,17 @@ def generate_quantized_files_local(
             f_chans.write(chans_line)
 
     # Validate round trip
+    print(2*sum(coeffs_lengths[0]))
     validate_round_trip(
         csv_file_path=csv_file,
+        coeff_lenght = sum(coeffs_lengths[0]),
         output_coeffs_file=output_coeffs_file,
         output_channels_file=output_channels_file,
-        window_length_sec=1.0,
+        window_length_sec=epoch_len,
         show_plot=False,
-        mse_method="pwelch",
+        mse_method="timeseries",
         plot_welch=False
+
     )
     # print(f"Done generating quantized files for {csv_file}.")
 
@@ -245,7 +248,8 @@ for folder in folders[0:1]:
     i=i+1
 print(f"done with {len(csv_files)} files")
 
-process_csv_file_s3(csv_files[0])
+parallel_process_csv_files(csv_files)
+# process_csv_file_s3(csv_files[0])
 
 
 

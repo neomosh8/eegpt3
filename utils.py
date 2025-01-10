@@ -16,7 +16,7 @@ from  openai import OpenAI
 
 load_dotenv()
 wvlet = 'db2'
-level = 2
+level = 4
 client = OpenAI(
     api_key=os.getenv('api_key')
 )
@@ -170,7 +170,7 @@ def get_sorted_file_list(file_list):
 import math
 
 
-def quantize_number(z_value, resolution=77):
+def quantize_number(z_value, resolution=80):
     """
     Quantize a z-scored value into a token: e.g. 'C23', 'D150', etc.
     with finer granularity near -1 < z < 1, and coarser outside.
@@ -251,7 +251,7 @@ def quantize_number(z_value, resolution=77):
     return token
 
 
-def dequantize_number(token, resolution=77):
+def dequantize_number(token, resolution=80):
     """
     Convert a token like 'C23' or 'D144' back to a z-score approximation.
     """
@@ -431,8 +431,8 @@ def preprocess_data(data, original_sps):
     :return: Preprocessed 2D numpy array, and the new sampling rate (after resampling).
     """
     # Resample the data to 128 Hz (example)
-    resampled_data = resample_windows(data, original_sps, new_rate=123)
-    new_sps = 123
+    resampled_data = resample_windows(data, original_sps, new_rate=100)
+    new_sps = 100
 
     # Filter (Band-pass)
     filtered_data = filter_band_pass_windows(resampled_data, new_sps)
@@ -463,26 +463,31 @@ def calculate_sps(csv_file_path):
 def validate_round_trip(
         csv_file_path,
         output_coeffs_file,
-        output_channels_file,   # you can ignore or remove this if not needed
-        window_length_sec=2.0,
+        coeff_lenght,
+        output_channels_file,  # you can ignore/remove this if truly unused
+        window_length_sec=1.0,
         show_plot=True,
         mse_method="timeseries",  # "timeseries" or "pwelch"
         plot_welch=False
 ):
     """
     Loads data from original CSV and from a single (or few) lines of quantized wavelet coeffs
-    that contain all windows back-to-back. Each window = 256 tokens (128 for channel-0, 128 for channel-1).
-    Reconstructs signals and optionally plots or calculates MSE.
+    that contain all windows back-to-back. Each window has 647 tokens for channel-0 + 647 tokens for channel-1
+    => 1294 tokens total, but they're interleaved: (ch0, ch1, ch0, ch1, ...).
+
+    Reconstructs signals and optionally plots/animates or calculates MSE.
     """
+
     def calculate_mse(original, reconstructed):
         return np.mean((np.array(original) - np.array(reconstructed)) ** 2)
 
+    # -------------------------------------------------------------------------
     # 1) Load CSV and Preprocess Data
+    # -------------------------------------------------------------------------
     df = pd.read_csv(csv_file_path)
     all_columns = list(df.columns)
 
-    # Ask GPT if we skip or process => channels to drop
-    all_columns = list(df.columns)
+    # Example usage of GPT-based instructions (if you actually rely on that):
     instructions = call_gpt_for_instructions(
         channel_names=all_columns,
         dataset_id=csv_file_path
@@ -495,6 +500,7 @@ def validate_round_trip(
     print(f"Dropping channels: {str(channels_to_drop)}")
     filtered_columns = [col for col in all_columns if col not in channels_to_drop]
 
+    # Identify left vs right channels
     left_chs_in_csv = []
     right_chs_in_csv = []
     for ch in filtered_columns:
@@ -523,12 +529,12 @@ def validate_round_trip(
 
     data_2d = np.vstack([left_data, right_data])
 
-    # Calculate sampling rate
+    # Original sampling rate
     original_sps = calculate_sps(csv_file_path)
-    # Preprocess (resample + bandpass) => shape = [2, total_samples]
+    # Preprocess => e.g. resample + bandpass => shape = [2, total_samples]
     preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
 
-    # Determine how many windows from the raw data
+    # Window length in samples
     n_window_samples = int(window_length_sec * new_sps)
     num_channels, total_samples = preprocessed_data.shape
     if n_window_samples <= 0:
@@ -536,17 +542,20 @@ def validate_round_trip(
     if total_samples < n_window_samples:
         raise ValueError("Not enough samples for even one window.")
 
-    # The number of windows in the raw signal
+    # Number of windows we can slice out
     num_windows = total_samples // n_window_samples
 
-    # 2) Load all quantized tokens from the file (single line or few lines)
+    # -------------------------------------------------------------------------
+    # 2) Load all quantized tokens from the file (single line or multiple lines)
+    # -------------------------------------------------------------------------
     with open(output_coeffs_file, 'r') as f_coeffs:
         all_text = f_coeffs.read().strip()
-    # Split into tokens
     all_tokens = all_text.split()
 
-    # We expect exactly `num_windows * 256` tokens (128 for channel0 + 128 for channel1 per window)
-    TOKENS_PER_WINDOW = 128 * 2  # 256
+    # But tokens are *interleaved*, so the first token is ch0, second is ch1, third is ch0, ...
+    TOKENS_PER_WINDOW = coeff_lenght * 2  # 1294
+
+    # Check we have enough tokens for all windows
     expected_total_tokens = num_windows * TOKENS_PER_WINDOW
     if len(all_tokens) < expected_total_tokens:
         raise ValueError(
@@ -555,21 +564,18 @@ def validate_round_trip(
         )
     if len(all_tokens) > expected_total_tokens:
         print(
-            f"WARNING: More tokens ({len(all_tokens)}) than expected "
-            f"({expected_total_tokens}). We'll only parse the first {expected_total_tokens} tokens."
+            f"WARNING: More tokens ({len(all_tokens)}) than expected ({expected_total_tokens}). "
+            f"We'll only parse the first {expected_total_tokens} tokens."
         )
-
-    # We'll parse exactly num_windows windows from the token list
     all_tokens = all_tokens[:expected_total_tokens]
 
-    # We'll store the MSE for each channel across windows
+    # We'll store MSE for each channel across windows
     channel_mses = {"Left": [], "Right": []}
 
-    # -----------------------------------------
-    #  OPTIONAL: PLOTTING / ANIMATION SETUP
-    # -----------------------------------------
+    # -------------------------------------------------------------------------
+    # 3) Plotting / Animation (if show_plot=True)
+    # -------------------------------------------------------------------------
     if show_plot:
-        # For animation
         if plot_welch:
             fig, axes = plt.subplots(2, 2, figsize=(15, 8))
             ax_time_left = axes[0, 0]
@@ -603,9 +609,9 @@ def validate_round_trip(
             line8, = ax_welch_right.plot([], [], label='Reconstructed Welch Right', alpha=0.7)
             ax_welch_left.set_xlabel('Frequency (Hz)')
             ax_welch_left.set_ylabel('PSD')
+            ax_welch_left.set_title('Welch PSD Left')
             ax_welch_right.set_xlabel('Frequency (Hz)')
             ax_welch_right.set_ylabel('PSD')
-            ax_welch_left.set_title('Welch PSD Left')
             ax_welch_right.set_title('Welch PSD Right')
             ax_welch_left.legend()
             ax_welch_right.legend()
@@ -620,22 +626,33 @@ def validate_round_trip(
 
         def update(frame):
             """
-            frame => which window from 0 to num_windows-1
-            We'll read 256 tokens from all_tokens for the given window, parse channel0 vs channel1.
+            frame => which window from 0..(num_windows-1)
+            We'll read the interleaved tokens for that window and separate them
+            into ch0_coefs_str (Left) and ch1_coefs_str (Right) using [0::2] vs [1::2].
             """
             window_start = frame * n_window_samples
             window_end = window_start + n_window_samples
 
-            # Extract chunk of tokens for THIS window
+            # -----------------------------------------------------------------
+            # EXTRACT the chunk for this window
+            # -----------------------------------------------------------------
             start_tok = frame * TOKENS_PER_WINDOW
             end_tok = start_tok + TOKENS_PER_WINDOW
             chunk = all_tokens[start_tok:end_tok]
             if len(chunk) != TOKENS_PER_WINDOW:
-                raise ValueError(f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}")
+                raise ValueError(
+                    f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}"
+                )
 
-            # Split into ch0 vs ch1
-            ch0_coefs_str = chunk[:128]
-            ch1_coefs_str = chunk[128:]
+            # ### CHANGED FOR INTERLEAVING ###
+            # channel-0 tokens => even indices, channel-1 => odd indices
+            ch0_coefs_str = chunk[0::2]  # length should be 647
+            ch1_coefs_str = chunk[1::2]  # length should be 647
+
+            if len(ch0_coefs_str) != coeff_lenght or len(ch1_coefs_str) != coeff_lenght:
+                raise ValueError(
+                    f"Interleaving mismatch! ch0={len(ch0_coefs_str)}, ch1={len(ch1_coefs_str)}"
+                )
 
             # Reconstruct Left
             ch0_data = preprocessed_data[0, window_start:window_end]
@@ -674,17 +691,24 @@ def validate_round_trip(
                 ax_welch_left.autoscale_view()
                 ax_welch_right.relim()
                 ax_welch_right.autoscale_view()
+                ax_time_left.relim()
+                ax_time_left.autoscale_view()
+                ax_time_right.relim()
+                ax_time_right.autoscale_view()
 
-                return line1, line2, line3, line4, line5, line6, line7, line8
+                return (line1, line2, line3, line4,
+                        line5, line6, line7, line8)
 
-            return line1, line2, line3, line4
+            return (line1, line2, line3, line4)
 
         ani = FuncAnimation(fig, update, frames=num_windows, blit=True)
         plt.tight_layout()
         plt.show()
 
+    # -------------------------------------------------------------------------
+    # 4) If NOT show_plot => do a simple loop (no animation)
+    # -------------------------------------------------------------------------
     else:
-        # Non-animated version: just loop over windows
         for frame in range(num_windows):
             window_start = frame * n_window_samples
             window_end = window_start + n_window_samples
@@ -693,11 +717,17 @@ def validate_round_trip(
             end_tok = start_tok + TOKENS_PER_WINDOW
             chunk = all_tokens[start_tok:end_tok]
             if len(chunk) != TOKENS_PER_WINDOW:
-                raise ValueError(f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}")
+                raise ValueError(
+                    f"Token chunk size mismatch. Got {len(chunk)}, expected {TOKENS_PER_WINDOW}"
+                )
 
-            # ch0 vs ch1
-            ch0_coefs_str = chunk[:128]
-            ch1_coefs_str = chunk[128:]
+            # ### CHANGED FOR INTERLEAVING ###
+            ch0_coefs_str = chunk[0::2]  # 647 tokens
+            ch1_coefs_str = chunk[1::2]  # 647 tokens
+            if len(ch0_coefs_str) != coeff_lenght or len(ch1_coefs_str) != coeff_lenght:
+                raise ValueError(
+                    f"Interleaving mismatch! ch0={len(ch0_coefs_str)}, ch1={len(ch1_coefs_str)}"
+                )
 
             # Left
             ch0_data = preprocessed_data[0, window_start:window_end]
@@ -713,11 +743,56 @@ def validate_round_trip(
             )
             channel_mses["Right"].append(calculate_mse(right_orig, right_recon))
 
-    # Print final average MSE
+    # -------------------------------------------------------------------------
+    # 5) Print final average MSE
+    # -------------------------------------------------------------------------
     avg_mse_left = np.mean(channel_mses["Left"])
     avg_mse_right = np.mean(channel_mses["Right"])
     print(f"Average MSE - Left Channel: {avg_mse_left:.6f}")
     print(f"Average MSE - Right Channel: {avg_mse_right:.6f}")
+
+
+def wavelet_reconstruct_one_window(original_data, coeffs_str_list, new_sps, mse_method):
+    """
+    Helper function: takes the original_data for one window and the *stringified* wavelet coeffs.
+    Dequantizes, wavelet-reconstructs, and returns (original_data, reconstructed_data).
+    If needed, incorporate "previous window's mean/std" logic here as well.
+    """
+    channel_data_2d = original_data[np.newaxis, :]
+    (decomposed_channels,
+     coeffs_lengths,
+     num_samples,
+     normalized_data) = wavelet_decompose_window(
+        channel_data_2d,
+        wavelet='db2',  # or whichever wavelet
+        level=2,  # or whichever level
+        normalization=True
+    )
+
+    # Flatten length
+    flatten_len = decomposed_channels.flatten().shape[0]
+    if len(coeffs_str_list) != flatten_len:
+        raise ValueError(
+            f"Got {len(coeffs_str_list)} tokens, expected {flatten_len} from wavelet decomposition."
+        )
+
+    # Dequantize => float
+    dequantized_coeffs = [dequantize_number(x) for x in coeffs_str_list]
+    dequantized_coeffs = np.array(dequantized_coeffs).reshape(decomposed_channels.shape)
+
+    # Reconstruct
+    reconstructed_window = wavelet_reconstruct_window(
+        dequantized_coeffs,
+        coeffs_lengths,
+        num_samples,
+        wavelet='db2'
+    )
+    reconstructed_signal_z = reconstructed_window[0, :]
+
+    # If you want "previous window" scaling, do it here. For now, pass-thru:
+    reconstructed_signal = reconstructed_signal_z
+
+    return original_data, reconstructed_signal
 
 
 def wavelet_reconstruct_one_window(original_data, coeffs_str_list, new_sps, mse_method):
@@ -737,7 +812,7 @@ def wavelet_reconstruct_one_window(original_data, coeffs_str_list, new_sps, mse_
      normalized_data) = wavelet_decompose_window(
         channel_data_2d,
         wavelet='db2',   # or your wavelet
-        level=2,         # or your wavelet level
+        level=level,         # or your wavelet level
         normalization=True
     )
 
@@ -775,7 +850,7 @@ def list_csv_files_in_folder(folder_name , bucket_name='dataframes--use1-az6--x-
     """
     List all CSV files in a specific folder within an S3 bucket.
 
-    :param bucket_name: Name of the S3 bucket.
+    :param bucket_name: Name of the S3 bucket
     :param folder_name: Folder name (prefix) inside the bucket.
     :return: List of CSV file keys.
     """
