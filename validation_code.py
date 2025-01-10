@@ -461,8 +461,8 @@ model.config(checkpoint['config'])
 model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
-    shard0_path="validation_datasets/shards/shard_train_0.pt",
-    shard1_path="validation_datasets/shards/shard_train_1.pt",
+    shard0_path="validation_datasets_imageNet/shards/shard_train_0.pt",
+    shard1_path="validation_datasets_imageNet/shards/shard_train_1.pt",
     device="cpu",
     segment_size=512
 )
