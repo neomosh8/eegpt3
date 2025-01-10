@@ -52,7 +52,7 @@ def parallel_process_csv_files(csv_files):
 def generate_quantized_files_local(
         csv_file: str,
         output_folder: str,
-        window_length_sec: float = 2.0,
+        window_length_sec: float = 1,
         wvlet: str = 'db2',
         level: int = 2
 ):
