@@ -481,13 +481,23 @@ def validate_round_trip(
     df = pd.read_csv(csv_file_path)
     all_columns = list(df.columns)
 
-    # Identify left vs. right channels
-    exclude_cols = ['timestamp', 'VEOG', 'X', 'Y', 'Z', "EXG1", "EXG2", "EXG7", "EXG8"]
-    eeg_channels = [col for col in all_columns if col not in exclude_cols]
+    # Ask GPT if we skip or process => channels to drop
+    all_columns = list(df.columns)
+    instructions = call_gpt_for_instructions(
+        channel_names=all_columns,
+        dataset_id=csv_file_path
+    )
+    if instructions["action"] == "skip":
+        print(f"Skipping dataset '{csv_file_path}' as instructed by GPT.")
+        return
+
+    channels_to_drop = instructions.get("channels_to_drop", [])
+    print(f"Dropping channels: {str(channels_to_drop)}")
+    filtered_columns = [col for col in all_columns if col not in channels_to_drop]
 
     left_chs_in_csv = []
     right_chs_in_csv = []
-    for ch in eeg_channels:
+    for ch in filtered_columns:
         if ch.endswith('z'):
             continue
         if not ch[-1].isdigit():

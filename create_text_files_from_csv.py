@@ -245,7 +245,8 @@ for folder in folders[0:1]:
     i=i+1
 print(f"done with {len(csv_files)} files")
 
-parallel_process_csv_files(csv_files)
+process_csv_file_s3(csv_files[0])
+
 
 
 
