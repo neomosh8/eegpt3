@@ -443,7 +443,7 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-device = torch.device('cuda')
+device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
 checkpoint = torch.load('log/model_07359.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
@@ -463,6 +463,6 @@ acc = evaluate_shards_with_channels(
     model=model,
     shard0_path="validation_datasets/shards/shard_train_0.pt",
     shard1_path="validation_datasets/shards/shard_train_1.pt",
-    device="cuda",
+    device="cpu",
     segment_size=512
 )
