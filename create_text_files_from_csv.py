@@ -182,8 +182,8 @@ def generate_quantized_files_local(
             ### END INTERLEAVING CHANGES ###
 
             # Now write the interleaved tokens to file
-            coeffs_line = " ".join(interleaved_ids) + " "
-            chans_line = " ".join(interleaved_channels) + " "
+            coeffs_line = " ".join(interleaved_ids) + "|"
+            chans_line = " ".join(interleaved_channels) + "|"
 
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
