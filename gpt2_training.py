@@ -363,6 +363,217 @@ class DataLoaderLite:
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
 
+
+
+def evaluate_multi_class_forced_choice(
+    model,
+    shards_dir="validation_datasets_imageNet/shards",
+    segment_size=512,
+    num_trials_per_subject=5,
+    device="cpu",
+    device_type="cuda",  # for autocast
+    ddp=False,
+    master_process=True
+):
+    """
+    Perform multi-class forced-choice validation, distributing the workload across DDP processes.
+    Then gather (sum) correct_count and total_trials to get the final accuracy.
+    """
+
+    # Only rank 0 prints, but all ranks run the logic to do their share of trials
+    if master_process:
+        print(f"[evaluate_multi_class_forced_choice] Starting forced-choice eval on rank {dist.get_rank() if ddp else 0}")
+
+    # 1) Gather .pt files
+    all_pt_files = [
+        f for f in os.listdir(shards_dir)
+        if f.endswith(".pt") and "shard_train_" in f
+    ]
+    if len(all_pt_files) == 0:
+        if master_process:
+            print(f"No .pt files found in {shards_dir}")
+        return 0.0
+
+    # 2) Build data_by_subject dict
+    data_by_subject = {}
+    for pt_file in all_pt_files:
+        full_path = os.path.join(shards_dir, pt_file)
+        shard_data = torch.load(full_path, map_location=device)
+
+        tokens = shard_data['tokens']   # shape [N]
+        channels = shard_data['channels']
+        pair_info = shard_data['original_pair']  # (coeffs_filename, channels_filename)
+        # parse subject, image
+        coeffs_filename = pair_info[0]
+        basename = coeffs_filename.replace('_coeffs.txt', '')
+        parts = basename.split('_image_')
+        if len(parts) != 2:
+            # skip unexpected format
+            continue
+        subject_str = parts[0]
+        image_str   = parts[1]
+
+        if subject_str not in data_by_subject:
+            data_by_subject[subject_str] = {}
+        if image_str not in data_by_subject[subject_str]:
+            data_by_subject[subject_str][image_str] = []
+        data_by_subject[subject_str][image_str].append({
+            'tokens': tokens,
+            'channels': channels
+        })
+
+    # We'll track total trials and correct trials
+    total_trials_tensor = torch.zeros(1, device=device)
+    correct_count_tensor = torch.zeros(1, device=device)
+
+    # 3) Iterate over subjects
+    subjects = list(data_by_subject.keys())
+    for subject in subjects:
+        images_dict = data_by_subject[subject]
+        image_ids = list(images_dict.keys())
+
+        if len(image_ids) < 2:
+            # can't do forced choice with only 1 image
+            continue
+
+        # We'll do num_trials_per_subject attempts
+        for _ in range(num_trials_per_subject):
+            # 3.1) Random correct image
+            correct_image_id = random.choice(image_ids)
+            shards_for_correct_image = images_dict[correct_image_id]
+
+            correct_shard = random.choice(shards_for_correct_image)
+            tokens_correct_shard = correct_shard['tokens']
+            chans_correct_shard  = correct_shard['channels']
+            total_len = tokens_correct_shard.size(0)
+            if total_len < 2*segment_size:
+                # Not enough tokens for (prompt+completion)
+                continue
+
+            # 3.2) Pick random prompt chunk
+            start_idx_prompt = random.randint(0, total_len - segment_size)
+            prompt_tokens = tokens_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
+            prompt_chans  = chans_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
+
+            # 3.3) Pick random correct completion chunk
+            start_idx_correct = random.randint(0, total_len - segment_size)
+            correct_tokens = tokens_correct_shard[start_idx_correct : start_idx_correct+segment_size]
+            correct_chans  = chans_correct_shard[start_idx_correct : start_idx_correct+segment_size]
+
+            # 3.4) Gather "wrong" chunks from other images
+            wrong_losses = []
+            for other_image_id in image_ids:
+                if other_image_id == correct_image_id:
+                    continue
+                shards_for_other = images_dict[other_image_id]
+                other_shard = random.choice(shards_for_other)
+                tokens_other_shard = other_shard['tokens']
+                chans_other_shard  = other_shard['channels']
+
+                total_len_other = tokens_other_shard.size(0)
+                if total_len_other < segment_size:
+                    continue
+
+                start_idx_other = random.randint(0, total_len_other - segment_size)
+                wrong_tokens = tokens_other_shard[start_idx_other : start_idx_other+segment_size]
+                wrong_chans  = chans_other_shard[start_idx_other : start_idx_other+segment_size]
+
+                lw = compute_completion_loss_with_channels(
+                    model,
+                    prompt_tokens, prompt_chans,
+                    wrong_tokens,  wrong_chans,
+                    device=device,
+                    device_type=device_type
+                )
+                wrong_losses.append(lw.item())
+
+            # If no wrong completions gathered, skip
+            if len(wrong_losses) == 0:
+                continue
+
+            correct_loss = compute_completion_loss_with_channels(
+                model,
+                prompt_tokens,
+                prompt_chans,
+                correct_tokens,
+                correct_chans,
+                device=device,
+                device_type=device_type
+            )
+            correct_loss_val = correct_loss.item()
+
+            # forced-choice decision
+            total_trials_tensor += 1
+            if correct_loss_val < min(wrong_losses):
+                correct_count_tensor += 1
+
+    # 4) All-reduce across DDP processes if needed
+    if ddp:
+        dist.all_reduce(total_trials_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(correct_count_tensor, op=dist.ReduceOp.SUM)
+
+    total_trials = total_trials_tensor.item()
+    correct_count = correct_count_tensor.item()
+    if total_trials == 0:
+        accuracy = 0.0
+    else:
+        accuracy = correct_count / total_trials
+
+    # 5) Only master process prints
+    if master_process:
+        print(f"\nMulti-class forced-choice accuracy: {correct_count}/{total_trials} = {accuracy:.4f}")
+
+    return accuracy
+
+def compute_completion_loss_with_channels(
+    model,
+    prompt_tokens, prompt_channels,
+    completion_tokens, completion_channels,
+    device="cuda"
+):
+    """
+    Returns the average cross-entropy loss on 'completion_tokens',
+    given 'prompt_tokens' + 'prompt_channels'.
+    """
+    model.eval()
+    with torch.no_grad():
+        # 1) Concatenate prompt + completion
+        full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
+        full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
+
+        total_len = full_tokens.size(1)
+        prompt_len = prompt_tokens.size(0)
+        completion_len = completion_tokens.size(0)
+
+        # 2) Build a mask that is 0 for prompt tokens, 1 for completion tokens
+        mask_vals = [0]*prompt_len + [1]*completion_len
+        mask = torch.tensor(mask_vals, device=device).unsqueeze(0)
+
+        # 3) Forward
+        logits, _ = model(idx=full_tokens, channel_idx=full_channels)  # (1, total_len, vocab_size)
+
+        # 4) shift for next-token prediction
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_tokens = full_tokens[:, 1:].contiguous()
+        shift_mask   = mask[:, 1:].contiguous()
+
+        # 5) Flatten
+        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_tokens = shift_tokens.view(-1)
+        flat_mask   = shift_mask.view(-1)
+
+        # 6) Cross entropy per token
+        ce_per_token = F.cross_entropy(flat_logits, flat_tokens, reduction='none')
+
+        # 7) Zero out the prompt region
+        ce_completion = ce_per_token * flat_mask
+
+        # 8) Average loss over completion tokens
+        sum_loss = ce_completion.sum()
+        num_completion_tokens = flat_mask.sum()
+        avg_loss = sum_loss / (num_completion_tokens + 1e-9)
+
+    return avg_loss.item()
 epoch_num = 10
 total_batch_size = 524288
 B = 32
@@ -408,7 +619,6 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
-# optimizer = torch.optim.Adafactor(weight_decay=0.1,lr=6e-4)
 
 # keep track of losses to plot later  ### ADDED LINES ###
 train_losses = []
@@ -427,7 +637,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 200 == 0 or last_step:
+    if step % 50 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -460,6 +670,26 @@ for step in range(max_steps):
                 'optimizer_state':optimizer.state_dict(),
             }
             torch.save(checkpoint, checkpoint_path)
+
+    if step % 200 == 0 or last_step:
+        #### once in a while, Perform Multiclass force choice validation
+        model.eval()
+        with torch.no_grad():
+            acc = evaluate_multi_class_forced_choice(
+                model=model,
+                shards_dir="validation_datasets_imageNet/shards",
+                segment_size=256,
+                num_trials_per_subject=5,
+                device=device,
+                device_type=device_type,
+                ddp=ddp,                # pass True if using DDP
+                master_process=master_process
+            )
+        # If you wanted to record the accuracy in your logs:
+        if master_process:
+            with open(log_file, "a") as f:
+                f.write(f"{step} MCval {acc:.4f}\n")
+
     model.train()
     optimizer.zero_grad()
     loss_accum = 0.0

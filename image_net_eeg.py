@@ -19,41 +19,6 @@ def average_alternate_channels(data):
 
     # Stack the averages to get 2 x sample array
     return np.stack([even_avg, odd_avg])
-def plot_eeg_channels(df, fs=512, title="EEG Channels"):
-    """
-    Plots all channels in a given DataFrame,
-    each channel in its own subplot (stacked vertically).
-
-    Args:
-        df (pd.DataFrame): DataFrame with shape (n_samples, n_channels).
-                           Columns are channel names, rows are samples.
-        fs (int): Sampling frequency (default 512).
-        title (str): Figure title.
-    """
-    # Create a time axis in seconds based on the number of samples and the sampling frequency
-    n_samples = len(df)
-    time_axis = np.arange(n_samples) / fs
-
-    # Number of channels
-    n_channels = df.shape[1]
-
-    # Create subplots: one row per channel, sharing the same x-axis
-    fig, axes = plt.subplots(n_channels, 1, figsize=(12, 2.5 * n_channels), sharex=True)
-    # Handle the case where there's only one channel (axes won't be an array)
-    if n_channels == 1:
-        axes = [axes]
-
-    # Plot each channel in its respective subplot
-    for i, col_name in enumerate(df.columns):
-        axes[i].plot(time_axis, df[col_name], label=col_name)
-        axes[i].set_ylabel(col_name)
-        axes[i].legend(loc='upper right')
-
-    # Set x-label for the last subplot and add a global title
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(title)
-    plt.tight_layout()
-    plt.show()
 def process_and_save(data, sps, coeffs_path, chans_path, wavelet, level, window_len):
     n_window_samples = window_len * sps
     total_samples = data.shape[1]
