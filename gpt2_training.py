@@ -70,6 +70,10 @@ class CausalSelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
+        # optional attention dropout
+        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
+
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -85,9 +89,13 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        y = self.attn_dropout(y)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
+        y = self.resid_dropout(y)
+
         return y
 
 class MLP(nn.Module):
@@ -96,13 +104,18 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu    = nn.GELU(approximate='tanh')
+        self.dropout = nn.Dropout(p=getattr(config, 'mlp_dropout', 0.05))
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
+        x = self.dropout(x)     # dropout after activation
+
         x = self.c_proj(x)
+        x = self.dropout(x)     # optional dropout again
+
         return x
 
 class Block(nn.Module):
@@ -125,8 +138,11 @@ class GPTConfig:
     vocab_size: int = 6459
     n_layer: int = 20
     n_head: int = 36
-    n_embd: int = 2034
+    n_embd: int = 2052
     num_channels: int = 2
+    mlp_dropout: float = 0.05
+    attn_dropout: float = 0.05
+    resid_dropout: float = 0.05
 
 
 class GPT(nn.Module):
@@ -348,9 +364,9 @@ class DataLoaderLite:
         self._load_shard(self.shard_files[self.current_shard_idx])
 
 epoch_num = 10
-total_batch_size = 2*524288
-B = 8
-T = 2048
+total_batch_size = 524288
+B = 32
+T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
