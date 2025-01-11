@@ -602,6 +602,7 @@ min_lr = 1e-6
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
+max_steps = 200
 if master_process:
     print("Max Steps: ",max_steps)
 
@@ -659,7 +660,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 2000 == 0 or last_step):
+        if step > 0 and (step % 100 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
@@ -671,7 +672,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 200 == 0 or last_step:
+    if step % 50 == 0 or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
