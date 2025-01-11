@@ -79,21 +79,21 @@ class Block(nn.Module):
         return x
 @dataclass
 class GPTConfig:
-    # # for 14000 steps 150M model (1.7GB)
-    # block_size: int = 1024
-    # vocab_size: int = 4140
-    # n_layer: int = 18
-    # n_head: int = 12
-    # n_embd: int = 768
-    # num_channels: int = 2
-
-    # for steps 1.3B Large model 14.4GB
-    block_size: int = 2048
+    # for 14000 steps 150M model (1.7GB)
+    block_size: int = 1024
     vocab_size: int = 4140
-    n_layer: int = 20
-    n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
-    n_embd: int = 2304  # Increased to maintain head_dim with more heads
+    n_layer: int = 18
+    n_head: int = 12
+    n_embd: int = 768
     num_channels: int = 2
+
+    # # for steps 1.3B Large model 14.4GB
+    # block_size: int = 2048
+    # vocab_size: int = 4140
+    # n_layer: int = 20
+    # n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
+    # n_embd: int = 2304  # Increased to maintain head_dim with more heads
+    # num_channels: int = 2
 
 
 class GPT(nn.Module):

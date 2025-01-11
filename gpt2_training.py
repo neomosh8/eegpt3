@@ -121,11 +121,11 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
-    vocab_size: int = 4140
+    block_size: int = 1024
+    vocab_size: int = 6459
     n_layer: int = 20
-    n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
-    n_embd: int = 2304  # Increased to maintain head_dim with more heads
+    n_head: int = 36
+    n_embd: int = 2034
     num_channels: int = 2
 
 
