@@ -388,47 +388,24 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 3e-4
 min_lr = 1e-6
-warmup_steps = (300000000//total_batch_size)
-max_steps = math.ceil(771479260/total_batch_size) * epoch_num
+max_steps = math.ceil(1e9//total_batch_size) * epoch_num
+warmup_steps =int(0.02*max_steps)
+
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=max_steps*1.8):
-    """
-    Calculate the learning rate for a given iteration using simple exponential decay.
-
-    Parameters:
-        it (int): Current iteration.
-        max_lr (float): Initial maximum learning rate.
-        min_lr (float): Minimum learning rate after decay.
-        warmup_steps (int): Number of warmup steps.
-        max_steps (int): Total number of steps.
-
-    Returns:
-        float: Learning rate at the given iteration.
-    """
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
-        # Linear warmup
-        lr = max_lr * (it + 1) / warmup_steps
-    elif it > max_steps:
-        # After max_steps, maintain min_lr
-        lr = min_lr
-    else:
-        # Exponential decay
-        decay_steps = it - warmup_steps
-        total_decay_steps = max_steps - warmup_steps
-
-        # Calculate decay rate to reach min_lr at max_steps
-        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
-
-        # Apply exponential decay
-        lr = max_lr * math.exp(decay_rate * decay_steps)
-
-        # Ensure lr does not go below min_lr
-        lr = max(lr, min_lr)
-
-    return lr
-
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 # optimizer = torch.optim.Adafactor(weight_decay=0.1,lr=6e-4)
