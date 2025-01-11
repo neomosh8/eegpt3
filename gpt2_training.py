@@ -574,7 +574,7 @@ def compute_completion_loss_with_channels(
 
 epoch_num = 10
 total_batch_size = 524288
-B = 64
+B = 32
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -600,7 +600,6 @@ min_lr = 1e-6
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
-max_steps = 200
 if master_process:
     print("Max Steps: ",max_steps)
 
@@ -672,7 +671,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 50 == 0 or last_step:
+    if step % 200 == 0 or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
@@ -687,7 +686,8 @@ for step in range(max_steps):
                 master_process=master_process
             )
         # If you wanted to record the accuracy in your logs:
-        mc_val_losses.append(acc)
+        mc_val_loss = -math.log(acc + 1e-9)
+        mc_val_losses.append(mc_val_loss)
         mc_val_steps.append(step)
         if master_process:
             with open(log_file, "a") as f:
