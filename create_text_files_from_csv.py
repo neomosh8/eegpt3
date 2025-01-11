@@ -35,7 +35,10 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def parallel_process_csv_files(csv_files):
-    max_workers = multiprocessing.cpu_count() - 2
+    if '4444' in csv_files or '4448'
+        max_workers = multiprocessing.cpu_count() //3
+    else:
+        max_workers = multiprocessing.cpu_count() -1
     total = len(csv_files)
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_csv_file_s3, f): i for i, f in enumerate(csv_files, start=1)}
@@ -248,7 +251,9 @@ for folder in folders:
     i=i+1
 print(f"done with {len(csv_files)} files")
 
-parallel_process_csv_files(csv_files)
+resume = csv_files[csv_files.index('ds004408'):]
+print(resume)
+parallel_process_csv_files(resume)
 # process_csv_file_s3(csv_files[0])
 
 
