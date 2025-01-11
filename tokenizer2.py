@@ -644,10 +644,12 @@ def main():
     with open(large_text_file, "r", encoding="utf-8") as f:
         small_text_snippet = f.read()
     snippet_tokens = small_text_snippet.strip().split()
-
+    len_original = len(snippet_tokens)
     # Apply BPE+RLE to that snippet
     final_tokens = tokenizer.encode(snippet_tokens)
+    len_tokenized = len(final_tokens)
     # Build vocab
+    print(f"Comperession Ratio: {len_tokenized//len_original}")
     tokenizer.build_vocab(final_tokens, add_unk=True)
     tokenizer.save_vocab("neo_tokenizer/vocab.json")
 
