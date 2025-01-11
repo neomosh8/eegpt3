@@ -135,10 +135,13 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 6459
-    n_layer: int = 20
-    n_head: int = 36
-    n_embd: int = 2052
+    vocab_size: int = 6460
+    # n_layer: int = 20
+    # n_head: int = 36
+    # n_embd: int = 2052
+    n_layer: int = 18
+    n_head: int = 12
+    n_embd: int = 768
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
