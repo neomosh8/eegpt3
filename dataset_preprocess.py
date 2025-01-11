@@ -77,6 +77,20 @@ def _process_single_pair(args):
         chan_text = f.read().strip().split()
     # Insert at the start as well
     chan_text.insert(0, "1")
+    # NEW PART
+    if len(raw_tokens) != len(chan_text):
+        print("########################## Length mismatch in tokens/channels ###################")
+        last_chan = int(chan_text[-1])
+        # If the last channel is 1, keep alternating [2,1,2,1,...] until lengths match.
+        # If the last channel is 2, keep alternating [1,2,1,2,...] until lengths match.
+        while len(chan_text) < len(raw_tokens):
+            if last_chan == 1:
+                next_val = 2
+            else:
+                next_val = 1
+            chan_text.append(str(next_val))
+            last_chan = next_val
+
     final_channels = apply_alignment_to_channels(chan_text, pos)
     channels_tensor = torch.tensor([int(x) - 1 for x in final_channels], dtype=torch.long)
 
