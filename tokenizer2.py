@@ -642,7 +642,7 @@ def main():
     #    of data. Typically you'd do a second pass (or store the BPE+RLE tokens
     #    from the entire file) to build your vocab comprehensively.
     with open(large_text_file, "r", encoding="utf-8") as f:
-        small_text_snippet = f.read(5000000)  # read e.g. first 5 MB
+        small_text_snippet = f.read()
     snippet_tokens = small_text_snippet.strip().split()
 
     # Apply BPE+RLE to that snippet

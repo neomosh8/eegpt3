@@ -243,6 +243,7 @@ def process_csv_file_s3(
 folders = list_s3_folders()
 csv_files = []
 i = 1
+folders = ["ds004504","ds004448","ds004447","ds004446","ds004408"]
 for folder in folders:
     print(f"{i}/{len(folders)}")
     print(f"looking into folder: {folder}")
@@ -251,13 +252,13 @@ for folder in folders:
     i=i+1
 print(f"done with {len(csv_files)} files")
 
-for file in csv_files:
-    if file.startswith("ds004408"):
-        resume_index = csv_files.index(file)
-        break
-resume = csv_files[resume_index:]
-print(f"resuming from: {resume_index}")
-parallel_process_csv_files(resume)
+# for file in csv_files:
+#     if file.startswith("ds004408"):
+#         resume_index = csv_files.index(file)
+#         resume = csv_files[resume_index:]
+#         print(f"resuming from: {resume_index}")
+#         break
+parallel_process_csv_files(csv_files)
 # process_csv_file_s3(csv_files[0])
 
 
