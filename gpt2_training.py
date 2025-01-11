@@ -401,7 +401,7 @@ def evaluate_multi_class_forced_choice(
     data_by_subject = {}
     for pt_file in all_pt_files:
         full_path = os.path.join(shards_dir, pt_file)
-        shard_data = torch.load(full_path, map_location=device)
+        shard_data = torch.load(full_path, map_location=device, weights_only=False)
 
         tokens = shard_data['tokens']   # shape [N]
         channels = shard_data['channels']
@@ -501,7 +501,6 @@ def evaluate_multi_class_forced_choice(
                 correct_tokens,
                 correct_chans,
                 device=device,
-                device_type=device_type
             )
             correct_loss_val = correct_loss.item()
 
@@ -530,53 +529,49 @@ def evaluate_multi_class_forced_choice(
 
 def compute_completion_loss_with_channels(
     model,
-    prompt_tokens, prompt_channels,
-    completion_tokens, completion_channels,
-    device="cuda"
+    prompt_tokens,
+    prompt_chans,
+    completion_tokens,
+    completion_chans,
+    device="cpu",
+    device_type="cuda"
 ):
     """
-    Returns the average cross-entropy loss on 'completion_tokens',
-    given 'prompt_tokens' + 'prompt_channels'.
+    Compute next-token prediction loss for `completion_tokens` given `prompt_tokens`.
+    Only the completion region is scored.
     """
-    model.eval()
-    with torch.no_grad():
-        # 1) Concatenate prompt + completion
-        full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
-        full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
+    # Move data to device and ensure proper dtype
+    prompt_tokens = prompt_tokens.to(device)
+    prompt_chans  = prompt_chans.to(device)
+    completion_tokens = completion_tokens.to(device)
+    completion_chans  = completion_chans.to(device)
 
-        total_len = full_tokens.size(1)
-        prompt_len = prompt_tokens.size(0)
-        completion_len = completion_tokens.size(0)
+    # We form an input sequence that is:
+    #   [prompt_tokens + completion_tokens[:-1]]
+    # And our targets are:
+    #   [                ???              + completion_tokens[1:] ]
+    # Because we only want the model to be scored on predicting "completion_tokens".
+    input_tokens = torch.cat([prompt_tokens, completion_tokens[:-1]], dim=0)
+    input_chans  = torch.cat([prompt_chans,  completion_chans[:-1]],  dim=0)
 
-        # 2) Build a mask that is 0 for prompt tokens, 1 for completion tokens
-        mask_vals = [0]*prompt_len + [1]*completion_len
-        mask = torch.tensor(mask_vals, device=device).unsqueeze(0)
+    input_tokens = input_tokens.unsqueeze(0)
+    input_chans  = input_chans.unsqueeze(0)
+    seq_len = input_tokens.size(1)
 
-        # 3) Forward
-        logits, _ = model(idx=full_tokens, channel_idx=full_channels)  # (1, total_len, vocab_size)
+    # Build a target that is shape (1, seq_len) but only has valid tokens in the
+    # completion region. We can mark the prompt region as -100 so it doesn't affect the loss.
+    target = torch.full((1, seq_len), -100, device=device, dtype=torch.long)
 
-        # 4) shift for next-token prediction
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_tokens = full_tokens[:, 1:].contiguous()
-        shift_mask   = mask[:, 1:].contiguous()
+    # The portion that corresponds to the completion is [prompt_len : ]
+    prompt_len = prompt_tokens.size(0)
+    # fill in the next-token portion
+    target[:, prompt_len:] = completion_tokens[1:].unsqueeze(0)
 
-        # 5) Flatten
-        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-        flat_tokens = shift_tokens.view(-1)
-        flat_mask   = shift_mask.view(-1)
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        logits, loss = model(idx=input_tokens, channel_idx=input_chans, targets=target)
 
-        # 6) Cross entropy per token
-        ce_per_token = F.cross_entropy(flat_logits, flat_tokens, reduction='none')
+    return loss.detach().float()
 
-        # 7) Zero out the prompt region
-        ce_completion = ce_per_token * flat_mask
-
-        # 8) Average loss over completion tokens
-        sum_loss = ce_completion.sum()
-        num_completion_tokens = flat_mask.sum()
-        avg_loss = sum_loss / (num_completion_tokens + 1e-9)
-
-    return avg_loss.item()
 epoch_num = 10
 total_batch_size = 524288
 B = 32
