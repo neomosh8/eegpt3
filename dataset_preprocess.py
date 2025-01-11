@@ -55,12 +55,13 @@ def download_and_preprocess_s3(
         except:
             pass
 
+    print(f"Found {len(file_pairs)} Pairs")
     if not file_pairs:
         raise ValueError("No valid coeffs/channels file pairs found.")
 
     # Shuffle
     random.shuffle(file_pairs)
-
+    print("shuffled")
     # Train/val split
     val_count = int(len(file_pairs) * val_ratio)
     val_pairs = file_pairs[:val_count]
