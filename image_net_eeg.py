@@ -2,67 +2,126 @@ import numpy as np
 import torch
 import pandas as pd
 import os
-from utils import preprocess_data
 import matplotlib.pyplot as plt
-from utils import preprocess_data, wavelet_decompose_window, quantize_number
+
+from utils import (
+    preprocess_data,
+    wavelet_decompose_window,
+    quantize_number
+)
 
 def average_alternate_channels(data):
-    # Assuming data is ch x sample array
-    # Get odd and even indexed channels
-    odd_channels = data[1::2]  # Start from index 1, step by 2
-    even_channels = data[0::2]  # Start from index 0, step by 2
+    """
+    data is shape [ch, samples].
+    We interpret channel 0,2,4,... as "even" channels,
+    and channel 1,3,5,... as "odd" channels.
+    We then average each group => returns 2xSamples array.
+    """
+    # 'even' channels: 0, 2, 4
+    even_channels = data[0::2]  # start=0 step=2
+    # 'odd' channels: 1, 3, 5
+    odd_channels  = data[1::2]  # start=1 step=2
 
-    # Average along the channel dimension (axis 0)
-    odd_avg = np.mean(odd_channels, axis=0)
-    even_avg = np.mean(even_channels, axis=0)
+    even_avg = np.mean(even_channels, axis=0) if even_channels.size > 0 else np.zeros(data.shape[1])
+    odd_avg  = np.mean(odd_channels, axis=0)  if odd_channels.size  > 0 else np.zeros(data.shape[1])
+
+    return np.stack([even_avg, odd_avg], axis=0)  # shape: [2, samples]
 
 
-    # Stack the averages to get 2 x sample array
-    return np.stack([even_avg, odd_avg])
-def process_and_save(data, sps, coeffs_path, chans_path, wavelet, level, window_len):
-    n_window_samples = window_len * sps
+def process_and_save(
+        data,         # shape [2, total_samples]
+        sps,          # sampling rate
+        coeffs_path,  # path to write the wavelet-coeff tokens
+        chans_path,   # path to write the channel-IDs
+        wavelet,
+        level,
+        window_len
+):
+    """
+    - data: shape [2, total_samples] (the two averaged channels).
+    - sps: samples per second
+    - wavelet, level: wavelet decomposition parameters
+    - window_len: length of each window in seconds
+    Writes out a single line per window containing interleaved tokens:
+      ch0_token_1, ch1_token_1, ch0_token_2, ch1_token_2, ...
+    and a second line with interleaved channel IDs:
+      0, 1, 0, 1, ...
+    """
+
+    n_window_samples = int(window_len * sps)
     total_samples = data.shape[1]
 
     with open(coeffs_path, 'w') as f_coeffs, open(chans_path, 'w') as f_chans:
-        # Slide through the data in non-overlapping windows
+        # Slide through data in non-overlapping windows of size n_window_samples
         for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_end = window_start + n_window_samples
 
-            all_channel_coeffs = []
-            all_channel_names = []
+            # ---------------------------
+            # Decompose Channel 0
+            # ---------------------------
+            ch0_data = data[0, window_start:window_end]
+            ch0_data_2d = ch0_data[np.newaxis, :]  # shape (1, n_window_samples)
 
-            # For exactly 2 channels: 0 => first channel, 1 => second channel
-            for ch_idx in range(2):
-                ch_name_id = "0" if ch_idx == 0 else "1"  # 0 for first channel, 1 for second
-                channel_data = data[ch_idx, window_start:window_end]
-                channel_data_2d = channel_data[np.newaxis, :]  # Reshape for processing
+            (ch0_decomp, ch0_lengths, ch0_num_samps, ch0_normed_data) = wavelet_decompose_window(
+                ch0_data_2d,
+                wavelet=wavelet,
+                level=level,
+                normalization=True
+            )
 
-                # Wavelet Decompose
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wavelet,
-                    level=level,
-                    normalization=True
+            ch0_flat = ch0_decomp.flatten()  # 1D array
+            ch0_quant = [str(quantize_number(val)) for val in ch0_flat]
+
+            # ---------------------------
+            # Decompose Channel 1
+            # ---------------------------
+            ch1_data = data[1, window_start:window_end]
+            ch1_data_2d = ch1_data[np.newaxis, :]
+
+            (ch1_decomp, ch1_lengths, ch1_num_samps, ch1_normed_data) = wavelet_decompose_window(
+                ch1_data_2d,
+                wavelet=wavelet,
+                level=level,
+                normalization=True
+            )
+
+            ch1_flat = ch1_decomp.flatten()
+            ch1_quant = [str(quantize_number(val)) for val in ch1_flat]
+
+            # Quick sanity check: both channels should produce the SAME length
+            if len(ch0_quant) != len(ch1_quant):
+                raise ValueError(
+                    f"Wavelet mismatch: ch0 has {len(ch0_quant)} coeffs, "
+                    f"ch1 has {len(ch1_quant)}. They must match!"
                 )
 
-                # Flatten for quantization
-                coeffs_flat = decomposed_channels.flatten()
-                q_ids = [str(quantize_number(c)) for c in coeffs_flat]  # Convert to strings
+            # ---------------------------
+            # Interleave them
+            # ---------------------------
+            interleaved_coeffs = []
+            interleaved_chans  = []
+            for i in range(len(ch0_quant)):
+                # Channel 0 token
+                interleaved_coeffs.append(ch0_quant[i])
+                interleaved_chans.append("0")
 
-                all_channel_coeffs.extend(q_ids)
-                all_channel_names.extend([ch_name_id] * len(q_ids))
+                # Channel 1 token
+                interleaved_coeffs.append(ch1_quant[i])
+                interleaved_chans.append("1")
 
-            # Write lines for this window
-            coeffs_line = " ".join(all_channel_coeffs) + " "
-            chans_line = " ".join(all_channel_names) + " "
+            # Convert to strings, add trailing space or newline
+            coeffs_line = " ".join(interleaved_coeffs) + "\n"
+            chans_line  = " ".join(interleaved_chans)  + "\n"
 
+            # Write out
             f_coeffs.write(coeffs_line)
             f_chans.write(chans_line)
+
+
+# --------------- EVERYTHING BELOW HERE is your main script logic ---------------
+
 wvlet = 'db2'  # example wavelet; change as needed
-level = 2     # decomposition level; change as needed
+level = 4      # wavelet decomposition level; change as needed
 
 def load_pth_file(file_path):
     """
@@ -100,34 +159,31 @@ def build_df_for_group(eeg_list, subject, image, granularity):
     - image: str
     - granularity: str
 
-    1) For each Tensor: transpose to (501 x 62), so rows = time-samples, columns = channels.
-    2) Concatenate all Tensors row-wise => final shape = (501*n) x 62.
-    3) Create a DataFrame, add metadata columns, return it.
+    1) Stack the EEG data so that dimension 0 = trials, dimension 1=channels, dimension 2=time
+    2) Reshape so rows=all time from all trials, columns=62 EEG channels
+    3) Return as a DataFrame
     """
     if not eeg_list:
         return None
 
-    # Stack all trials into one tensor of shape (n, 62, 501)
-    stacked = torch.stack(eeg_list)  # (n, 62, 501)
+    # (n, 62, 501)
+    stacked = torch.stack(eeg_list)
     n_trials = stacked.shape[0]
 
-    # Permute to (n, 501, 62) so that dimension 1 = time, dimension 2 = channels
-    stacked = stacked.permute(0, 2, 1)  # shape: (n, 501, 62)
+    # Swap time <-> channel to get shape (n, time, channels) => (n, 501, 62)
+    stacked = stacked.permute(0, 2, 1)
 
-    # Reshape => (n * 501, 62)
-    # i.e., all time-samples from all trials stacked row-wise
-    stacked_2d = stacked.reshape(-1, 62)  # (501*n, 62)
+    # Reshape => (n*501, 62)
+    stacked_2d = stacked.reshape(-1, 62)
 
     # Convert to numpy for DataFrame
     eeg_array = stacked_2d.numpy()
 
     # Channel column names
     channel_cols = [f"Channel_{i + 1}" for i in range(62)]
-
-    # Build DataFrame: rows = time-samples, columns = channels
     df = pd.DataFrame(eeg_array, columns=channel_cols)
 
-    # Insert metadata columns at the front, repeating for each row
+    # (Optionally) insert metadata columns
     df.insert(0, "Subject", subject)
     df.insert(1, "Image", image)
     df.insert(2, "Granularity", granularity)
@@ -136,7 +192,7 @@ def build_df_for_group(eeg_list, subject, image, granularity):
 
 
 def main():
-    file_path = "dataset/EEG-ImageNet_1.pth"  # <-- Change this
+    file_path = "dataset/EEG-ImageNet_1.pth"  # <-- Your input .pth file
     data = load_pth_file(file_path)
     if data is None:
         print("No data loaded.")
@@ -155,37 +211,47 @@ def main():
     output_dir = "validation_datasets_imageNet"
     os.makedirs(output_dir, exist_ok=True)
 
-    # 3) Process each group in series to avoid big memory usage
+    # 3) Process each group
     for idx, (subj, img, gran) in enumerate(groups, start=1):
         # Collect all trials for this group
         eeg_list = []
         for entry in dataset:
             if (
-                    entry.get('subject') == subj
-                    and entry.get('label') == img
-                    and entry.get('granularity') == gran
-                    and entry.get('eeg_data') is not None
+                entry.get('subject') == subj
+                and entry.get('label') == img
+                and entry.get('granularity') == gran
+                and entry.get('eeg_data') is not None
             ):
                 eeg_list.append(entry['eeg_data'])
 
         if not eeg_list:
             continue
 
-        # 4) Build the DataFrame
+        # 4) Build DataFrame
         df = build_df_for_group(eeg_list, subj, img, gran)
         if df is None:
             continue
+
+        # Just keep the EEG columns (drop the first 3 metadata columns)
         df.drop(df.columns[:3], axis=1, inplace=True)
-        prep,new_sps = preprocess_data(np.array(df).transpose(), 1000)
-        twoch = average_alternate_channels(prep)
-        # plot_eeg_channels(pd.DataFrame(twoch.transpose()), fs=new_sps, title="EEG")
-        # 5) Save to CSV
-        # Clean up the image string to avoid weird characters in filename
+
+        # shape => (channels, samples)
+        # but df is (samples, channels). So do transpose => shape [channels, samples]
+        data_2d = df.values.transpose()
+
+        original_sps = 1000  # your nominal sampling rate
+        prep_data, new_sps = preprocess_data(data_2d, original_sps)
+
+        # Now reduce from many channels to exactly 2 by averaging "odd" vs. "even" channels
+        twoch = average_alternate_channels(prep_data)  # => shape [2, samples]
+
+        # Build output filenames
         img_basename = os.path.splitext(os.path.basename(img))[0]
         out_name = f"subject_{subj}_image_{img_basename}_gran_{gran}"
-        coeffs_path = f"validation_datasets_imageNet/{out_name}_coeffs.txt"
-        chans_path= f"validation_datasets_imageNet/{out_name}_channels.txt"
-        # Process and save Right Hand data
+        coeffs_path = os.path.join(output_dir, f"{out_name}_coeffs.txt")
+        chans_path  = os.path.join(output_dir, f"{out_name}_channels.txt")
+
+        # 5) Actually run wavelet decomposition in windows & interleave
         process_and_save(
             data=twoch,
             sps=new_sps,
@@ -193,12 +259,11 @@ def main():
             chans_path=chans_path,
             wavelet=wvlet,
             level=level,
-            window_len=2
+            window_len=1.18  # e.g. 2-second windows
         )
 
-        # Free memory
-        del df
-        del eeg_list
+        # free memory
+        del df, eeg_list
 
     print("Done! All groups processed and saved.")
 

@@ -84,9 +84,9 @@ if __name__ == "__main__":
     # Example usage:
     # 1. Upload the folder ./local_shards to S3
     upload_folder_to_s3(
-        local_folder_path="./local_shards",
+        local_folder_path="./validation_datasets_imageNet",
         bucket_name="dataframes--use1-az6--x-s3",
-        s3_prefix="uploads/local_shards"
+        s3_prefix="uploads/validation_datasets_imageNet"
     )
 
     # # 2. Download the prefix uploads/local_shards from S3 into a local folder
