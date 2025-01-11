@@ -649,7 +649,7 @@ def main():
     final_tokens = tokenizer.encode(snippet_tokens)
     len_tokenized = len(final_tokens)
     # Build vocab
-    print(f"Comperession Ratio: {len_tokenized//len_original}")
+    print(f"Comperession Ratio: {len_tokenized}/{len_original}: ~ {len_tokenized/len_original}")
     tokenizer.build_vocab(final_tokens, add_unk=True)
     tokenizer.save_vocab("neo_tokenizer/vocab.json")
 
