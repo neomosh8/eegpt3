@@ -35,7 +35,7 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def parallel_process_csv_files(csv_files):
-    if '4444' in csv_files or '4448'
+    if True:
         max_workers = multiprocessing.cpu_count() //3
     else:
         max_workers = multiprocessing.cpu_count() -1
