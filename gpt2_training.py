@@ -574,7 +574,7 @@ def compute_completion_loss_with_channels(
 
 epoch_num = 10
 total_batch_size = 524288
-B = 32
+B = 64
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -624,6 +624,8 @@ train_losses = []
 val_losses   = []
 train_steps  = []
 val_steps    = []
+mc_val_losses=[]
+mc_val_steps =[]
 
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
@@ -685,6 +687,8 @@ for step in range(max_steps):
                 master_process=master_process
             )
         # If you wanted to record the accuracy in your logs:
+        mc_val_losses.append(acc)
+        mc_val_steps.append(step)
         if master_process:
             with open(log_file, "a") as f:
                 f.write(f"{step} MCval {acc:.4f}\n")
@@ -730,6 +734,7 @@ for step in range(max_steps):
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss')
             plt.plot(val_steps, val_losses, label='Val Loss')
+            plt.plot(mc_val_steps, mc_val_losses, label='MC-Val Loss')
             plt.xlabel('Steps')
             plt.ylabel('Loss')
             plt.title('Training and Validation Loss')
