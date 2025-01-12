@@ -139,7 +139,7 @@ class GPTConfig:
     # n_layer: int = 20
     # n_head: int = 36
     # n_embd: int = 2052
-    n_layer: int = 24
+    n_layer: int = 18
     n_head: int = 16
     n_embd: int = 1024
     num_channels: int = 2
