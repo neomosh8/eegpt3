@@ -660,7 +660,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 50 == 0 or last_step:
+    if step % 1000 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -682,7 +682,7 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        if step > 0 and (step % 500 == 0 or last_step):
+        if step > 0 and (step % 1500 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
@@ -694,7 +694,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 200 == 0 or last_step:
+    if step % 1000 == 0 or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
@@ -753,7 +753,7 @@ for step in range(max_steps):
         train_losses.append(train_loss_val)
         train_steps.append(step)
         # Plot every several steps  ### ADDED LINES ###
-        if step % 100 == 0:
+        if step % 250 == 0:
             # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss', color='blue')
