@@ -821,7 +821,7 @@ for step in range(max_steps):
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
-            f.write(f"{step} train loss: {train_loss_val:.6f}\n, lr: {lr:.4e} | norm {norm:.4f}")
+            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {lr:.4e} | norm {norm:.4f}\n")
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
