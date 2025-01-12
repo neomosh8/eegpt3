@@ -404,6 +404,117 @@ class DataLoaderLite:
         """
         self.current_shard_idx = 0
         self._load_shard(self.shard_files[self.current_shard_idx])
+class DataLoaderLiteAllInMemory:
+    """
+    A DataLoader that loads *all* .pt shard files from a local directory up front,
+    concatenates them, and iterates through them in memory.
+    """
+    def __init__(
+        self,
+        B: int,
+        T: int,
+        process_rank: int,
+        num_processes: int,
+        local_data_dir: str = "./local_shards",
+        shard_prefix: str = "mydata",
+        split: str = "train",
+        shuffle_shards: bool = False
+    ):
+        """
+        Args:
+            B: Batch size
+            T: Sequence length
+            process_rank: (DDP) process rank
+            num_processes: total DDP processes
+            local_data_dir: directory containing .pt shards
+            shard_prefix: prefix used in naming the shards
+            split: "train" or "val"
+            shuffle_shards: whether to shuffle the order of shards before concatenation
+        """
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+
+        # Collect shards for the requested split
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
+        self.shard_files = sorted(glob.glob(pattern))
+        if not self.shard_files:
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
+
+        if shuffle_shards:
+            random.shuffle(self.shard_files)
+
+        # Load them all up front
+        all_tokens = []
+        all_channels = []
+        for shard_path in self.shard_files:
+            loaded = torch.load(shard_path, weights_only=False)
+            shard_tokens = loaded['tokens']        # shape [N]
+            shard_channels = loaded['channels']    # shape [N]
+            if len(shard_tokens) != len(shard_channels):
+                raise ValueError("tokens and channels length mismatch in shard!")
+            all_tokens.append(shard_tokens)
+            all_channels.append(shard_channels)
+
+        # Concatenate
+        self.tokens = torch.cat(all_tokens, dim=0)      # shape [sum_of_all_lengths]
+        self.channels = torch.cat(all_channels, dim=0)  # same shape as tokens
+
+        # Current read position
+        self.current_position = self.B * self.T * self.process_rank
+
+        # For convenience, store the total length
+        self.total_len = len(self.tokens)
+
+    def next_batch(self):
+        """
+        Fetch the next (x, c, y) batch from our big in-memory dataset.
+        If we run out of data (approach the end), we wrap around from the beginning.
+        """
+        B, T = self.B, self.T
+
+        # +1 because we need (B*T + 1) tokens to form a next-token prediction problem
+        start = self.current_position
+        end = start + (B * T + 1)
+
+        # If we exceed the total, wrap around
+        if end > self.total_len:
+            # Option 1: wrap around
+            wrap_end = end - self.total_len
+            buf_tokens = torch.cat([
+                self.tokens[start:],
+                self.tokens[:wrap_end]
+            ], dim=0)
+            buf_channels = torch.cat([
+                self.channels[start:],
+                self.channels[:wrap_end]
+            ], dim=0)
+            # We also update position accordingly
+            self.current_position = wrap_end
+        else:
+            buf_tokens = self.tokens[start:end]
+            buf_channels = self.channels[start:end]
+            self.current_position = end
+
+        # Now make the batch
+        x = buf_tokens[:-1].view(B, T)
+        y = buf_tokens[1:].view(B, T)
+        c = buf_channels[:-1].view(B, T)
+
+        # Advance position for DDP "stride"
+        # If each process is reading a disjoint chunk, you might do:
+        self.current_position += B * T * (self.num_processes - 1)
+
+        # But for fully joined data among processes, you might not do the above line.
+
+        return x, c, y
+
+    def reset(self):
+        """
+        Reset the iteration index (useful for validation).
+        """
+        self.current_position = self.B * self.T * self.process_rank
 
 
 
@@ -648,8 +759,25 @@ if master_process:
 torch.set_float32_matmul_precision('high')
 
 
-train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B//4, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+# train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
+# val_loader = DataLoaderLite(B=B//4, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+
+train_loader = DataLoaderLiteAllInMemory(B=B, T=T,
+                                         process_rank=ddp_rank,
+                                         num_processes=ddp_world_size,
+                                         local_data_dir="./local_shards",
+                                         shard_prefix="mydata",
+                                         split='train',
+                                         shuffle_shards=True)  # or False
+
+val_loader   = DataLoaderLiteAllInMemory(B=B//4, T=T,
+                                         process_rank=ddp_rank,
+                                         num_processes=ddp_world_size,
+                                         local_data_dir="./local_shards",
+                                         shard_prefix="mydata",
+                                         split='val',
+                                         shuffle_shards=False)
+
 
 model = GPT(GPTConfig())
 model.to(device)
