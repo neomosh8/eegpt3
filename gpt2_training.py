@@ -865,8 +865,8 @@ for step in range(max_steps):
         if step % 100 == 0:
             # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
-            plt.plot(train_steps, train_losses, label='Train Loss', color='blue')
-            plt.plot(val_steps, val_losses, label='Val Loss', color='orange')
+            plt.plot(train_steps, train_losses, label='Train Loss', color='#63B8FF', alpha=0.6)
+            plt.plot(val_steps, val_losses, label='Val Loss', color='#1E56A0')
             # NEW LINES: compute and plot the MA
             ma_train_losses = moving_average(train_losses, window_size=50)
             plt.plot(train_steps, ma_train_losses, label='Train Loss (MA)',
