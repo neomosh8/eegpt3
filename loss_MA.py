@@ -23,7 +23,7 @@ with open(file_path, 'r') as file:
 df = pd.DataFrame(data, columns=['Epoch', 'Train Loss'])
 
 # Calculate the moving average (using a window size of 50 for demonstration)
-window_size = 500
+window_size = 200
 df['Moving Average'] = moving_average(df['Train Loss'], window_size)
 
 # Plot the training loss and its moving average

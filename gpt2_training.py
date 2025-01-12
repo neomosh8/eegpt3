@@ -277,7 +277,7 @@ class DataLoaderLite:
 
         # Collect shards for the requested split
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))
+        self.shard_files = sorted(glob.glob(pattern))[0:200]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
 
@@ -571,6 +571,22 @@ def compute_completion_loss_with_channels(
         logits, loss = model(idx=input_tokens, channel_idx=input_chans, targets=target)
 
     return loss.detach().float()
+def moving_average(values, window_size=10):
+    """
+    Compute the simple moving average of a list of values.
+    """
+    if len(values) < window_size:
+        return values  # not enough data, just return as-is
+
+    # We'll output an array of the same length,
+    # where each index i is the average of the last `window_size` points
+    # (or fewer at the start).
+    averaged = []
+    for i in range(len(values)):
+        start = max(0, i - window_size + 1)
+        chunk = values[start : i + 1]
+        averaged.append(sum(chunk) / len(chunk))
+    return averaged
 
 epoch_num = 10
 total_batch_size = 524288
@@ -734,6 +750,18 @@ for step in range(max_steps):
         loss.backward()
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    # --- after finishing grad accumulation, before clipping ---
+    if master_process:  # so we only print once in DDP
+        with torch.no_grad():
+            # Example: get gradient norm for the word embedding (wte) weights
+            wte_grad = raw_model.transformer.wte.weight.grad
+            wte_grad_norm = wte_grad.norm(2).item() if wte_grad is not None else 0.0
+
+            # Example: get gradient norm for the first block's attention projection
+            c_attn_grad = raw_model.transformer.h[0].attn.c_attn.weight.grad
+            c_attn_grad_norm = c_attn_grad.norm(2).item() if c_attn_grad is not None else 0.0
+
+            print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -758,6 +786,10 @@ for step in range(max_steps):
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss', color='blue')
             plt.plot(val_steps, val_losses, label='Val Loss', color='orange')
+            # NEW LINES: compute and plot the MA
+            ma_train_losses = moving_average(train_losses, window_size=50)
+            plt.plot(train_steps, ma_train_losses, label='Train Loss (MA)',
+                     color='black', linestyle='--')
             plt.xlabel('Steps')
             plt.ylabel('Loss')
             plt.title('Training and Validation Loss')
