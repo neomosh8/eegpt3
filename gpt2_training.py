@@ -139,9 +139,9 @@ class GPTConfig:
     # n_layer: int = 20
     # n_head: int = 36
     # n_embd: int = 2052
-    n_layer: int = 18
-    n_head: int = 16
-    n_embd: int = 1024
+    n_layer: int = 36
+    n_head: int = 20
+    n_embd: int = 1280
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -572,9 +572,9 @@ def compute_completion_loss_with_channels(
 
     return loss.detach().float()
 
-epoch_num = 3
-total_batch_size = 786432
-B = 48
+epoch_num = 10
+total_batch_size = 73728
+B = 24
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -596,7 +596,7 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 5e-5
-min_lr = 1e-7
+min_lr = 1e-8
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
