@@ -13,7 +13,8 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
-
+small_model = True
+resume = False
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
@@ -136,12 +137,14 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 6460
-    # n_layer: int = 20
-    # n_head: int = 36
-    # n_embd: int = 2052
-    n_layer: int = 36
-    n_head: int = 20
-    n_embd: int = 1280
+    if small_model:
+        n_layer: int = 12  # number of layers
+        n_head: int = 12  # number of heads
+        n_embd: int = 768  # embedding dimension
+    else:
+        n_layer: int = 36
+        n_head: int = 20
+        n_embd: int = 1280
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -588,10 +591,18 @@ def moving_average(values, window_size=10):
         averaged.append(sum(chunk) / len(chunk))
     return averaged
 
-epoch_num = 10
-total_batch_size = 524288
-B = 16
-T = 1024
+if small_model:
+    epoch_num = 10
+    total_batch_size = 524288
+    B = 64
+    T = 1024
+else:
+    epoch_num = 10
+    total_batch_size = 524288
+    B = 16
+    T = 1024
+
+
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
 if master_process:
@@ -657,6 +668,38 @@ def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_step
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-4,device=device)
 
+
+####RESUME
+if resume:
+    log_dir = "log_resume"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "log.txt")
+
+    # Find the most recent checkpoint file if any exist
+    def get_latest_checkpoint(log_dir):
+        ckpts = sorted(glob.glob(os.path.join(log_dir, "model_*.pt")))
+        if len(ckpts) == 0:
+            return None
+        return ckpts[-1]  # return the most recent
+
+    latest_ckpt_path = get_latest_checkpoint(log_dir)
+    start_step = 0
+
+    # If there is a checkpoint, load it
+    if latest_ckpt_path is not None and os.path.isfile(latest_ckpt_path):
+        if master_process:
+            print(f"Resuming from checkpoint: {latest_ckpt_path}")
+        checkpoint = torch.load(latest_ckpt_path, map_location=device)
+        raw_model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        start_step = checkpoint['step'] + 1  # resume from the next step
+    else:
+        # start a fresh log file
+        with open(log_file, "w") as f:
+            pass
+##########
+
+
 # keep track of losses to plot later  ### ADDED LINES ###
 train_losses = []
 val_losses   = []
@@ -676,7 +719,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 1000 == 0 or last_step:
+    if step % 250 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -756,12 +799,14 @@ for step in range(max_steps):
             # Example: get gradient norm for the word embedding (wte) weights
             wte_grad = raw_model.transformer.wte.weight.grad
             wte_grad_norm = wte_grad.norm(2).item() if wte_grad is not None else 0.0
-
+            # Example: get gradient norm for the channel embedding (wce) weights
+            wce_grad = raw_model.transformer.wce.weight.grad
+            wce_grad_norm = wce_grad.norm(2).item() if wce_grad is not None else 0.0
             # Example: get gradient norm for the first block's attention projection
             c_attn_grad = raw_model.transformer.h[0].attn.c_attn.weight.grad
             c_attn_grad_norm = c_attn_grad.norm(2).item() if c_attn_grad is not None else 0.0
 
-            print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}")
+            print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}, wce={wce_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
