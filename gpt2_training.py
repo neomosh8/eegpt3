@@ -71,8 +71,8 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
         # optional attention dropout
-        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
-        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
+        # self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        # self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
 
         # regularization
         self.n_head = config.n_head
@@ -89,12 +89,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
-        y = self.attn_dropout(y)
+        # y = self.attn_dropout(y)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
-        y = self.resid_dropout(y)
+        # y = self.resid_dropout(y)
 
         return y
 
@@ -104,17 +104,17 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu    = nn.GELU(approximate='tanh')
-        self.dropout = nn.Dropout(p=getattr(config, 'mlp_dropout', 0.05))
+        # self.dropout = nn.Dropout(p=getattr(config, 'mlp_dropout', 0.05))
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
-        x = self.dropout(x)     # dropout after activation
+        # x = self.dropout(x)     # dropout after activation
 
         x = self.c_proj(x)
-        x = self.dropout(x)     # optional dropout again
+        # x = self.dropout(x)     # optional dropout again
 
         return x
 
@@ -139,9 +139,9 @@ class GPTConfig:
     # n_layer: int = 20
     # n_head: int = 36
     # n_embd: int = 2052
-    n_layer: int = 18
-    n_head: int = 12
-    n_embd: int = 768
+    n_layer: int = 24
+    n_head: int = 16
+    n_embd: int = 1024
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -596,14 +596,14 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 3e-4
-min_lr = 1e-7
+min_lr = 1e-6
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.03*max_steps)
 
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1.7*max_steps):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1.4*max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 
@@ -709,8 +709,8 @@ for step in range(max_steps):
                 master_process=master_process
             )
         # If you wanted to record the accuracy in your logs:
-        mc_val_loss = -math.log(acc + 1e-9)
-        mc_val_losses.append(mc_val_loss)
+        # mc_val_loss = -math.log(acc + 1e-9)
+        mc_val_losses.append(acc*100)
         mc_val_steps.append(step)
         if master_process:
             with open(log_file, "a") as f:
@@ -752,20 +752,40 @@ for step in range(max_steps):
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
-        # Plot every 50 steps  ### ADDED LINES ###
+        # Plot every several steps  ### ADDED LINES ###
         if step % 100 == 0:
+            # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
-            plt.plot(train_steps, train_losses, label='Train Loss')
-            plt.plot(val_steps, val_losses, label='Val Loss')
-            plt.plot(mc_val_steps, mc_val_losses, label='MC-Val Loss')
+            plt.plot(train_steps, train_losses, label='Train Loss', color='blue')
+            plt.plot(val_steps, val_losses, label='Val Loss', color='orange')
             plt.xlabel('Steps')
             plt.ylabel('Loss')
             plt.title('Training and Validation Loss')
             plt.legend()
             plt.grid(True)
-            # Save a single PNG (overwrites each time)
-            png_path = os.path.join(log_dir, "loss_plot.png")
-            plt.savefig(png_path)
+
+            # Save figure for train/val
+            train_val_png_path = os.path.join(log_dir, "train_val_loss_plot.png")
+            plt.savefig(train_val_png_path)
+            plt.close()
+
+            # ---- 2) Figure for MC Loss with Random Baseline ----
+            plt.figure(figsize=(10, 6))
+            plt.plot(mc_val_steps, mc_val_losses, label='MC-Val Loss', color='green')
+
+            # Horizontal random baseline
+            random_baseline = 100/80
+            plt.axhline(y=random_baseline, color='red', linestyle='--', label='Random Baseline')
+
+            plt.xlabel('Steps')
+            plt.ylabel('MC Loss')
+            plt.title('MC Validation Loss')
+            plt.legend()
+            plt.grid(True)
+
+            # Save figure for MC loss
+            mc_png_path = os.path.join(log_dir, "mc_loss_plot.png")
+            plt.savefig(mc_png_path)
             plt.close()
 if master_process:
     upload_folder_to_s3(
