@@ -836,7 +836,7 @@ for step in range(max_steps):
             wte_grad = raw_model.transformer.wte.weight.grad
             wte_grad_norm = wte_grad.norm(2).item() if wte_grad is not None else 0.0
             # Example: get gradient norm for the channel embedding (wce) weights
-            wce_grad = raw_model.transformer.wce.weight.grad
+            wce_grad = raw_model.wce.weight.grad  # note: no ".transformer" anymore
             wce_grad_norm = wce_grad.norm(2).item() if wce_grad is not None else 0.0
             # Example: get gradient norm for the first block's attention projection
             c_attn_grad = raw_model.transformer.h[0].attn.c_attn.weight.grad
