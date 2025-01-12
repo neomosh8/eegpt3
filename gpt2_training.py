@@ -572,9 +572,9 @@ def compute_completion_loss_with_channels(
 
     return loss.detach().float()
 
-epoch_num = 10
+epoch_num = 3
 total_batch_size = 524288
-B = 32
+B = 48
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
@@ -595,15 +595,15 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 3e-4
-min_lr = 1e-6
+max_lr = 5e-5
+min_lr = 1e-7
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
-warmup_steps =int(0.03*max_steps)
+warmup_steps =int(0.02*max_steps)
 
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1.4*max_steps):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=0.7*max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 
