@@ -280,7 +280,7 @@ class DataLoaderLite:
 
         # Collect shards for the requested split
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[0:200]
+        self.shard_files = sorted(glob.glob(pattern))[0:1000]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
 
@@ -613,7 +613,7 @@ torch.set_float32_matmul_precision('high')
 
 
 train_loader = DataLoaderLite(B=B, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='train')
-val_loader = DataLoaderLite(B=B//8, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
+val_loader = DataLoaderLite(B=B//4, T=T , process_rank=ddp_rank, num_processes=ddp_world_size,split='val')
 
 model = GPT(GPTConfig())
 model.to(device)
