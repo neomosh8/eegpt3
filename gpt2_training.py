@@ -710,7 +710,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 1000 == 0 or last_step:
+    if step % 1000 == 0 or last_step and False:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
@@ -776,7 +776,7 @@ for step in range(max_steps):
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
-            f.write(f"{step} train {train_loss_val:.6f}\n")
+            f.write(f"{step} train loss: {train_loss_val:.6f}\n, lr: {lr:.4e} | norm {norm:.4f}")
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
