@@ -595,15 +595,15 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 5e-5
-min_lr = 1e-8
+max_lr = 1e-3
+min_lr = 5e-5
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=0.7*max_steps):
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=0.5*max_steps):
     """
     Calculate the learning rate for a given iteration using simple exponential decay.
 
