@@ -316,7 +316,7 @@ class DataLoaderLite:
 
         # Collect shards for the requested split
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[0:1000]
+        self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
 
@@ -789,7 +789,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 1000 == 0 or last_step and False:
+    if step % 1000 == 0 or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
@@ -862,7 +862,7 @@ for step in range(max_steps):
         train_losses.append(train_loss_val)
         train_steps.append(step)
         # Plot every several steps  ### ADDED LINES ###
-        if step % 250 == 0:
+        if step % 100 == 0:
             # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss', color='blue')
