@@ -23,3 +23,4 @@ goh
 *.mat
 /validation_datasets_imageNet
 dataset/EEG-ImageNet_1.pth
+log.txt
