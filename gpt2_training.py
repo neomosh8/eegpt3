@@ -573,8 +573,8 @@ def compute_completion_loss_with_channels(
     return loss.detach().float()
 
 epoch_num = 10
-total_batch_size = 589824
-B = 24
+total_batch_size = 491520
+B = 12
 T = 1024
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
 grad_accum_steps = total_batch_size //(B * T * ddp_world_size)
