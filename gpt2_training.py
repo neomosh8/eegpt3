@@ -787,39 +787,31 @@ warmup_steps =int(0.02*max_steps)
 if master_process:
     print("Max Steps: ",max_steps)
 
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1*max_steps):
-    """
-    Calculate the learning rate for a given iteration using simple exponential decay.
+best_val_loss = float('inf')
+no_improvement_count = 0
+patience = 5  # how many validations in a row until we decide it's a plateau
 
-    Parameters:
-        it (int): Current iteration.
-        max_lr (float): Initial maximum learning rate.
-        min_lr (float): Minimum learning rate after decay.
-        warmup_steps (int): Number of warmup steps.
-        max_steps (int): Total number of steps.
 
-    Returns:
-        float: Learning rate at the given iteration.
+def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps, cut=False):
     """
-    if it < warmup_steps:
-        # Linear warmup
-        lr = max_lr * (it + 1) / warmup_steps
-    elif it > max_steps:
-        # After max_steps, maintain min_lr
-        lr = min_lr
+    Custom LR schedule:
+    - Linear warmup for `warmup_steps`.
+    - Then exponential decay from [max_lr -> min_lr] over `total_steps`.
+    - If cut=True, we forcibly "jump" to half the current LR.
+    """
+    if step < warmup_steps:
+        # linear warmup
+        lr = max_lr * (step + 1) / warmup_steps
     else:
-        # Exponential decay
-        decay_steps = it - warmup_steps
-        total_decay_steps = max_steps - warmup_steps
-
-        # Calculate decay rate to reach min_lr at max_steps
-        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
-
-        # Apply exponential decay
-        lr = max_lr * math.exp(decay_rate * decay_steps)
-
-        # Ensure lr does not go below min_lr
+        # normal exponential decay (just an example formula)
+        ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
+        ratio = min(1.0, max(0.0, ratio))  # clamp
+        lr = max_lr * (min_lr / max_lr) ** ratio
         lr = max(lr, min_lr)
+
+    if cut:
+        # forcibly reduce LR by a factor (e.g. half)
+        lr *= 0.5
 
     return lr
 
@@ -897,6 +889,32 @@ for step in range(max_steps):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
+            current_val_loss = val_loss_accum
+            print(f"Step {step} | val_loss {current_val_loss:.4f} | plateau_flag={plateau_flag}")
+
+            # 1) check improvement vs best
+            threshold = 1e-4
+            if current_val_loss < best_val_loss - threshold:
+                best_val_loss = current_val_loss
+                no_improvement_count = 0
+                plateau_flag = False
+            else:
+                no_improvement_count += 1
+                if no_improvement_count >= patience:
+                    plateau_flag = True
+                    no_improvement_count = 0  # reset so we won't cut repeatedly every validation
+                else:
+                    plateau_flag = False
+        if ddp:
+            plateau_tensor = torch.tensor([1 if plateau_flag else 0], device=device,
+                                          dtype=torch.int64) if ddp_rank == 0 else torch.zeros(1, device=device,
+                                                                                               dtype=torch.int64)
+            dist.broadcast(plateau_tensor, src=0)
+            plateau_flag = (plateau_tensor.item() == 1)
+        # get LR for this step
+        lr = get_lr(step, cut=plateau_flag)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         if step > 0 and (step % 1500 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
