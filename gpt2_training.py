@@ -15,7 +15,7 @@ import numpy as np
 from torch.special import logit
 import boto3
 small_model = False
-resume = False
+resume = True
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
@@ -732,12 +732,12 @@ def moving_average(values, window_size=10):
     return averaged
 
 if small_model:
-    epoch_num = 10
+    epoch_num = 20
     total_batch_size = 524288
     B = 64
     T = 1024
 else:
-    epoch_num = 10
+    epoch_num = 20
     total_batch_size = 524288
     B = 16
     T = 1024
@@ -780,7 +780,7 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 1e-3
-min_lr = 5e-5
+min_lr = 1e-5
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
@@ -820,7 +820,7 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,de
 
 ####RESUME
 if resume:
-    log_dir = "log_resume"
+    log_dir = "log"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "log.txt")
 
