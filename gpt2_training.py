@@ -817,6 +817,7 @@ def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,device=device)
 
+start_step = 0
 
 ####RESUME
 if resume:
@@ -865,7 +866,7 @@ if not resume:
     with open(log_file, "w") as f: # open for writing to clear the file
         pass
 
-for step in range(max_steps):
+for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
@@ -984,7 +985,7 @@ for step in range(max_steps):
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}, wce={wce_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
-    lr = get_lr(step)
+    lr = get_lr(step, cut=plateau_flag)
     for param_group in optimizer.param_groups:
         param_group['lr']=lr
     optimizer.step()
@@ -993,6 +994,7 @@ for step in range(max_steps):
     dt = t1-t0
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     token_per_second = tokens_processed/dt
+    plateau_flag = False
     if master_process:
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
