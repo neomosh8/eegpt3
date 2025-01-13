@@ -856,12 +856,14 @@ train_steps  = []
 val_steps    = []
 mc_val_losses=[]
 mc_val_steps =[]
-# create the log directory we will write checkpoints to and log to
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
-    pass
+
+if not resume:
+    # create the log directory we will write checkpoints to and log to
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"log.txt")
+    with open(log_file, "w") as f: # open for writing to clear the file
+        pass
 
 for step in range(max_steps):
     t0 = time.time()
