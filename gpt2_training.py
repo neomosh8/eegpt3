@@ -829,9 +829,9 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,de
 scheduler = ReduceLROnPlateau(
     optimizer,
     mode='min',           # 'min' means we'll reduce LR when val_loss stops decreasing
-    factor=0.1,           # multiply LR by this factor
-    patience=5,           # epochs (or "validation checks") to wait before reducing
-    threshold=0.0003,     # only trigger if the improvement in monitored metric is > this threshold
+    factor=0.5,           # multiply LR by this factor
+    patience=3,           # epochs (or "validation checks") to wait before reducing
+    threshold=0.0001,     # only trigger if the improvement in monitored metric is > this threshold
     threshold_mode='rel', # measure relative improvement
     cooldown=0,
     min_lr=1e-8,
@@ -889,7 +889,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 50 == 0 or last_step:
+    if step % 25 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -1000,7 +1000,7 @@ for step in range(max_steps):
         train_losses.append(train_loss_val)
         train_steps.append(step)
         # Plot every several steps  ### ADDED LINES ###
-        if step % 100 == 0:
+        if step % 50 == 0:
             # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss', color='#63B8FF', alpha=0.6)
