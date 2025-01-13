@@ -468,45 +468,37 @@ class DataLoaderLiteAllInMemory:
         self.total_len = len(self.tokens)
 
     def next_batch(self):
-        """
-        Fetch the next (x, c, y) batch from our big in-memory dataset.
-        If we run out of data (approach the end), we wrap around from the beginning.
-        """
         B, T = self.B, self.T
+        needed = B * T + 1
 
-        # +1 because we need (B*T + 1) tokens to form a next-token prediction problem
-        start = self.current_position
-        end = start + (B * T + 1)
-
-        # If we exceed the total, wrap around
-        if end > self.total_len:
-            # Option 1: wrap around
-            wrap_end = end - self.total_len
-            buf_tokens = torch.cat([
-                self.tokens[start:],
-                self.tokens[:wrap_end]
-            ], dim=0)
-            buf_channels = torch.cat([
-                self.channels[start:],
-                self.channels[:wrap_end]
-            ], dim=0)
-            # We also update position accordingly
-            self.current_position = wrap_end
+        if self.current_position + needed <= self.total_len:
+            # no wrap
+            buf_tokens = self.tokens[self.current_position: self.current_position + needed]
+            buf_channels = self.channels[self.current_position: self.current_position + needed]
+            self.current_position += needed
         else:
-            buf_tokens = self.tokens[start:end]
-            buf_channels = self.channels[start:end]
-            self.current_position = end
+            # wrap
+            leftover = self.total_len - self.current_position
+            wrap_amount = needed - leftover
+            part1_toks = self.tokens[self.current_position:]
+            part1_chans = self.channels[self.current_position:]
+            part2_toks = self.tokens[: wrap_amount]
+            part2_chans = self.channels[: wrap_amount]
 
-        # Now make the batch
+            buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
+            buf_channels = torch.cat([part1_chans, part2_chans], dim=0)
+
+            # Now we wrap around, so new position is wrap_amount
+            self.current_position = wrap_amount
+
+        # Should now have exactly needed = B*T+1
+        if len(buf_tokens) != needed:
+            raise RuntimeError(f"Unexpected length. Expected {needed}, got {len(buf_tokens)}")
+
+        # Final reshape
         x = buf_tokens[:-1].view(B, T)
         y = buf_tokens[1:].view(B, T)
         c = buf_channels[:-1].view(B, T)
-
-        # Advance position for DDP "stride"
-        # If each process is reading a disjoint chunk, you might do:
-        self.current_position += B * T * (self.num_processes - 1)
-
-        # But for fully joined data among processes, you might not do the above line.
 
         return x, c, y
 
