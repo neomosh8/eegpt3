@@ -928,7 +928,7 @@ for step in range(max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if step % 1000 == 0 or last_step:
+    if (step>0 and step % 1000 == 0) or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
