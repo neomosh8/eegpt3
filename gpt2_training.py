@@ -763,7 +763,7 @@ train_loader = DataLoaderLiteAllInMemory(B=B, T=T,
                                          split='train',
                                          shuffle_shards=True)  # or False
 
-val_loader   = DataLoaderLiteAllInMemory(B=B//4, T=T,
+val_loader   = DataLoaderLiteAllInMemory(B=B, T=T,
                                          process_rank=ddp_rank,
                                          num_processes=ddp_world_size,
                                          local_data_dir="./local_shards",
