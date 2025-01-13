@@ -14,7 +14,7 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
-small_model = True
+small_model = False
 resume = False
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
