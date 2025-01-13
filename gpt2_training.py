@@ -848,7 +848,7 @@ if resume:
             pass
 ##########
 
-
+plateau_flag = False
 # keep track of losses to plot later  ### ADDED LINES ###
 train_losses = []
 val_losses   = []
