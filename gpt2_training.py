@@ -838,7 +838,7 @@ if resume:
     if latest_ckpt_path is not None and os.path.isfile(latest_ckpt_path):
         if master_process:
             print(f"Resuming from checkpoint: {latest_ckpt_path}")
-        checkpoint = torch.load(latest_ckpt_path, map_location=device)
+        checkpoint = torch.load(latest_ckpt_path, map_location=device,weights_only=False)
         raw_model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         start_step = checkpoint['step'] + 1  # resume from the next step
