@@ -878,7 +878,7 @@ train_steps  = []
 val_steps    = []
 mc_val_losses=[]
 mc_val_steps =[]
-
+current_val_loss = 0.0
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
