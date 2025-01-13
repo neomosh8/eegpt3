@@ -831,12 +831,11 @@ scheduler = ReduceLROnPlateau(
     mode='min',           # 'min' means we'll reduce LR when val_loss stops decreasing
     factor=0.1,           # multiply LR by this factor
     patience=5,           # epochs (or "validation checks") to wait before reducing
-    threshold=0.0001,     # only trigger if the improvement in monitored metric is > this threshold
+    threshold=0.0003,     # only trigger if the improvement in monitored metric is > this threshold
     threshold_mode='rel', # measure relative improvement
     cooldown=0,
     min_lr=1e-8,
     eps=1e-08,
-    verbose=True          # prints whenever LR is reduced
 )
 
 ####RESUME
@@ -890,7 +889,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 200 == 0 or last_step:
+    if step % 50 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
