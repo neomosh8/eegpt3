@@ -787,56 +787,44 @@ warmup_steps =int(0.02*max_steps)
 if master_process:
     print("Max Steps: ",max_steps)
 
-# def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=0.5*max_steps):
-#     """
-#     Calculate the learning rate for a given iteration using simple exponential decay.
-#
-#     Parameters:
-#         it (int): Current iteration.
-#         max_lr (float): Initial maximum learning rate.
-#         min_lr (float): Minimum learning rate after decay.
-#         warmup_steps (int): Number of warmup steps.
-#         max_steps (int): Total number of steps.
-#
-#     Returns:
-#         float: Learning rate at the given iteration.
-#     """
-#     if it < warmup_steps:
-#         # Linear warmup
-#         lr = max_lr * (it + 1) / warmup_steps
-#     elif it > max_steps:
-#         # After max_steps, maintain min_lr
-#         lr = min_lr
-#     else:
-#         # Exponential decay
-#         decay_steps = it - warmup_steps
-#         total_decay_steps = max_steps - warmup_steps
-#
-#         # Calculate decay rate to reach min_lr at max_steps
-#         decay_rate = math.log(min_lr / max_lr) / total_decay_steps
-#
-#         # Apply exponential decay
-#         lr = max_lr * math.exp(decay_rate * decay_steps)
-#
-#         # Ensure lr does not go below min_lr
-#         lr = max(lr, min_lr)
-#
-#     return lr
+def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1*max_steps):
+    """
+    Calculate the learning rate for a given iteration using simple exponential decay.
+
+    Parameters:
+        it (int): Current iteration.
+        max_lr (float): Initial maximum learning rate.
+        min_lr (float): Minimum learning rate after decay.
+        warmup_steps (int): Number of warmup steps.
+        max_steps (int): Total number of steps.
+
+    Returns:
+        float: Learning rate at the given iteration.
+    """
+    if it < warmup_steps:
+        # Linear warmup
+        lr = max_lr * (it + 1) / warmup_steps
+    elif it > max_steps:
+        # After max_steps, maintain min_lr
+        lr = min_lr
+    else:
+        # Exponential decay
+        decay_steps = it - warmup_steps
+        total_decay_steps = max_steps - warmup_steps
+
+        # Calculate decay rate to reach min_lr at max_steps
+        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
+
+        # Apply exponential decay
+        lr = max_lr * math.exp(decay_rate * decay_steps)
+
+        # Ensure lr does not go below min_lr
+        lr = max(lr, min_lr)
+
+    return lr
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,device=device)
 
-# Create the scheduler; tweak the arguments as needed
-scheduler = ReduceLROnPlateau(
-    optimizer,
-    mode='min',           # 'min' means we'll reduce LR when val_loss stops decreasing
-    factor=0.5,           # multiply LR by this factor
-    patience=3,           # epochs (or "validation checks") to wait before reducing
-    threshold=0.0001,     # only trigger if the improvement in monitored metric is > this threshold
-    threshold_mode='rel', # measure relative improvement
-    cooldown=0,
-    min_lr=1e-8,
-    eps=1e-08,
-)
 
 ####RESUME
 if resume:
@@ -861,7 +849,6 @@ if resume:
         checkpoint = torch.load(latest_ckpt_path, map_location=device)
         raw_model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
-        scheduler.load_state_dict(checkpoint['scheduler_state'])
         start_step = checkpoint['step'] + 1  # resume from the next step
     else:
         # start a fresh log file
@@ -877,7 +864,6 @@ train_steps  = []
 val_steps    = []
 mc_val_losses=[]
 mc_val_steps =[]
-current_val_loss = 0.0
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
@@ -906,13 +892,11 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
-            current_val_loss = val_loss_accum.item()
             with open(log_file, "a") as f:
                 val_loss_val = val_loss_accum.item()
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 val_losses.append(val_loss_val)
                 val_steps.append(step)
-        scheduler.step(current_val_loss)
         if step > 0 and (step % 1500 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
@@ -922,8 +906,6 @@ for step in range(max_steps):
                 'step': step,
                 'val_loss': val_loss_accum.item(),
                 'optimizer_state':optimizer.state_dict(),
-                'scheduler_state': scheduler.state_dict(),
-
             }
             torch.save(checkpoint, checkpoint_path)
 
@@ -982,9 +964,9 @@ for step in range(max_steps):
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}, wce={wce_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
-    # lr = get_lr(step)
-    # for param_group in optimizer.param_groups:
-    #     param_group['lr']=lr
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr']=lr
     optimizer.step()
     torch.cuda.synchronize()
     t1=time.time()
@@ -992,10 +974,10 @@ for step in range(max_steps):
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     token_per_second = tokens_processed/dt
     if master_process:
-        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {scheduler.optimizer.param_groups[0]['lr']:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
-            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {scheduler.optimizer.param_groups[0]['lr']:.4e} | norm {norm:.4f}\n")
+            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {lr:.4e} | norm {norm:.4f}\n")
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
