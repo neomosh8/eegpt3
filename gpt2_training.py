@@ -780,7 +780,7 @@ if ddp:
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
 max_lr = 1e-3
-min_lr = 1e-5
+min_lr = 1e-8
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
@@ -791,7 +791,7 @@ best_val_loss = float('inf')
 no_improvement_count = 0
 patience = 3  # how many validations in a row until we decide it's a plateau
 
-
+powe = -1
 def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps, cut=False):
     """
     Custom LR schedule:
@@ -811,7 +811,11 @@ def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_
 
     if cut:
         # forcibly reduce LR by a factor (e.g. half)
-        lr *= 0.5
+        global powe
+        lr *= 10^powe
+        powe = powe - 1
+        global plateau_flag
+        plateau_flag=False
 
     return lr
 
@@ -914,10 +918,7 @@ for step in range(start_step,max_steps):
                                                                                                dtype=torch.int64)
             dist.broadcast(plateau_tensor, src=0)
             plateau_flag = (plateau_tensor.item() == 1)
-        # get LR for this step
-        lr = get_lr(step, cut=plateau_flag)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+
         if step > 0 and (step % 1500 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
@@ -994,7 +995,6 @@ for step in range(start_step,max_steps):
     dt = t1-t0
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     token_per_second = tokens_processed/dt
-    plateau_flag = False
     if master_process:
         print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
