@@ -72,8 +72,8 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
         # optional attention dropout
-        # self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
-        # self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
+        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
 
         # regularization
         self.n_head = config.n_head
@@ -90,12 +90,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
-        # y = self.attn_dropout(y)
+        y = self.attn_dropout(y)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
-        # y = self.resid_dropout(y)
+        y = self.resid_dropout(y)
 
         return y
 
