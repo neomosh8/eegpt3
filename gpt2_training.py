@@ -789,7 +789,7 @@ if master_process:
 
 best_val_loss = float('inf')
 no_improvement_count = 0
-patience = 5  # how many validations in a row until we decide it's a plateau
+patience = 3  # how many validations in a row until we decide it's a plateau
 
 
 def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps, cut=False):
@@ -896,7 +896,7 @@ for step in range(start_step,max_steps):
             print(f"Step {step} | val_loss {current_val_loss:.4f} | plateau_flag={plateau_flag}")
 
             # 1) check improvement vs best
-            threshold = 1e-4
+            threshold = 1e-3
             if current_val_loss < best_val_loss - threshold:
                 best_val_loss = current_val_loss
                 no_improvement_count = 0
