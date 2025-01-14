@@ -146,7 +146,7 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        Copyn_layer: int = 96  # kept same
+        n_layer: int = 96  # kept same
         n_head: int = 96  # kept same
         n_embd: int = 8192  # increased from 6144 to 8192
     num_channels: int = 2
