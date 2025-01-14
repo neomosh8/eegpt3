@@ -146,9 +146,9 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        n_layer: int = 96  # kept same
-        n_head: int = 96  # kept same
-        n_embd: int = 8192  # increased from 6144 to 8192
+        n_layer: int = 64  # rounded down from 72 (multiple of 8)
+        n_head: int = 32  # rounded down from 40 (power of 2)
+        n_embd: int = 2048  # rounded down from 2560 (power of 2)
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -794,7 +794,7 @@ else:
     # T = 1024
     epoch_num = 5
     total_batch_size = 1638400
-    B = 2
+    B = 4
     T = 1024
 
 
