@@ -372,7 +372,7 @@ def evaluate_shards_with_channels(
 
         while True:  # Start of the iterative loop for correct offset
             # Pick initial prompt offset
-            prompt_offset_candidates = list(range(0, len0 - segment_size + 1, 256//2))
+            prompt_offset_candidates = list(range(0, len0 - segment_size + 1, 256))
             if not prompt_offset_candidates:
                 raise ValueError("No valid prompt offsets possible with given parameters")
             prompt_offset = random.choice(prompt_offset_candidates)
@@ -381,7 +381,7 @@ def evaluate_shards_with_channels(
             prompt_0_chans = chan0[prompt_offset: prompt_offset + segment_size]
 
             # Pick correct offset, ensuring it starts after the prompt
-            correct_offset_candidates = list(range(prompt_offset + segment_size, len0 - segment_size + 1, 256//2))
+            correct_offset_candidates = list(range(prompt_offset + segment_size, len0 - segment_size + 1, 256))
 
             if not correct_offset_candidates:
                 print("No valid correct offsets, retrying with new prompt offset")  # Print a retry message
@@ -450,7 +450,7 @@ def evaluate_shards_with_channels(
         while True:  # Start of the iterative loop for correct offset
             # Instead of contiguous prompt/correct, pick everything at random
             # Pick initial prompt offset
-            prompt_offset_candidates = list(range(0, len1 - segment_size + 1, 256//2))
+            prompt_offset_candidates = list(range(0, len1 - segment_size + 1, 256))
             if not prompt_offset_candidates:
                 raise ValueError("No valid prompt offsets possible with given parameters")
             prompt_offset = random.choice(prompt_offset_candidates)
@@ -460,7 +460,7 @@ def evaluate_shards_with_channels(
 
             # Pick correct offset, ensuring it starts after the prompt
             correct_offset_candidates = list(
-                range(prompt_offset + segment_size, len1 - segment_size + 1, 256//2)
+                range(prompt_offset + segment_size, len1 - segment_size + 1, 256)
             )
 
             if not correct_offset_candidates:
