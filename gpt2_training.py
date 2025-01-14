@@ -548,7 +548,7 @@ def build_forced_choice_data(
     for pt_file in all_pt_files:
         full_path = os.path.join(shards_dir, pt_file)
         # Load from disk to CPU memory
-        shard_data = torch.load(full_path, map_location=map_location)
+        shard_data = torch.load(full_path, map_location=map_location,weights_only=False)
 
         tokens   = shard_data['tokens']   # shape [N]
         channels = shard_data['channels'] # shape [N]
@@ -968,7 +968,7 @@ for step in range(start_step,max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if (step>0 and step % 1000 == 0) or last_step:
+    if (step>0 and step % 100 == 0) or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
@@ -1023,7 +1023,7 @@ for step in range(start_step,max_steps):
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}, wce={wce_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
-    lr = get_lr(step, cut=plateau_flag)
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr']=lr
     optimizer.step()
