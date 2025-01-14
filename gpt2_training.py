@@ -14,7 +14,7 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
-small_model = True
+small_model = False
 resume = False
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
@@ -792,7 +792,7 @@ else:
     # total_batch_size = 524288
     # B = 16
     # T = 1024
-    epoch_num = 10
+    epoch_num = 5
     total_batch_size = 1638400
     B = 4
     T = 1024
@@ -980,7 +980,7 @@ for step in range(start_step,max_steps):
                 s3_prefix="training_XL/log"
             )
 
-    if False:#(step>0 and step % 100 == 0) or last_step:
+    if (step>0 and step % 1000 == 0) or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
