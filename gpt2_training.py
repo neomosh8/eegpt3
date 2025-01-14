@@ -823,7 +823,7 @@ val_loader   = DataLoaderLiteAllInMemory(B=B, T=T,
 imageNet_data_by_subject = build_forced_choice_data(
     shards_dir="validation_datasets_imageNet/shards",
     file_pattern="shard_train_",  # or "shard_val_" if that's how your files are named
-    map_location='cpu'
+    map_location='cuda'
 )
 
 model = GPT(GPTConfig())
@@ -833,8 +833,8 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 1e-3
-min_lr = 1e-8
+max_lr = 1e-1
+min_lr = 1e-10
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
