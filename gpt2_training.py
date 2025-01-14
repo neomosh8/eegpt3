@@ -794,7 +794,7 @@ else:
     # T = 1024
     epoch_num = 5
     total_batch_size = 1638400
-    B = 2
+    B = 4
     T = 1024
 
 
@@ -921,7 +921,7 @@ for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 250 == 0 or last_step:
+    if step % 100 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -963,7 +963,7 @@ for step in range(start_step,max_steps):
             dist.broadcast(plateau_tensor, src=0)
             plateau_flag = (plateau_tensor.item() == 1)
 
-        if step > 0 and (step % 1000 == 0 or last_step):
+        if step > 0 and (step % 500 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
