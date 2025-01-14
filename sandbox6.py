@@ -1,52 +1,39 @@
 import math
 import matplotlib.pyplot as plt
 
-epoch_num = 10
+
+
+
+epoch_num = 20
 total_batch_size = 524288
-max_lr = 3e-4
-min_lr = 1e-7
+B = 16
+T = 1024
+plateau_count = 0
+max_lr = 1e-1
+min_lr = 1e-10
+max_steps = math.ceil(1e9//total_batch_size) * epoch_num
+warmup_steps =int(0.02*max_steps)
+best_val_loss = float('inf')
+no_improvement_count = 0
+patience = 3
 
-max_steps = math.ceil(1e9/total_batch_size) * epoch_num
-warmup_steps = ((max_steps)*0.04)
-def get_lr(it, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, max_steps=1.7*max_steps):
-    """
-    Calculate the learning rate for a given iteration using simple exponential decay.
-
-    Parameters:
-        it (int): Current iteration.
-        max_lr (float): Initial maximum learning rate.
-        min_lr (float): Minimum learning rate after decay.
-        warmup_steps (int): Number of warmup steps.
-        max_steps (int): Total number of steps.
-
-    Returns:
-        float: Learning rate at the given iteration.
-    """
-    if it < warmup_steps:
-        # Linear warmup
-        lr = max_lr * (it + 1) / warmup_steps
-    elif it > max_steps:
-        # After max_steps, maintain min_lr
-        lr = min_lr
+def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=2*max_steps):
+    if step < warmup_steps:
+        lr = max_lr * (step + 1) / warmup_steps
     else:
-        # Exponential decay
-        decay_steps = it - warmup_steps
-        total_decay_steps = max_steps - warmup_steps
-
-        # Calculate decay rate to reach min_lr at max_steps
-        decay_rate = math.log(min_lr / max_lr) / total_decay_steps
-
-        # Apply exponential decay
-        lr = max_lr * math.exp(decay_rate * decay_steps)
-
-        # Ensure lr does not go below min_lr
+        ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
+        ratio = min(1.0, max(0.0, ratio))
+        lr = max_lr * (min_lr / max_lr) ** ratio
         lr = max(lr, min_lr)
+    # multiply by 0.1^plateau_count
+    factor = 0.1 ** plateau_count
+    lr_final = lr * factor
+    return max(lr_final, min_lr)
 
-    return lr
 # Generate learning rate values for iterations
 iterations = list(range(0, max_steps))
-learning_rates = [get_lr_exponential_decay(it) for it in iterations]
-
+learning_rates = [get_lr(it) for it in iterations]
+print(learning_rates[27000])
 # Plot the learning rate schedule
 plt.figure(figsize=(10, 6))
 plt.plot(iterations, learning_rates, label="Dynamic Range Adjusted Learning Rate")

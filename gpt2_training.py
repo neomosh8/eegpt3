@@ -846,7 +846,7 @@ best_val_loss = float('inf')
 no_improvement_count = 0
 patience = 3
 
-def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps):
+def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=2*max_steps):
     if step < warmup_steps:
         lr = max_lr * (step + 1) / warmup_steps
     else:
