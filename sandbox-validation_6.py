@@ -272,8 +272,8 @@ if __name__ == "__main__":
         # 4) Save wavelet decomposition results
         # -----------------------------------------------------------------------
         wavelet_name = 'db2'
-        level = 2
-        window_len_sec = 1.0  # e.g. 1-second windows
+        level = 4
+        window_len_sec = 1.18  # e.g. 1-second windows
 
         # Example output paths
         coeffs_path = f"output/{task_name}_coeffs.txt"

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import inspect
 import random
 import time
 
@@ -14,7 +15,7 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-
+small_model = True
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
@@ -29,6 +30,10 @@ class CausalSelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
+        # optional attention dropout
+        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
+
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -44,9 +49,13 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        y = self.attn_dropout(y)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
+        y = self.resid_dropout(y)
+
         return y
 
 class MLP(nn.Module):
@@ -55,13 +64,18 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu    = nn.GELU(approximate='tanh')
+        # self.dropout = nn.Dropout(p=getattr(config, 'mlp_dropout', 0.05))
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
+        # x = self.dropout(x)     # dropout after activation
+
         x = self.c_proj(x)
+        # x = self.dropout(x)     # optional dropout again
+
         return x
 
 class Block(nn.Module):
@@ -77,23 +91,26 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
 @dataclass
 class GPTConfig:
-    # for 14000 steps 150M model (1.7GB)
     block_size: int = 1024
-    vocab_size: int = 4140
-    n_layer: int = 18
-    n_head: int = 12
-    n_embd: int = 768
+    vocab_size: int = 6460
+    if small_model:
+        n_layer: int = 12  # number of layers
+        n_head: int = 12  # number of heads
+        n_embd: int = 768  # embedding dimension
+    else:
+        n_layer: int = 36
+        n_head: int = 20
+        n_embd: int = 1280
+        # n_layer: int = 48  # reduced from 64 (multiple of 8)
+        # n_head: int = 24  # reduced from 32 (multiple of 8)
+        # n_embd: int = 1536  # reduced from 2048 (multiple of 128)
     num_channels: int = 2
-
-    # # for steps 1.3B Large model 14.4GB
-    # block_size: int = 2048
-    # vocab_size: int = 4140
-    # n_layer: int = 20
-    # n_head: int = 36  # Increased from 16 to allow more parallel attention patterns
-    # n_embd: int = 2304  # Increased to maintain head_dim with more heads
-    # num_channels: int = 2
+    mlp_dropout: float = 0.05
+    attn_dropout: float = 0.05
+    resid_dropout: float = 0.05
 
 
 class GPT(nn.Module):
@@ -101,17 +118,25 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            wce = nn.Embedding(config.num_channels, config.n_embd),  # <-- new
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
-        ))
+        self.channel_dim = 32
+        self.wce = nn.Embedding(config.num_channels, self.channel_dim)
+
+        # We'll project up to n_embd so we can add it directly
+        self.channel_proj = nn.Linear(self.channel_dim, config.n_embd)
+
+        # Optionally include a learnable scale
+        self.channel_scale = nn.Parameter(torch.tensor(1.0))
+
+        # Normal token + positional embeddings
+        self.transformer = nn.ModuleDict({
+            "wte": nn.Embedding(config.vocab_size, config.n_embd),
+            "wpe": nn.Embedding(config.block_size, config.n_embd),
+            "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            "ln_f": nn.LayerNorm(config.n_embd)
+        })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
-        # init params
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -127,29 +152,18 @@ class GPT(nn.Module):
 
     # NOTE: We now take an extra argument: channel_idx
     def forward(self, idx, channel_idx=None, targets=None):
-        """
-        idx: (B, T) tokens
-        channel_idx: (B, T) channel IDs (e.g., 0 or 1)
-        targets: (B, T) next-token predictions
-        """
         B, T = idx.size()
-        assert T <= self.config.block_size, (
-            f"Cannot forward sequence of length {T}, "
-            f"block size is only {self.config.block_size}"
-        )
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        tok_emb = self.transformer.wte(idx)  # (B, T, n_embd)
+        pos_emb = self.transformer.wpe(pos)  # (T, n_embd)
 
-        # forward the token, position, and (optionally) channel embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T,)
-        pos_emb = self.transformer.wpe(pos)   # (T, n_embd)
-        tok_emb = self.transformer.wte(idx)   # (B, T, n_embd)
-
+        # smaller channel embedding
         if channel_idx is not None:
-            # Make sure channel_idx is the same shape as idx
-            # channel_idx must be in [0..num_channels-1]
-            cha_emb = self.transformer.wce(channel_idx)  # (B, T, n_embd)
-            x = tok_emb + pos_emb + cha_emb
+            cha_emb_small = self.wce(channel_idx)  # (B, T, channel_dim)
+            cha_emb_large = self.channel_proj(cha_emb_small)  # (B, T, n_embd)
+            cha_emb_scaled = self.channel_scale * cha_emb_large  # apply the learnable scale
+            x = tok_emb + pos_emb + cha_emb_scaled
         else:
-            # fallback if no channel_idx is provided
             x = tok_emb + pos_emb
 
         # pass through transformer
@@ -168,6 +182,65 @@ class GPT(nn.Module):
                 targets.view(-1)
             )
         return logits, loss
+
+    def configure_optimizer(self, weight_decay, learning_rate, device):
+        """
+        Configure the optimizer, separating channel embedding parameters into their own group
+        for potentially different hyperparameters (e.g., lower learning rate, no weight decay, etc.).
+        """
+
+        # Gather all trainable params with their names
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+
+        decay_params = []
+        nodecay_params = []
+        channel_params = []
+
+        # Decide on a separate (potentially smaller) LR for channel-related parameters
+        channel_lr = learning_rate * 0.1  # e.g., 10x smaller, tune as needed
+
+        for pn, p in param_dict.items():
+            # If the parameter name indicates it's part of the channel embedding/projection/scale
+            if 'wce' in pn or 'channel_proj' in pn or 'channel_scale' in pn:
+                channel_params.append(p)
+            # If tensor has 2+ dims, we apply weight decay
+            elif p.dim() >= 2:
+                decay_params.append(p)
+            else:
+                nodecay_params.append(p)
+
+        # Set up param groups
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
+            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
+            {'params': channel_params, 'weight_decay': 0.0, 'lr': channel_lr},
+        ]
+
+        # Count how many parameters in each group for logging
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        num_channel_params = sum(p.numel() for p in channel_params)
+
+        # Check fused AdamW availability
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and ('cuda' in device)
+
+        # Only print this info on master process (assuming you have 'master_process' defined globally)
+        if True:
+            print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
+            print(f"num channel parameter tensors: {len(channel_params)} with {num_channel_params:,} parameters")
+            print(f"Using fused AdamW: {use_fused}")
+
+        # Create the optimizer
+        optimizer = torch.optim.AdamW(
+            optim_groups,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            fused=use_fused
+        )
+
+        return optimizer
 device='cpu'
 
 import torch
@@ -445,7 +518,7 @@ def evaluate_shards_with_channels(
 
 device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
-checkpoint = torch.load('log/model_07359.pt', map_location=device, weights_only=False)
+checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
@@ -461,8 +534,8 @@ model.config(checkpoint['config'])
 model.eval()
 acc = evaluate_shards_with_channels(
     model=model,
-    shard0_path="validation_datasets/shards/shard_train_0.pt",
-    shard1_path="validation_datasets/shards/shard_train_1.pt",
+    shard0_path="output/shards/shard_train_0.pt",
+    shard1_path="output/shards/shard_train_2.pt",
     device="cpu",
     segment_size=512
 )
