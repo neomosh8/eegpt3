@@ -509,47 +509,51 @@ class DataLoaderLiteAllInMemory:
         """
         self.current_position = self.B * self.T * self.process_rank
 
-
-
-def evaluate_multi_class_forced_choice(
-    model,
-    shards_dir="validation_datasets_imageNet/shards",
-    segment_size=512,
-    num_trials_per_subject=5,
-    device="cpu",
-    device_type="cuda",  # for autocast
-    ddp=False,
-    master_process=True
+def build_forced_choice_data(
+    shards_dir: str,
+    file_pattern: str = "shard_train_",
+    map_location='cpu'
 ):
     """
-    Perform multi-class forced-choice validation, distributing the workload across DDP processes.
-    Then gather (sum) correct_count and total_trials to get the final accuracy.
+    1) Scan the shards_dir for *.pt files that contain `file_pattern` in their name.
+    2) Load them into CPU memory.
+    3) Parse them into a `data_by_subject` dictionary that looks like:
+         data_by_subject[subject_str][image_str] = list of dicts:
+             [
+               { 'tokens': <CPU Tensor>, 'channels': <CPU Tensor> },
+               ...
+             ]
+       where each dict is one shard.
+
+    Args:
+        shards_dir (str): Path to the directory containing the .pt shards.
+        file_pattern (str): Pattern to look for in the filenames (e.g. "shard_train_").
+        map_location: Typically 'cpu' to store the data in CPU memory.
+
+    Returns:
+        data_by_subject (dict): a nested dict of the form:
+            data_by_subject[subject_str][image_str] -> list of { 'tokens', 'channels' } (all CPU Tensors)
     """
-
-    # Only rank 0 prints, but all ranks run the logic to do their share of trials
-    if master_process:
-        print(f"[evaluate_multi_class_forced_choice] Starting forced-choice eval on rank {dist.get_rank() if ddp else 0}")
-
     # 1) Gather .pt files
     all_pt_files = [
         f for f in os.listdir(shards_dir)
-        if f.endswith(".pt") and "shard_train_" in f
+        if f.endswith(".pt") and (file_pattern in f)
     ]
     if len(all_pt_files) == 0:
-        if master_process:
-            print(f"No .pt files found in {shards_dir}")
-        return 0.0
+        raise FileNotFoundError(f"No .pt files found in '{shards_dir}' with pattern '{file_pattern}'")
 
     # 2) Build data_by_subject dict
     data_by_subject = {}
+
     for pt_file in all_pt_files:
         full_path = os.path.join(shards_dir, pt_file)
-        shard_data = torch.load(full_path, map_location=device, weights_only=False)
+        # Load from disk to CPU memory
+        shard_data = torch.load(full_path, map_location=map_location)
 
-        tokens = shard_data['tokens']   # shape [N]
-        channels = shard_data['channels']
+        tokens   = shard_data['tokens']   # shape [N]
+        channels = shard_data['channels'] # shape [N]
         pair_info = shard_data['original_pair']  # (coeffs_filename, channels_filename)
-        # parse subject, image
+        # parse subject, image from e.g. "subject3_image_128" etc.
         coeffs_filename = pair_info[0]
         basename = coeffs_filename.replace('_coeffs.txt', '')
         parts = basename.split('_image_')
@@ -563,10 +567,48 @@ def evaluate_multi_class_forced_choice(
             data_by_subject[subject_str] = {}
         if image_str not in data_by_subject[subject_str]:
             data_by_subject[subject_str][image_str] = []
+
+        # store CPU tensors in the dictionary
         data_by_subject[subject_str][image_str].append({
-            'tokens': tokens,
-            'channels': channels
+            'tokens': tokens,        # already on CPU
+            'channels': channels     # already on CPU
         })
+
+    return data_by_subject
+
+def evaluate_multi_class_forced_choice(
+    model,
+    data_by_subject,           # <-- pass the dictionary built by build_forced_choice_data()
+    segment_size=512,
+    num_trials_per_subject=5,
+    device="cpu",
+    device_type="cuda",  # for autocast
+    ddp=False,
+    master_process=True
+):
+    """
+    Perform multi-class forced-choice validation using pre-loaded data_by_subject.
+
+    data_by_subject is a dict:
+        data_by_subject[subject][image] = list of shards,
+            where each shard is a dict { 'tokens': CPU Tensor, 'channels': CPU Tensor }
+
+    The logic:
+       1) For each subject, pick a random "correct image" shard for prompt & completion.
+       2) Compute the model's next-token-prediction loss for that completion.
+       3) Compute the model's next-token-prediction loss for completions from other images (wrong).
+       4) If the correct completion has the lower loss than all wrong completions, count it as correct.
+
+    Then gather (sum) correct_count and total_trials to get the final accuracy.
+    """
+    # Only rank 0 prints, but all ranks run the logic
+    if ddp:
+        rank = dist.get_rank()
+    else:
+        rank = 0
+
+    if master_process:
+        print(f"[evaluate_multi_class_forced_choice] Starting forced-choice eval on rank {rank}")
 
     # We'll track total trials and correct trials
     total_trials_tensor = torch.zeros(1, device=device)
@@ -588,9 +630,11 @@ def evaluate_multi_class_forced_choice(
             correct_image_id = random.choice(image_ids)
             shards_for_correct_image = images_dict[correct_image_id]
 
+            # pick a random shard from the correct image
             correct_shard = random.choice(shards_for_correct_image)
-            tokens_correct_shard = correct_shard['tokens']
-            chans_correct_shard  = correct_shard['channels']
+            tokens_correct_shard = correct_shard['tokens']   # CPU
+            chans_correct_shard  = correct_shard['channels'] # CPU
+
             total_len = tokens_correct_shard.size(0)
             if total_len < 2*segment_size:
                 # Not enough tokens for (prompt+completion)
@@ -598,36 +642,37 @@ def evaluate_multi_class_forced_choice(
 
             # 3.2) Pick random prompt chunk
             start_idx_prompt = random.randint(0, total_len - segment_size)
-            prompt_tokens = tokens_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
-            prompt_chans  = chans_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
+            prompt_tokens_cpu = tokens_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
+            prompt_chans_cpu  = chans_correct_shard[start_idx_prompt : start_idx_prompt+segment_size]
 
             # 3.3) Pick random correct completion chunk
             start_idx_correct = random.randint(0, total_len - segment_size)
-            correct_tokens = tokens_correct_shard[start_idx_correct : start_idx_correct+segment_size]
-            correct_chans  = chans_correct_shard[start_idx_correct : start_idx_correct+segment_size]
+            correct_tokens_cpu = tokens_correct_shard[start_idx_correct : start_idx_correct+segment_size]
+            correct_chans_cpu  = chans_correct_shard[start_idx_correct : start_idx_correct+segment_size]
 
-            # 3.4) Gather "wrong" chunks from other images
+            # 3.4) Gather "wrong" completions from other images
             wrong_losses = []
             for other_image_id in image_ids:
                 if other_image_id == correct_image_id:
                     continue
                 shards_for_other = images_dict[other_image_id]
                 other_shard = random.choice(shards_for_other)
-                tokens_other_shard = other_shard['tokens']
-                chans_other_shard  = other_shard['channels']
 
-                total_len_other = tokens_other_shard.size(0)
+                tokens_other_cpu = other_shard['tokens']
+                chans_other_cpu  = other_shard['channels']
+
+                total_len_other = tokens_other_cpu.size(0)
                 if total_len_other < segment_size:
                     continue
 
                 start_idx_other = random.randint(0, total_len_other - segment_size)
-                wrong_tokens = tokens_other_shard[start_idx_other : start_idx_other+segment_size]
-                wrong_chans  = chans_other_shard[start_idx_other : start_idx_other+segment_size]
+                wrong_tokens_cpu = tokens_other_cpu[start_idx_other : start_idx_other+segment_size]
+                wrong_chans_cpu  = chans_other_cpu[start_idx_other : start_idx_other+segment_size]
 
                 lw = compute_completion_loss_with_channels(
                     model,
-                    prompt_tokens, prompt_chans,
-                    wrong_tokens,  wrong_chans,
+                    prompt_tokens_cpu, prompt_chans_cpu,
+                    wrong_tokens_cpu,  wrong_chans_cpu,
                     device=device,
                     device_type=device_type
                 )
@@ -637,13 +682,15 @@ def evaluate_multi_class_forced_choice(
             if len(wrong_losses) == 0:
                 continue
 
+            # compute the correct completion's loss
             correct_loss = compute_completion_loss_with_channels(
                 model,
-                prompt_tokens,
-                prompt_chans,
-                correct_tokens,
-                correct_chans,
+                prompt_tokens_cpu,
+                prompt_chans_cpu,
+                correct_tokens_cpu,
+                correct_chans_cpu,
                 device=device,
+                device_type=device_type
             )
             correct_loss_val = correct_loss.item()
 
@@ -669,6 +716,7 @@ def evaluate_multi_class_forced_choice(
         print(f"\nMulti-class forced-choice accuracy: {correct_count}/{total_trials} = {accuracy:.4f}")
 
     return accuracy
+
 
 def compute_completion_loss_with_channels(
     model,
@@ -771,6 +819,12 @@ val_loader   = DataLoaderLiteAllInMemory(B=B, T=T,
                                          split='val',
                                          shuffle_shards=False)
 
+
+imageNet_data_by_subject = build_forced_choice_data(
+    shards_dir="validation_datasets_imageNet/shards",
+    file_pattern="shard_train_",  # or "shard_val_" if that's how your files are named
+    map_location='cpu'
+)
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -920,12 +974,12 @@ for step in range(start_step,max_steps):
         with torch.no_grad():
             acc = evaluate_multi_class_forced_choice(
                 model=model,
-                shards_dir="validation_datasets_imageNet/shards",
-                segment_size=256,
+                data_by_subject=imageNet_data_by_subject,  # pass the big CPU dictionary
+                segment_size=512,
                 num_trials_per_subject=5,
                 device=device,
                 device_type=device_type,
-                ddp=ddp,                # pass True if using DDP
+                ddp=ddp,
                 master_process=master_process
             )
         # If you wanted to record the accuracy in your logs:
