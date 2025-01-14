@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-small_model = False
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
@@ -517,36 +516,157 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-device = torch.device('cpu')
-model = GPT(GPTConfig).to(device)
-if small_model:
-    checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
-else:
-    checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
-# retrieve the state_dict
-orig_sd = checkpoint['model']
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
 
-# remove "_orig_mod." from each key
-fixed_sd = {}
-for k, v in orig_sd.items():
-    new_key = k.replace("_orig_mod.", "")
-    fixed_sd[new_key] = v
 
-# now load with the fixed state dict
-model.load_state_dict(fixed_sd, strict=True)
-model.config(checkpoint['config'])
-model.eval()
-accs = []
-epochs = 30
-for epoch in range (epochs):
-    print(f"epoch: {epoch}/{epochs}")
-    acc = evaluate_shards_with_channels(
-        model=model,
-        shard0_path="output/shards/shard_train_1.pt",
-        shard1_path="output/shards/shard_train_2.pt",
-        device="cpu",
-        segment_size=512
+# Assumed user-defined or imported:
+# from your_module import GPT, GPTConfig, evaluate_shards_with_channels
+
+def evaluate_model_for_condition(
+        small_model: bool,
+        shard0_path: str,
+        shard1_path: str,
+        epochs: int = 30,
+        device: str = "cpu"
+):
+    """
+    Loads the correct model checkpoint (depending on small_model),
+    evaluates for `epochs` epochs, returns a list of accuracies.
+    """
+    # Select checkpoint depending on small_model
+    if small_model:
+        checkpoint_path = "log/model_15000.pt"
+    else:
+        checkpoint_path = "log/model_30000.pt"
+
+    # Load model on CPU (or GPU if you prefer)
+    device_torch = torch.device(device)
+    model = GPT(GPTConfig).to(device_torch)
+
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device_torch, weights_only=False)
+
+    # Retrieve the state_dict and fix key names if needed
+    orig_sd = checkpoint['model']
+    fixed_sd = {}
+    for k, v in orig_sd.items():
+        new_key = k.replace("_orig_mod.", "")
+        fixed_sd[new_key] = v
+
+    model.load_state_dict(fixed_sd, strict=True)
+
+    # If there's a model config in the checkpoint, you can update the model config
+    if 'config' in checkpoint:
+        model.config(checkpoint['config'])
+
+    model.eval()
+
+    accs = []
+    for epoch in range(epochs):
+        print(
+            f"[Model={'small' if small_model else 'large'}] Condition={shard0_path.split('_')[-1]}|{shard1_path.split('_')[-1]} - epoch: {epoch + 1}/{epochs}")
+        acc = evaluate_shards_with_channels(
+            model=model,
+            shard0_path=shard0_path,
+            shard1_path=shard1_path,
+            device=device_torch,
+            segment_size=512
+        )
+        accs.append(acc)
+
+    return accs
+
+
+def plot_results(group_name: str, accs_small: list, accs_large: list):
+    """
+    Plots the distribution (e.g., boxplot or error-bar chart) for both small and large model
+    for the given condition (group_name), showing mean, std, and confidence intervals.
+    Saves figure as <group_name>.png
+    """
+    # Convert to numpy arrays for convenience
+    accs_small = np.array(accs_small)
+    accs_large = np.array(accs_large)
+
+    # Means and standard deviations
+    mean_small = np.mean(accs_small)
+    std_small = np.std(accs_small)
+    mean_large = np.mean(accs_large)
+    std_large = np.std(accs_large)
+
+    # Compute 95% confidence intervals (assuming normal distribution, for illustration)
+    # 1.96 ~ roughly 95% CI for large enough N
+    ci_small = 1.96 * std_small / np.sqrt(len(accs_small))
+    ci_large = 1.96 * std_large / np.sqrt(len(accs_large))
+
+    # Let's do a bar chart with error bars
+    x_vals = [0, 1]  # 0 for small, 1 for large
+    means = [mean_small, mean_large]
+    errors = [ci_small, ci_large]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(x_vals, means, yerr=errors, color=['lightblue', 'salmon'], capsize=5)
+    ax.set_xticks(x_vals)
+    ax.set_xticklabels(['Small Model', 'Large Model'])
+    ax.set_ylabel("Accuracy")
+    ax.set_title(f"Accuracy Distribution for {group_name} (Mean ± 95% CI)")
+
+    # Optionally, you can show a boxplot side by side or a scatter of the actual epoch points
+    # For illustration, let's just plot the actual epoch accuracies as scattered points:
+    jitter = 0.05
+    ax.scatter(
+        x=np.zeros_like(accs_small) + x_vals[0] + np.random.uniform(-jitter, jitter, size=len(accs_small)),
+        y=accs_small,
+        color='blue', alpha=0.5, marker='o'
     )
-    accs.append(acc)
-mean = np.mean(accs)
-print(mean)
+    ax.scatter(
+        x=np.zeros_like(accs_large) + x_vals[1] + np.random.uniform(-jitter, jitter, size=len(accs_large)),
+        y=accs_large,
+        color='red', alpha=0.5, marker='o'
+    )
+
+    plt.tight_layout()
+    # Save the figure to disk
+    plt.savefig(f"{group_name}.png")
+    plt.close()
+
+
+if __name__ == "__main__":
+    device = "cpu"  # or "cuda" if you want to use GPU
+
+    # We will evaluate for the following conditions:
+    conditions = {
+        "lat/pal": ("output/shards/shard_train_0.pt", "output/shards/shard_train_2.pt"),
+        "lat/rest": ("output/shards/shard_train_1.pt", "output/shards/shard_train_2.pt"),
+        "palm/rest": ("output/shards/shard_train_1.pt", "output/shards/shard_train_0.pt")
+    }
+
+    # Dictionary to hold results: results[condition] = (accs_small, accs_large)
+    results = {}
+
+    for group_name, (shard0_path, shard1_path) in conditions.items():
+        # Evaluate small model
+        accs_small = evaluate_model_for_condition(
+            small_model=True,
+            shard0_path=shard0_path,
+            shard1_path=shard1_path,
+            epochs=100,
+            device=device
+        )
+
+        # Evaluate large model
+        accs_large = evaluate_model_for_condition(
+            small_model=False,
+            shard0_path=shard0_path,
+            shard1_path=shard1_path,
+            epochs=100,
+            device=device
+        )
+
+        results[group_name] = (accs_small, accs_large)
+
+    # Now plot and save distributions for each condition
+    for group_name, (accs_small, accs_large) in results.items():
+        plot_results(group_name, accs_small, accs_large)
+        print(f"Saved plot for {group_name} as {group_name}.png")
