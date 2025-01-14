@@ -830,7 +830,7 @@ val_loader   = DataLoaderLiteAllInMemory(B=B, T=T,
 imageNet_data_by_subject = build_forced_choice_data(
     shards_dir="validation_datasets_imageNet/shards",
     file_pattern="shard_train_",  # or "shard_val_" if that's how your files are named
-    map_location='cuda'
+    map_location='cpu'
 )
 
 model = GPT(GPTConfig())
