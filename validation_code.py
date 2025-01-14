@@ -547,7 +547,7 @@ def evaluate_model_for_condition(
 
     # Load model on CPU (or GPU if you prefer)
     device_torch = torch.device(device)
-    model = GPT(GPTConfig(small_model)).to(device_torch)
+    model = GPT(GPTConfig(small_model=small_model)).to(device_torch)
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device_torch, weights_only=False)
