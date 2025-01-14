@@ -518,7 +518,7 @@ def evaluate_shards_with_channels(
 
 device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
-checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
+checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
