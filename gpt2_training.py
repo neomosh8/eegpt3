@@ -793,8 +793,8 @@ else:
     # B = 16
     # T = 1024
     epoch_num = 10
-    total_batch_size = 655360
-    B = 8
+    total_batch_size = 1638400
+    B = 4
     T = 1024
 
 
