@@ -787,37 +787,23 @@ warmup_steps =int(0.02*max_steps)
 if master_process:
     print("Max Steps: ",max_steps)
 
+plateau_count = 0
 best_val_loss = float('inf')
 no_improvement_count = 0
-patience = 3  # how many validations in a row until we decide it's a plateau
+patience = 3
 
-powe = -1
-def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps, cut=False):
-    """
-    Custom LR schedule:
-    - Linear warmup for `warmup_steps`.
-    - Then exponential decay from [max_lr -> min_lr] over `total_steps`.
-    - If cut=True, we forcibly "jump" to half the current LR.
-    """
+def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps):
     if step < warmup_steps:
-        # linear warmup
         lr = max_lr * (step + 1) / warmup_steps
     else:
-        # normal exponential decay (just an example formula)
         ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
-        ratio = min(1.0, max(0.0, ratio))  # clamp
+        ratio = min(1.0, max(0.0, ratio))
         lr = max_lr * (min_lr / max_lr) ** ratio
         lr = max(lr, min_lr)
-
-    if cut:
-        # forcibly reduce LR by a factor (e.g. half)
-        global powe
-        lr *= 10^powe
-        powe = powe - 1
-        global plateau_flag
-        plateau_flag=False
-
-    return lr
+    # multiply by 0.1^plateau_count
+    factor = 0.1 ** plateau_count
+    lr_final = lr * factor
+    return max(lr_final, min_lr)
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,device=device)
 
@@ -899,19 +885,16 @@ for step in range(start_step,max_steps):
             current_val_loss = val_loss_accum
             print(f"Step {step} | val_loss {current_val_loss:.4f} | plateau_flag={plateau_flag}")
 
-            # 1) check improvement vs best
             threshold = 1e-3
             if current_val_loss < best_val_loss - threshold:
                 best_val_loss = current_val_loss
                 no_improvement_count = 0
-                plateau_flag = False
             else:
                 no_improvement_count += 1
                 if no_improvement_count >= patience:
-                    plateau_flag = True
-                    no_improvement_count = 0  # reset so we won't cut repeatedly every validation
-                else:
-                    plateau_flag = False
+                    plateau_count += 1
+                    no_improvement_count = 0
+                    print(f"[!] Plateau detected => plateau_count={plateau_count}, LR will drop by factor of 0.1.")
         if ddp:
             plateau_tensor = torch.tensor([1 if plateau_flag else 0], device=device,
                                           dtype=torch.int64) if ddp_rank == 0 else torch.zeros(1, device=device,
