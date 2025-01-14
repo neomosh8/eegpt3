@@ -972,6 +972,7 @@ for step in range(start_step,max_steps):
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
+            dt1 = time.time()
             acc = evaluate_multi_class_forced_choice(
                 model=model,
                 data_by_subject=imageNet_data_by_subject,  # pass the big CPU dictionary
@@ -982,6 +983,12 @@ for step in range(start_step,max_steps):
                 ddp=ddp,
                 master_process=master_process
             )
+            dt2 = time.time()
+            dt_mc = dt2-dt1
+            if master_process:
+                dt_mc = dt2 - dt1
+                print(dt_mc)
+
         # If you wanted to record the accuracy in your logs:
         # mc_val_loss = -math.log(acc + 1e-9)
         mc_val_losses.append(acc*100)
