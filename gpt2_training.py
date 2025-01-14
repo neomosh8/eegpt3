@@ -857,7 +857,7 @@ def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_
     # multiply by 0.1^plateau_count
     factor = 0.1 ** plateau_count
     lr_final = lr * factor
-    return max(lr_final, min_lr)
+    return max(lr_final, 1e-10)
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,device=device)
 
