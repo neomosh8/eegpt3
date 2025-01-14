@@ -143,9 +143,12 @@ class GPTConfig:
         n_head: int = 12  # number of heads
         n_embd: int = 768  # embedding dimension
     else:
-        n_layer: int = 36
-        n_head: int = 20
-        n_embd: int = 1280
+        # n_layer: int = 36
+        # n_head: int = 20
+        # n_embd: int = 1280
+        n_layer: int = 64  # rounded down from 72 (multiple of 8)
+        n_head: int = 32  # rounded down from 40 (power of 2)
+        n_embd: int = 2048  # rounded down from 2560 (power of 2)
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -785,9 +788,13 @@ if small_model:
     B = 64
     T = 1024
 else:
-    epoch_num = 20
-    total_batch_size = 524288
-    B = 16
+    # epoch_num = 20
+    # total_batch_size = 524288
+    # B = 16
+    # T = 1024
+    epoch_num = 10
+    total_batch_size = 655360
+    B = 8
     T = 1024
 
 
@@ -914,7 +921,7 @@ for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 25 == 0 or last_step:
+    if step % 500 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -968,7 +975,7 @@ for step in range(start_step,max_steps):
             }
             torch.save(checkpoint, checkpoint_path)
 
-    if (step>0 and step % 100 == 0) or last_step:
+    if False:#(step>0 and step % 100 == 0) or last_step:
         #### once in a while, Perform Multiclass force choice validation
         model.eval()
         with torch.no_grad():
