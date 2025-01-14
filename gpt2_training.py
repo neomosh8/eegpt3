@@ -146,9 +146,9 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        n_layer: int = 64  # rounded down from 72 (multiple of 8)
-        n_head: int = 32  # rounded down from 40 (power of 2)
-        n_embd: int = 2048  # rounded down from 2560 (power of 2)
+        Copyn_layer: int = 96  # kept same
+        n_head: int = 96  # kept same
+        n_embd: int = 8192  # increased from 6144 to 8192
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -840,7 +840,7 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 1e-4
+max_lr = 1e-3
 min_lr = 1e-9
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
@@ -921,7 +921,7 @@ for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
     # once in a while evaluate our validation loss
-    if step % 500 == 0 or last_step:
+    if step % 250 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -963,7 +963,7 @@ for step in range(start_step,max_steps):
             dist.broadcast(plateau_tensor, src=0)
             plateau_flag = (plateau_tensor.item() == 1)
 
-        if step > 0 and (step % 1500 == 0 or last_step):
+        if step > 0 and (step % 1000 == 0 or last_step):
             # optionally write model checkpoints
             checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
             checkpoint = {
@@ -974,6 +974,11 @@ for step in range(start_step,max_steps):
                 'optimizer_state':optimizer.state_dict(),
             }
             torch.save(checkpoint, checkpoint_path)
+            upload_folder_to_s3(
+                local_folder_path="./log",
+                bucket_name="dataframes--use1-az6--x-s3",
+                s3_prefix="training_XL/log"
+            )
 
     if False:#(step>0 and step % 100 == 0) or last_step:
         #### once in a while, Perform Multiclass force choice validation
