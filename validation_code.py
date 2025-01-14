@@ -3,7 +3,6 @@ import inspect
 import random
 import time
 
-from mne.conftest import epochs
 
 generate = True
 import pickle
