@@ -3,6 +3,8 @@ import inspect
 import random
 import time
 
+from mne.conftest import epochs
+
 generate = True
 import pickle
 from dataclasses import dataclass
@@ -535,10 +537,16 @@ for k, v in orig_sd.items():
 model.load_state_dict(fixed_sd, strict=True)
 model.config(checkpoint['config'])
 model.eval()
-acc = evaluate_shards_with_channels(
-    model=model,
-    shard0_path="output/shards/shard_train_0.pt",
-    shard1_path="output/shards/shard_train_2.pt",
-    device="cpu",
-    segment_size=512
-)
+accs = []
+epochs = 30
+for epoch in range (epochs):
+    acc = evaluate_shards_with_channels(
+        model=model,
+        shard0_path="output/shards/shard_train_0.pt",
+        shard1_path="output/shards/shard_train_2.pt",
+        device="cpu",
+        segment_size=512
+    )
+    accs.append(acc)
+mean = np.mean(accs)
+print(mean)
