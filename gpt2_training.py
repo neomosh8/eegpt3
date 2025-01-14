@@ -14,8 +14,8 @@ from torch.nn import functional as F
 import numpy as np
 from torch.special import logit
 import boto3
-small_model = False
-resume = True
+small_model = True
+resume = False
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
@@ -833,8 +833,8 @@ if ddp:
     model = DDP(model,device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 1e-1
-min_lr = 1e-10
+max_lr = 1e-4
+min_lr = 1e-9
 max_steps = math.ceil(1e9//total_batch_size) * epoch_num
 warmup_steps =int(0.02*max_steps)
 
@@ -846,7 +846,7 @@ best_val_loss = float('inf')
 no_improvement_count = 0
 patience = 3
 
-def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=2*max_steps):
+def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps):
     if step < warmup_steps:
         lr = max_lr * (step + 1) / warmup_steps
     else:
