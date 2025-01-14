@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-small_model = False
+small_model = True
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
@@ -518,7 +518,10 @@ def evaluate_shards_with_channels(
 
 device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
-checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
+if small_model:
+    checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
+else:
+    checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
 # retrieve the state_dict
 orig_sd = checkpoint['model']
 
