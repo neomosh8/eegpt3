@@ -94,23 +94,27 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
+    small_model: bool = False
     block_size: int = 1024
     vocab_size: int = 6460
-    if small_model:
-        n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
-        n_embd: int = 768  # embedding dimension
-    else:
-        n_layer: int = 36
-        n_head: int = 20
-        n_embd: int = 1280
-        # n_layer: int = 48  # reduced from 64 (multiple of 8)
-        # n_head: int = 24  # reduced from 32 (multiple of 8)
-        # n_embd: int = 1536  # reduced from 2048 (multiple of 128)
+
+    # defaults (we'll override below)
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
+
+    def __post_init__(self):
+        # If not small_model, override the defaults
+        if not self.small_model:
+            self.n_layer = 36
+            self.n_head  = 20
+            self.n_embd  = 1280
+
 
 
 class GPT(nn.Module):
@@ -543,7 +547,7 @@ def evaluate_model_for_condition(
 
     # Load model on CPU (or GPU if you prefer)
     device_torch = torch.device(device)
-    model = GPT(GPTConfig).to(device_torch)
+    model = GPT(GPTConfig(small_model)).to(device_torch)
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device_torch, weights_only=False)
