@@ -539,6 +539,7 @@ model.eval()
 accs = []
 epochs = 30
 for epoch in range (epochs):
+    print(f"epoch: {epoch}/{epochs}")
     acc = evaluate_shards_with_channels(
         model=model,
         shard0_path="output/shards/shard_train_0.pt",
