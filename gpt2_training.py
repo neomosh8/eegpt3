@@ -146,9 +146,9 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        n_layer: int = 64  # rounded down from 72 (multiple of 8)
-        n_head: int = 32  # rounded down from 40 (power of 2)
-        n_embd: int = 2048  # rounded down from 2560 (power of 2)
+        n_layer: int = 48  # reduced from 64 (multiple of 8)
+        n_head: int = 24  # reduced from 32 (multiple of 8)
+        n_embd: int = 1536  # reduced from 2048 (multiple of 128)
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
