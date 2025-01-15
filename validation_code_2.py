@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-small_model = True
+small_model = False
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
