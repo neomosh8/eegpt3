@@ -543,7 +543,7 @@ for epoch in range (epochs):
     acc = evaluate_shards_with_channels(
         model=model,
         shard0_path="output/shards/shard_train_0.pt",
-        shard1_path="output/shards/shard_train_1.pt",
+        shard1_path="output/shards/shard_train_2.pt",
         device="cpu",
         segment_size=512
     )
