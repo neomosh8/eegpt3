@@ -371,29 +371,34 @@ def evaluate_shards_with_channels(
         if segment_size >= len0:
             raise ValueError("Segment size must be smaller than the sequence length.")
 
-        while True:  # Start of the iterative loop for correct offset
-            # Pick initial prompt offset
+        while True:
+            # 1) Pick a random prompt offset
             prompt_offset_candidates = list(range(0, len0 - segment_size + 1, 256))
             if not prompt_offset_candidates:
-                raise ValueError("No valid prompt offsets possible with given parameters")
+                raise ValueError("No valid prompt offsets possible.")
             prompt_offset = random.choice(prompt_offset_candidates)
-            print(f"Prompt Offset: {prompt_offset}")
+            print(f"Prompt Offset 1: {prompt_offset}")
             prompt_0_tokens = tokens0[prompt_offset: prompt_offset + segment_size]
             prompt_0_chans = chan0[prompt_offset: prompt_offset + segment_size]
 
-            # Pick correct offset, ensuring it starts after the prompt
-            correct_offset_candidates = list(range(prompt_offset + segment_size, len0 - segment_size + 1, 256))
-
+            # 2) Build correct_offset_candidates *anywhere*, excluding overlap with [prompt_offset, prompt_offset+segment_size).
+            all_candidates = range(0, len0 - segment_size + 1, 256)
+            correct_offset_candidates = [
+                c for c in all_candidates
+                if (c + segment_size <= prompt_offset) or (c >= prompt_offset + segment_size)
+            ]
             if not correct_offset_candidates:
-                print("No valid correct offsets, retrying with new prompt offset")  # Print a retry message
-                continue  # Go back to the beginning of the while loop
+                print("No valid correct offsets, retrying with new prompt offset")
+                continue
 
+            # 3) Pick one at random
             correct_offset = random.choice(correct_offset_candidates)
-            print(f"Correct Offset: {correct_offset}")
+            print(f"Correct Offset 1: {correct_offset}")
             correct_0_tokens = tokens0[correct_offset: correct_offset + segment_size]
             correct_0_chans = chan0[correct_offset: correct_offset + segment_size]
 
-            break  # break out of the loop only when a valid correct offset has been generated.
+            # Now you have a correct portion that does not overlap the prompt.
+            break
 
         # Example prints
 
@@ -448,32 +453,34 @@ def evaluate_shards_with_channels(
         if segment_size >= len1:
             raise ValueError("Segment size must be smaller than the sequence length.")
 
-        while True:  # Start of the iterative loop for correct offset
-            # Instead of contiguous prompt/correct, pick everything at random
-            # Pick initial prompt offset
+        while True:
+            # 1) Pick a random prompt offset
             prompt_offset_candidates = list(range(0, len1 - segment_size + 1, 256))
             if not prompt_offset_candidates:
-                raise ValueError("No valid prompt offsets possible with given parameters")
+                raise ValueError("No valid prompt offsets possible.")
             prompt_offset = random.choice(prompt_offset_candidates)
             print(f"Prompt Offset 1: {prompt_offset}")
             prompt_1_tokens = tokens1[prompt_offset: prompt_offset + segment_size]
             prompt_1_chans = chan1[prompt_offset: prompt_offset + segment_size]
 
-            # Pick correct offset, ensuring it starts after the prompt
-            correct_offset_candidates = list(
-                range(prompt_offset + segment_size, len1 - segment_size + 1, 256)
-            )
-
+            # 2) Build correct_offset_candidates *anywhere*, excluding overlap with [prompt_offset, prompt_offset+segment_size).
+            all_candidates = range(0, len1 - segment_size + 1, 256)
+            correct_offset_candidates = [
+                c for c in all_candidates
+                if (c + segment_size <= prompt_offset) or (c >= prompt_offset + segment_size)
+            ]
             if not correct_offset_candidates:
-                print("No valid correct offsets, retrying with new prompt offset")  # Print a retry message
-                continue  # Go back to the beginning of the while loop
+                print("No valid correct offsets, retrying with new prompt offset")
+                continue
 
+            # 3) Pick one at random
             correct_offset = random.choice(correct_offset_candidates)
             print(f"Correct Offset 1: {correct_offset}")
             correct_1_tokens = tokens1[correct_offset: correct_offset + segment_size]
             correct_1_chans = chan1[correct_offset: correct_offset + segment_size]
 
-            break  # break out of the loop only when a valid correct offset has been generated.
+            # Now you have a correct portion that does not overlap the prompt.
+            break
 
         # "Wrong" from shard1 (random offset there too):
         if len1 >= segment_size:
