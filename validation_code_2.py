@@ -554,7 +554,7 @@ if __name__ == "__main__":
             small_model=False,
             shard0_path=shard0_path,
             shard1_path=shard1_path,
-            epochs=5,
+            epochs=100,
             device=device,
             num_workers=multiprocessing.cpu_count()-2
         )
