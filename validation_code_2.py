@@ -450,36 +450,47 @@ def evaluate_model_for_condition(
     epochs: int = 30,
     device: str = "cpu"
 ):
+    """
+    Loads the correct model checkpoint (depending on small_model),
+    evaluates for `epochs` epochs, returns a list of accuracies.
+    """
+    # Select checkpoint depending on small_model
     if small_model:
         checkpoint_path = "log/model_15000.pt"
     else:
         checkpoint_path = "log/model_30000.pt"
 
+    # Load model on CPU (or GPU if you prefer)
     device_torch = torch.device(device)
     model = GPT(GPTConfig(small_model=small_model)).to(device_torch)
 
+    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device_torch, weights_only=False)
 
-    # Fix any "_orig_mod." keys
+    # Retrieve the state_dict and fix key names if needed
+    orig_sd = checkpoint['model']
     fixed_sd = {}
-    for k, v in checkpoint['model'].items():
+    for k, v in orig_sd.items():
         new_key = k.replace("_orig_mod.", "")
         fixed_sd[new_key] = v
 
     model.load_state_dict(fixed_sd, strict=True)
 
-    # Replace config if present
+    # Option A: Replace entire config
+    # if 'config' in checkpoint:
+    #     new_conf = GPTConfig(**checkpoint['config'])
+    #     model.config = new_conf
+
+    # Option B: Update existing fields
     if 'config' in checkpoint:
-        # checkpoint['config'] is a GPTConfig object, so just replace:
-        model.config = checkpoint['config']
-        # if you needed partial updates, see Option B above.
+        for k, v in checkpoint['config'].items():
+            setattr(model.config, k, v)
 
     model.eval()
 
-    # Evaluate for 'epochs' iterations
     accs = []
     for epoch in range(epochs):
-        print(f"[Model={'small' if small_model else 'large'}] Condition={shard0_path.split('_')[-1]}|{shard1_path.split('_')[-1]} - epoch: {epoch + 1}/{epochs}")
+        print(f"[Model={'small' if small_model else 'large'}] Condition={shard0_path.split('_')[-1]}|{shard1_path.split('_')[-1]} - epoch: {epoch+1}/{epochs}")
         acc = evaluate_shards_with_channels(
             model=model,
             shard0_path=shard0_path,
@@ -490,7 +501,6 @@ def evaluate_model_for_condition(
         accs.append(acc)
 
     return accs
-
 
 
 # ------------------------------------------------------------------
@@ -564,7 +574,7 @@ if __name__ == "__main__":
             small_model=True,
             shard0_path=shard0_path,
             shard1_path=shard1_path,
-            epochs=100,
+            epochs=5,
             device=device
         )
 
@@ -573,7 +583,7 @@ if __name__ == "__main__":
             small_model=False,
             shard0_path=shard0_path,
             shard1_path=shard1_path,
-            epochs=100,
+            epochs=5,
             device=device
         )
 
