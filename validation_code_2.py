@@ -550,3 +550,4 @@ for epoch in range (epochs):
     accs.append(acc)
 mean = np.mean(accs)
 print(mean)
+print(accs)
