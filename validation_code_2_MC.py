@@ -362,7 +362,7 @@ for epoch in range(epochs):
             "output_MEMA/shards/shard_train_1.pt",
             "output_MEMA/shards/shard_train_2.pt"
         ],
-        device="cpu",
+        device="cuda",
         segment_size=512
     )
     accs.append(acc)
