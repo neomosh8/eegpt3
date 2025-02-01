@@ -338,36 +338,41 @@ def evaluate_multiclass_with_channels(
 
 # === Main script ===
 
-# Instead of fixing the device to "cuda" (which usually maps to cuda:0),
-# we set up a list of GPUs to use.
+# List your GPU device strings:
 gpu_devices = ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
 
-# Load the model to CPU first (or one of the GPUs; we'll move it later)
+# Load the model to CPU (or one GPU) initially.
 model = GPT(GPTConfig)
 if small_model:
     checkpoint = torch.load('log/model_15000.pt', map_location='cpu', weights_only=False)
 else:
     checkpoint = torch.load('log/model_30000.pt', map_location='cpu', weights_only=False)
 orig_sd = checkpoint['model']
-fixed_sd = {}
-for k, v in orig_sd.items():
-    new_key = k.replace("_orig_mod.", "")
-    fixed_sd[new_key] = v
+fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in orig_sd.items()}
 model.load_state_dict(fixed_sd, strict=True)
 model.config(checkpoint['config'])
 model.eval()
 
 accs = []
 epochs = 10
+
 for epoch in range(epochs):
-    # Choose a GPU in round-robin order
+    # Choose a GPU in round-robin order.
     device_str = gpu_devices[epoch % len(gpu_devices)]
     device_epoch = torch.device(device_str)
 
-    # Move the model to the chosen GPU
-    model.to(device_epoch)
+    # Set the default CUDA device for this process.
+    torch.cuda.set_device(device_epoch)
 
-    print(f"\n=== Epoch {epoch + 1}/{epochs} using device {device_str} ===")
+    # Move the model to the chosen GPU (and reassign it).
+    model = model.to(device_epoch)
+
+    # (Optional) Clear any cached memory on previous GPUs.
+    torch.cuda.empty_cache()
+
+    print(f"\n=== Epoch {epoch + 1}/{epochs} running on device {device_str} ===")
+
+    # Pass the device_str so that tensors in the evaluation function are allocated on the correct GPU.
     acc = evaluate_multiclass_with_channels(
         model=model,
         shard_paths=[
@@ -375,7 +380,7 @@ for epoch in range(epochs):
             "output_MEMA/shards/shard_train_1.pt",
             "output_MEMA/shards/shard_train_2.pt"
         ],
-        device=device_str,  # pass the current device string
+        device=device_str,  # Make sure this is a string like "cuda:1", etc.
         segment_size=512
     )
     accs.append(acc)
