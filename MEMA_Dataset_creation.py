@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # ---------------------------
     # 1) Load epoch data and labels
     # ---------------------------
-    mat_file_path = "dataset/Subject2_attention_4.mat"  # Change to your file name/path
+    mat_file_path = "dataset/Subject2_attention.mat"  # Change to your file name/path
     epochs, labels = load_mat_epoch_data(mat_file_path)
     fs = 500  # Sample rate (given that each epoch has 500 samples corresponding to 1 second)
 
@@ -150,8 +150,9 @@ if __name__ == "__main__":
             # Average alternate channels to reduce the 32-channel data to 2 channels.
             twoch_data = average_alternate_channels(prep_data)
             # # (Optional) plot
-            # df_plot = pd.DataFrame(twoch_data.T, columns=["EvenAvg", "OddAvg"])
-            # plot_eeg_channels(df_plot, fs=new_sps, title=f"Label: {lab}")
+            # if lab==2:
+            #     df_plot = pd.DataFrame(twoch_data.T, columns=["EvenAvg", "OddAvg"])
+            #     plot_eeg_channels(df_plot, fs=new_sps, title=f"Label: {lab}")
 
             processed_epochs.append(twoch_data)
 

@@ -549,7 +549,7 @@ for epoch in range (epochs):
     print(f"epoch: {epoch}/{epochs}")
     acc = evaluate_shards_with_channels(
         model=model,
-        shard0_path="output_MEMA/shards/shard_train_1.pt",
+        shard0_path="output_MEMA/shards/shard_train_0.pt",
         shard1_path="output_MEMA/shards/shard_train_2.pt",
         device="cpu",
         segment_size=512
