@@ -524,7 +524,7 @@ def evaluate_shards_with_channels(
     return accuracy
 
 
-device = torch.device('cpu')
+device = torch.device('cuda')
 model = GPT(GPTConfig).to(device)
 if small_model:
     checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
@@ -551,7 +551,7 @@ for epoch in range (epochs):
         model=model,
         shard0_path="output_MEMA/shards/shard_train_0.pt",
         shard1_path="output_MEMA/shards/shard_train_2.pt",
-        device="cpu",
+        device="cuda",
         segment_size=512
     )
     accs.append(acc)
