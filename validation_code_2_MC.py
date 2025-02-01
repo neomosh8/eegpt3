@@ -335,7 +335,7 @@ def evaluate_multiclass_with_channels(
     return accuracy
 
 # === Main script ===
-device = torch.device('cpu')
+device = torch.device('cuda')
 model = GPT(GPTConfig).to(device)
 if small_model:
     checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
