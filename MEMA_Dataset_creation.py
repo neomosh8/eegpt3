@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # ---------------------------
     # 1) Load epoch data and labels
     # ---------------------------
-    mat_file_path = "dataset/Subject2_attention.mat"  # Change to your file name/path
+    mat_file_path = "dataset/Subject2_dom.mat"  # Change to your file name/path
     epochs, labels = load_mat_epoch_data(mat_file_path)
     fs = 500  # Sample rate (given that each epoch has 500 samples corresponding to 1 second)
 
