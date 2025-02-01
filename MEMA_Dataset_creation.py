@@ -127,7 +127,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
 
 if __name__ == "__main__":
     # Load your data/labels
-    mat_file_path = 'dataset/Subject2_attention_4.mat'
+    mat_file_path = 'dataset/Subject2_attention.mat'
 
     data, labels, fs = load_mat_data(mat_file_path)
     # data: shape (n_epochs, epoch_length=500, n_channels=32)

@@ -18,8 +18,8 @@ tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
 
-class CausalSelfAttention(nn.Module):
 
+class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -46,7 +46,6 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class MLP(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
@@ -61,7 +60,6 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
@@ -80,8 +78,8 @@ class GPTConfig:
     vocab_size: int = 6460
     if small_model:
         n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
-        n_embd: int = 768  # embedding dimension
+        n_head: int = 12   # number of heads
+        n_embd: int = int(768)  # embedding dimension
     else:
         n_layer: int = 36
         n_head: int = 20
@@ -211,7 +209,7 @@ def compute_completion_loss_with_channels(
     avg_loss = sum_loss / (num_completion_tokens + 1e-9)
     return avg_loss.item()
 
-# === New multi-class force choice evaluation function ===
+# === New multi-class force choice evaluation function with confusion matrix ===
 def evaluate_multiclass_with_channels(
         model,           # the trained model
         shard_paths,     # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
@@ -226,8 +224,9 @@ def evaluate_multiclass_with_channels(
       - For every other shard, we sample one candidate continuation.
       - We compute the average cross-entropy loss for each candidate given the prompt.
       - The candidate with the lowest loss is considered the model's prediction.
-    If the candidate with the lowest loss is the correct one, the evaluation is marked as correct.
-    Returns overall accuracy = (number of times correct candidate had lowest loss) / (total evaluations).
+    We record the ground truth (the prompt's shard) and the predicted candidate's shard
+    in order to build a confusion matrix.
+    Returns overall accuracy and prints the confusion matrix.
     """
     # Load all shards into memory.
     shards = []
@@ -241,6 +240,10 @@ def evaluate_multiclass_with_channels(
             'length': tokens.size(0),
             'path': path
         })
+    num_shards = len(shards)
+    # Initialize confusion matrix: rows = true (prompt) shard, columns = predicted candidate shard.
+    confusion_matrix = np.zeros((num_shards, num_shards), dtype=int)
+
     total_evals = 0
     correct_count = 0
 
@@ -282,7 +285,7 @@ def evaluate_multiclass_with_channels(
                 'tokens': correct_tokens,
                 'channels': correct_chans,
                 'label': 'correct',
-                'source_shard': i
+                'source_shard': i  # correct candidate is from the same shard as the prompt
             })
             # For every other shard, sample one candidate continuation.
             for j, other_shard in enumerate(shards):
@@ -317,13 +320,17 @@ def evaluate_multiclass_with_channels(
             # Find the candidate with the lowest loss.
             min_loss_index = np.argmin(candidate_losses)
             chosen = candidate_info[min_loss_index]
+            predicted_shard = chosen['source_shard']
+            true_shard = i  # The prompt always comes from shard i
+            confusion_matrix[true_shard, predicted_shard] += 1
+
             if chosen['label'] == 'correct':
                 correct_count += 1
             total_evals += 1
 
             print(f"[Shard {i}] Block {block_index} losses: {candidate_losses}")
             print(f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
-            print(f" -> Model selected candidate from shard {chosen['source_shard']} (label: {chosen['label']})")
+            print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
             pos += 2 * segment_size  # advance the block position
 
     if total_evals == 0:
@@ -332,10 +339,18 @@ def evaluate_multiclass_with_channels(
 
     accuracy = correct_count / total_evals
     print(f"\n[Multi-class Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
+
+    # Print the confusion matrix.
+    print("\nConfusion Matrix (rows: true prompt shard, columns: predicted candidate shard):")
+    header = "      " + " ".join([f"Shd{j}" for j in range(num_shards)])
+    print(header)
+    for i in range(num_shards):
+        row_counts = " ".join([f"{confusion_matrix[i, j]:5d}" for j in range(num_shards)])
+        print(f"Shd{i} : {row_counts}")
     return accuracy
 
 # === Main script ===
-device = torch.device('cuda')
+device = torch.device('cpu')
 model = GPT(GPTConfig).to(device)
 if small_model:
     checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
@@ -362,7 +377,7 @@ for epoch in range(epochs):
             "output_MEMA/shards/shard_train_1.pt",
             "output_MEMA/shards/shard_train_2.pt"
         ],
-        device="cuda",
+        device="cpu",
         segment_size=512
     )
     accs.append(acc)
