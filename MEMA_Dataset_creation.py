@@ -93,8 +93,8 @@ def process_and_save(data, sps, coeffs_path, chans_path,
             coeffs_line = " ".join(all_channel_coeffs) + " "
             chans_line = " ".join(all_channel_names) + " "
 
-            f_coeffs.write(coeffs_line + "\n")
-            f_chans.write(chans_line + "\n")
+            f_coeffs.write(coeffs_line + " ")
+            f_chans.write(chans_line + " ")
 
 
 def load_mat_epoch_data(mat_file_path):

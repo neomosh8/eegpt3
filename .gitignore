@@ -26,3 +26,4 @@ dataset/EEG-ImageNet_1.pth
 log.txt
 /dataset
 /output_MEMA
+*.png
