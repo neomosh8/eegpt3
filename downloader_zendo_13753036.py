@@ -97,25 +97,27 @@ def process_record(record_url):
 def main():
     # List of Zenodo record URLs to process
     record_urls = [
-        "https://zenodo.org/records/6395564",
-        "https://zenodo.org/records/2536267",
-        "https://zenodo.org/records/12734987",
-        "https://zenodo.org/records/5016646",
-        "https://zenodo.org/records/10803229",
-        "https://zenodo.org/records/3745593",
-        "https://zenodo.org/records/4385970",
-        "https://zenodo.org/records/5512578",
-        "https://zenodo.org/records/30084",
-        "https://zenodo.org/records/10518106",
-        "https://zenodo.org/records/8173495",
-        "https://zenodo.org/records/7650679",
-        "https://zenodo.org/records/7795585",
-        "https://zenodo.org/records/4004271",
-        "https://zenodo.org/records/14732590",
-        "https://zenodo.org/records/4987915",
-        "https://zenodo.org/records/10980117",
         "https://zenodo.org/records/1199011",
-        "https://zenodo.org/records/4537751"
+        "https://zenodo.org/records/4518754"
+        # "https://zenodo.org/records/6395564",
+        # "https://zenodo.org/records/2536267",
+        # "https://zenodo.org/records/12734987",
+        # "https://zenodo.org/records/5016646",
+        # "https://zenodo.org/records/10803229",
+        # "https://zenodo.org/records/3745593",
+        # "https://zenodo.org/records/4385970",
+        # "https://zenodo.org/records/5512578",
+        # "https://zenodo.org/records/30084",
+        # "https://zenodo.org/records/10518106",
+        # "https://zenodo.org/records/8173495",
+        # "https://zenodo.org/records/7650679",
+        # "https://zenodo.org/records/7795585",
+        # "https://zenodo.org/records/4004271",
+        # "https://zenodo.org/records/14732590",
+        # "https://zenodo.org/records/4987915",
+        # "https://zenodo.org/records/10980117",
+        # "https://zenodo.org/records/1199011",
+        # "https://zenodo.org/records/4537751"
     ]
 
     # Use the maximum number of available cores.
