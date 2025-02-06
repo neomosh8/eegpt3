@@ -1,26 +1,33 @@
 import requests
 import boto3
+from tqdm import tqdm
 
 
-# --- Helper Class to Track Bytes Read ---
+# --- Helper Class to Track Progress with tqdm ---
 class ProgressReader:
-    def __init__(self, stream):
+    def __init__(self, stream, total, desc=""):
         self.stream = stream
-        self.bytes_read = 0
+        self.total = total
+        self.pbar = tqdm(total=total, unit='B', unit_scale=True, desc=desc)
 
     def read(self, amt=None):
         data = self.stream.read(amt)
-        self.bytes_read += len(data)
+        self.pbar.update(len(data))
         return data
 
     def __getattr__(self, attr):
         # Forward any other attribute/method calls to the underlying stream.
         return getattr(self.stream, attr)
 
+    def close(self):
+        self.pbar.close()
+        if hasattr(self.stream, "close"):
+            self.stream.close()
+
 
 # --- Configuration ---
 
-# Zenodo record ID (change as needed)
+# Zenodo record ID
 ZENODO_RECORD_ID = "13753036"
 ZENODO_API_URL = f"https://zenodo.org/api/records/{ZENODO_RECORD_ID}"
 
@@ -29,7 +36,6 @@ S3_BUCKET = "dataframes--use1-az6--x-s3"  # Your S3 bucket name
 S3_BASE_FOLDER = "attention fintune"  # Base folder in S3
 
 # --- Retrieve Zenodo Record Metadata ---
-
 response = requests.get(ZENODO_API_URL)
 if response.status_code != 200:
     raise Exception(f"Failed to fetch Zenodo record: HTTP {response.status_code}")
@@ -63,20 +69,24 @@ for file_info in record.get("files", []):
         r.raise_for_status()  # Ensure we got a valid response
         r.raw.decode_content = True  # Enable proper decoding of the raw stream
 
-        # Optionally print the expected file size if provided by the server
-        content_length = r.headers.get("Content-Length")
-        if content_length:
-            print(f"Expected file size: {content_length} bytes")
+        # Get the total file size from the header (if provided)
+        total_bytes = int(r.headers.get("Content-Length", 0))
+        if total_bytes:
+            print(f"Expected file size: {total_bytes} bytes")
+        else:
+            print("Content-Length header not provided.")
 
-        # Wrap the raw stream to track the number of bytes read
-        progress_stream = ProgressReader(r.raw)
+        # Wrap the raw stream with our progress tracker
+        progress_stream = ProgressReader(r.raw, total=total_bytes, desc=file_name)
 
-        # Construct the S3 key to include the desired folder structure
+        # Construct the S3 key using the desired folder structure
         s3_key = f"{S3_BASE_FOLDER}/{ZENODO_RECORD_ID}/{file_name}"
         print(f"Uploading '{file_name}' to s3://{S3_BUCKET}/{s3_key} ...")
 
         # Upload the streamed file directly to S3
         s3_client.upload_fileobj(progress_stream, S3_BUCKET, s3_key)
 
-        # Report the total number of bytes read (downloaded and uploaded)
-        print(f"Uploaded '{file_name}' successfully! Total bytes transferred: {progress_stream.bytes_read}\n")
+        # Close the progress bar
+        progress_stream.close()
+
+    print(f"Uploaded '{file_name}' successfully!\n")
