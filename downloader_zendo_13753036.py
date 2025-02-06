@@ -121,7 +121,7 @@ def main():
     ]
 
     # Use the maximum number of available cores.
-    max_workers = os.cpu_count() or 4
+    max_workers = os.cpu_count()-1 or 4
 
     # Use ProcessPoolExecutor to run downloads in parallel (each record is processed in its own process).
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
