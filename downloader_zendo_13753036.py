@@ -28,7 +28,7 @@ class ProgressReader:
 # --- Configuration ---
 
 # Zenodo record ID
-ZENODO_RECORD_ID = "13753036"
+ZENODO_RECORD_ID = "7893847"
 ZENODO_API_URL = f"https://zenodo.org/api/records/{ZENODO_RECORD_ID}"
 
 # S3 configuration
