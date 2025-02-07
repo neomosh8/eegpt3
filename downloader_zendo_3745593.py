@@ -19,7 +19,8 @@ Dataset description:
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
-      value with a dummy valid string so that recordTime errors are avoided.
+      value with a dummy valid string and ensures that a dummy sensorLayout.xml exists
+      so that MNE can load the MFF folder without error.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -50,7 +51,7 @@ import boto3
 from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 
-# --- Helper Function to Patch info.xml ---
+# --- Helper Functions ---
 
 def patch_info_xml(subject_path):
     """
@@ -68,17 +69,33 @@ def patch_info_xml(subject_path):
 
     # Use a replacement function to avoid ambiguous backreferences.
     def repl(match):
-        # match.group(1) is the opening tag, match.group(3) is the closing tag.
-        # Replace whatever is in between with a dummy recordTime.
+        # match.group(1) is the opening tag; match.group(3) is the closing tag.
         return match.group(1) + "1970-01-01T00:00:00.000000+00:00" + match.group(3)
 
     new_content = re.sub(r"(<recordTime>)(.*?)(</recordTime>)", repl, content)
-
     with open(info_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
 
-# --- Processing Functions ---
+def ensure_sensor_layout(subject_path):
+    """
+    Checks for the existence of sensorLayout.xml in the subject folder.
+    If not found, creates a dummy sensorLayout.xml with minimal valid XML content.
+
+    Args:
+        subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
+    """
+    sensor_layout_path = os.path.join(subject_path, "sensorLayout.xml")
+    if not os.path.exists(sensor_layout_path):
+        print(f"sensorLayout.xml not found in {subject_path}. Creating dummy sensorLayout.xml.")
+        dummy_content = """<?xml version="1.0" encoding="UTF-8"?>
+<sensorLayout>
+  <sensors/>
+</sensorLayout>
+"""
+        with open(sensor_layout_path, "w", encoding="utf-8") as f:
+            f.write(dummy_content)
+
 
 def average_hemispheric_channels(data, ch_names):
     """
@@ -234,7 +251,7 @@ if __name__ == "__main__":
             exit(1)
 
         # Extract the ZIP file.
-        extract_path = os.path.join(temp_dir, "extracted/mental_attention")
+        extract_path = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_path, exist_ok=True)
         try:
             with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
@@ -265,6 +282,8 @@ if __name__ == "__main__":
 
             # Patch the info.xml file to replace recordTime with a dummy value.
             patch_info_xml(subject_path)
+            # Ensure sensorLayout.xml exists; if not, create a dummy file.
+            ensure_sensor_layout(subject_path)
 
             try:
                 # Load the MFF data using MNE’s read_raw_egi.
