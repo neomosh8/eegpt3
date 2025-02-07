@@ -15,7 +15,7 @@ import numpy as np
 from torch.special import logit
 import boto3
 small_model = False
-resume = False
+resume = True
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
@@ -828,11 +828,11 @@ val_loader   = DataLoaderLiteAllInMemory(B=B, T=T,
                                          shuffle_shards=False)
 
 
-imageNet_data_by_subject = build_forced_choice_data(
-    shards_dir="validation_datasets_imageNet/shards",
-    file_pattern="shard_train_",  # or "shard_val_" if that's how your files are named
-    map_location='cpu'
-)
+# imageNet_data_by_subject = build_forced_choice_data(
+#     shards_dir="validation_datasets_imageNet/shards",
+#     file_pattern="shard_train_",  # or "shard_val_" if that's how your files are named
+#     map_location='cpu'
+# )
 
 model = GPT(GPTConfig())
 model.to(device)
@@ -981,34 +981,34 @@ for step in range(start_step,max_steps):
                 s3_prefix="training_XL/log"
             )
 
-    if (step>0 and step % 1000 == 0) or last_step:
-        #### once in a while, Perform Multiclass force choice validation
-        model.eval()
-        with torch.no_grad():
-            dt1 = time.time()
-            acc = evaluate_multi_class_forced_choice(
-                model=model,
-                data_by_subject=imageNet_data_by_subject,  # pass the big CPU dictionary
-                segment_size=512,
-                num_trials_per_subject=5,
-                device=device,
-                device_type=device_type,
-                ddp=ddp,
-                master_process=master_process
-            )
-            dt2 = time.time()
-            dt_mc = dt2-dt1
-            if master_process:
-                dt_mc = dt2 - dt1
-                print(dt_mc)
-
-        # If you wanted to record the accuracy in your logs:
-        # mc_val_loss = -math.log(acc + 1e-9)
-        mc_val_losses.append(acc*100)
-        mc_val_steps.append(step)
-        if master_process:
-            with open(log_file, "a") as f:
-                f.write(f"{step} MCval {acc:.4f}\n")
+    # if (step>0 and step % 1000 == 0) or last_step:
+    #     #### once in a while, Perform Multiclass force choice validation
+    #     model.eval()
+    #     with torch.no_grad():
+    #         dt1 = time.time()
+    #         acc = evaluate_multi_class_forced_choice(
+    #             model=model,
+    #             data_by_subject=imageNet_data_by_subject,  # pass the big CPU dictionary
+    #             segment_size=512,
+    #             num_trials_per_subject=5,
+    #             device=device,
+    #             device_type=device_type,
+    #             ddp=ddp,
+    #             master_process=master_process
+    #         )
+    #         dt2 = time.time()
+    #         dt_mc = dt2-dt1
+    #         if master_process:
+    #             dt_mc = dt2 - dt1
+    #             print(dt_mc)
+    #
+    #     # If you wanted to record the accuracy in your logs:
+    #     # mc_val_loss = -math.log(acc + 1e-9)
+    #     mc_val_losses.append(acc*100)
+    #     mc_val_steps.append(step)
+    #     if master_process:
+    #         with open(log_file, "a") as f:
+    #             f.write(f"{step} MCval {acc:.4f}\n")
 
     model.train()
     optimizer.zero_grad()
