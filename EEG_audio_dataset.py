@@ -79,7 +79,7 @@ def plot_eeg_channels(df, fs, title="EEG Channels"):
 
 
 def process_and_save(data, sps, coeffs_path, chans_path,
-                     wavelet='db2', level=4, window_len_sec=1.8, plot_windows=False, plot_random_n=5):
+                     wavelet='db2', level=4, window_len_sec=1.8, plot_windows=False, plot_random_n=1):
     """
     Segments a 2-channel signal into non-overlapping windows,
     performs wavelet decomposition and quantization on each window,
