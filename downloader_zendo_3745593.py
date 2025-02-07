@@ -21,6 +21,7 @@ Dataset description:
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
       is generated using information from coordinates.xml.
+      In generating the sensor layout, if 33 sensors are found, any sensor with label "Cz" is skipped.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -36,6 +37,7 @@ except ImportError:
 
 import re
 import xml.etree.ElementTree as ET
+import traceback
 import matplotlib
 
 matplotlib.use('Agg')
@@ -57,7 +59,7 @@ from utils import preprocess_data, wavelet_decompose_window, quantize_number
 def patch_info_xml(subject_path):
     """
     Patches the info.xml file in the given subject folder by replacing the content of the
-    <recordTime> element with a dummy valid value. This bypasses parsing errors.
+    <recordTime> element with a dummy valid value.
 
     Args:
         subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
@@ -82,9 +84,8 @@ def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0" (EEG sensors).
-    If coordinates.xml exists, it extracts sensor elements from the
-    <sensorLayout>/<sensors> element and creates sensorLayout.xml.
+    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0".
+    If 33 sensors are found, it removes any sensor with label "Cz".
     Otherwise, a minimal dummy sensorLayout.xml is created.
 
     Args:
@@ -100,7 +101,7 @@ def ensure_sensor_layout(subject_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
-            # Find the sensors container inside sensorLayout
+            # Locate the sensors container.
             sensors_container = root.find("ns:sensorLayout/ns:sensors", ns)
             if sensors_container is None:
                 raise ValueError("No <sensors> element found in coordinates.xml.")
@@ -108,13 +109,17 @@ def ensure_sensor_layout(subject_path):
             # Filter sensors with type "0" (EEG sensors)
             eeg_sensors = []
             for s in sensors:
-                t = s.findtext("ns:type", default="", namespaces=ns)
-                if t.strip() == "0":
+                sensor_type = s.findtext("ns:type", default="").strip()
+                if sensor_type == "0":
                     eeg_sensors.append(s)
             print(f"Found {len(eeg_sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
+            # If we have 33 sensors, remove the one with label "Cz" (if present).
+            if len(eeg_sensors) == 33:
+                eeg_sensors = [s for s in eeg_sensors if (s.findtext("ns:name", "").strip() != "Cz")]
+                print(f"After removing 'Cz', {len(eeg_sensors)} EEG sensor(s) remain.")
             if not eeg_sensors:
                 raise ValueError("No sensor elements with type '0' found in coordinates.xml.")
-            # Create new sensorLayout.xml
+            # Create a new XML structure for sensorLayout.xml.
             layout_root = ET.Element("sensorLayout")
             sensors_elem = ET.SubElement(layout_root, "sensors")
             for sensor in eeg_sensors:
@@ -339,7 +344,12 @@ if __name__ == "__main__":
 
             try:
                 # Load the MFF data using MNE’s read_raw_egi.
-                raw = mne.io.read_raw_egi(subject_path, preload=True, verbose=False)
+                try:
+                    raw = mne.io.read_raw_egi(subject_path, preload=True, verbose=False)
+                except Exception as e:
+                    print(f"Error loading {subject_path}:")
+                    traceback.print_exc()
+                    continue
             except Exception as e:
                 print(f"Error loading {subject_path}: {e}")
                 continue
