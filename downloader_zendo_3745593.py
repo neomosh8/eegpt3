@@ -4,7 +4,7 @@ This script processes the mental_attention EEG dataset.
 
 Dataset description:
   - 20 subjects performed an experiment in which they were instructed to
-    mentally concentrate on a target for 15-second periods (interleaved with
+    mentally concentrate on a target for 15-second periods (with interleaved
     relax/get-ready phases).
   - Each subject’s data is stored in an MFF folder (e.g., "sub-001.mff") inside
     the mental_attention.zip archive.
@@ -19,14 +19,11 @@ Dataset description:
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
 IMPORTANT:
-  The EGI MFF reader requires the module defusedxml. Please ensure it is installed:
-
-      pip install defusedxml
-      # or, with conda:
-      conda install -c conda-forge defusedxml
+  This script patches the mffpy time parser so that recordTime strings such as
+  "2020-03-06T18:01:47.25318000:00" are normalized to a format that can be parsed.
 """
 
-# --- Check for defusedxml ---
+# --- Ensure required modules are installed ---
 try:
     import defusedxml.ElementTree
 except ImportError:
@@ -35,44 +32,38 @@ except ImportError:
         "Please install it with 'pip install defusedxml' or 'conda install -c conda-forge defusedxml'."
     )
 
-import datetime
+# --- Monkey-patch mffpy's time parser ---
 import re
+import datetime
+import mffpy.time
 
-# --- Patch the recordTime parser used by MNE for EGI MFF files ---
-# We patch the function in mne.io.egi (the namespace used by read_raw_egi).
-import mne.io.egi
-
-
-def patched_parse_record_time(record_time_str):
-    # First, try the built-in parser
-    try:
-        return datetime.datetime.fromisoformat(record_time_str)
-    except ValueError:
-        # If the string ends with a colon and two digits (e.g., ":00"), remove it.
-        if record_time_str.endswith(":00"):
-            record_time_str = record_time_str[:-3]
-        # Now, if there is a fractional seconds part, ensure it has at most 6 digits.
-        if '.' in record_time_str:
-            base, frac = record_time_str.split('.', 1)
-            # Check if there is a timezone indicator (+ or -) after the fractional part.
-            m = re.match(r'(\d+)([+-].*)', frac)
-            if m:
-                digits, tz = m.groups()
-                digits = digits[:6]
-                frac = digits + tz
-            else:
-                frac = frac[:6]
-            record_time_str = base + '.' + frac
-        # Try again
-        try:
-            return datetime.datetime.fromisoformat(record_time_str)
-        except Exception as e:
-            raise ValueError(f"Could not parse recordTime '{record_time_str}'") from e
+# Save the original __init__ method of MFFTime
+_orig_MFFTime_init = mffpy.time.MFFTime.__init__
 
 
-# Apply the patch to the function used by read_raw_egi.
-mne.io.egi._parse_record_time = patched_parse_record_time
-# ----------------------------------------------------------------
+def _patched_MFFTime_init(self, dt_str):
+    # If the string ends with ":00", remove that portion.
+    if dt_str.endswith(":00"):
+        dt_str = dt_str[:-3]
+    # If there is a fractional seconds part, limit it to 6 digits.
+    if '.' in dt_str:
+        base, frac = dt_str.split('.', 1)
+        # Look for a timezone indicator (e.g., +08:00 or -05:00)
+        match = re.match(r'(\d+)([+-].*)', frac)
+        if match:
+            digits, tz = match.groups()
+            digits = digits[:6]
+            frac = digits + tz
+        else:
+            frac = frac[:6]
+        dt_str = base + '.' + frac
+    return _orig_MFFTime_init(self, dt_str)
+
+
+# Apply the patch to mffpy.time.MFFTime.__init__
+mffpy.time.MFFTime.__init__ = _patched_MFFTime_init
+
+# ------------------------------------------------------------------
 
 import matplotlib
 
@@ -96,7 +87,7 @@ def average_hemispheric_channels(data, ch_names):
 
     Channels whose names end with an odd digit are considered left-hemisphere,
     while those ending with an even digit are considered right-hemisphere.
-    Channels that do not end with a digit (e.g. midline channels) are ignored.
+    Channels that do not end with a digit (e.g., midline channels) are ignored.
 
     Args:
         data: NumPy array of shape (n_channels, n_samples)
@@ -164,10 +155,10 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         coeffs_path: Output file path for quantized coefficients.
         chans_path: Output file path for channel labels.
         wavelet: Wavelet type (default 'db2').
-        level: Decomposition level (default: 4).
+        level: Decomposition level (default 4).
         window_len_sec: Window length in seconds (here, 15 sec).
         plot_windows: If True, plots selected windows.
-        plot_random_n: If an integer and less than total windows, randomly selects that many windows to plot.
+        plot_random_n: If an integer (and less than total windows), randomly selects that many windows to plot.
     """
     n_window_samples = int(window_len_sec * sps)
     total_samples = data.shape[1]
@@ -227,7 +218,7 @@ if __name__ == "__main__":
     output_base = "output-3745593"
     os.makedirs(output_base, exist_ok=True)
 
-    # Initialize boto3 S3 client.
+    # Initialize the boto3 S3 client.
     s3 = boto3.client("s3")
 
     # Create a temporary directory for download and extraction.
