@@ -275,8 +275,8 @@ if __name__ == "__main__":
             # Preprocess the trial (e.g., filtering, downsampling)
             prep_data, new_fs = preprocess_data(trial_T, fs)
             # Reduce to 2 channels by averaging alternate channels
-            # twoch_data = average_alternate_channels(prep_data)
-            processed_trials.append(prep_data)
+            twoch_data = average_alternate_channels(prep_data)
+            processed_trials.append(twoch_data)
 
         if processed_trials:
             # Combine all processed trials (all attention EEG) into one continuous signal.
