@@ -228,9 +228,31 @@ def load_subject_data(mat_file_path):
 
 
 if __name__ == "__main__":
-    eeg_folder = "C:/Users/rabie/Desktop/eeg"
-    subject_files = [f"S{ss}.mat" for ss in range(1, 3)]  # e.g., S1.mat to S18.mat
-    output_base = "output"
+    import boto3
+    import zipfile
+    import tempfile
+
+    # Download EEG.zip from S3 and extract it
+    s3_bucket = "dataframes--use1-az6--x-s3"
+    s3_key = "attention fintune/1199011/EEG.zip"
+    temp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(temp_dir, "EEG.zip")
+
+    s3 = boto3.client('s3')
+    print("Downloading EEG.zip from S3...")
+    s3.download_file(s3_bucket, s3_key, zip_path)
+    print(f"Downloaded EEG.zip to {zip_path}")
+
+    extract_dir = os.path.join(temp_dir, "EEG")
+    os.makedirs(extract_dir, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    print(f"Extracted EEG.zip to {extract_dir}")
+
+    # Set eeg_folder to the extracted directory
+    eeg_folder = extract_dir
+    subject_files = [f"S{ss}.mat" for ss in range(1, 19)]  # e.g., S1.mat to S18.mat
+    output_base = "output_1199011"
 
     for subj_file in subject_files:
         subj_path = os.path.join(eeg_folder, subj_file)
