@@ -17,7 +17,66 @@ Dataset description:
     (Channels without a trailing digit are ignored.)
   - The resulting 2-channel data is preprocessed, windowed, decomposed using wavelets,
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
+
+IMPORTANT:
+  The EGI MFF reader requires the module defusedxml. Please ensure it is installed:
+
+      pip install defusedxml
+      # or, with conda:
+      conda install -c conda-forge defusedxml
 """
+
+# First, ensure defusedxml is installed.
+try:
+    import defusedxml.ElementTree
+except ImportError:
+    raise ImportError(
+        "For reading EGI MFF data, the module defusedxml is required. "
+        "Please install it with 'pip install defusedxml' or 'conda install -c conda-forge defusedxml'."
+    )
+
+import datetime
+import re
+
+# --- Monkey-patch MNE’s recordTime parser for EGI MFF files ---
+# The function _parse_record_time is used internally by mne.io.read_raw_egi.
+# We patch it so that it can handle recordTime strings such as:
+#   "2020-03-06T17:54:25.51953000:00"
+# by (1) removing a trailing ":00" if present, and (2) limiting fractional seconds to 6 digits.
+import mne.io.egi.egi as egi_mod
+
+
+def patched_parse_record_time(record_time_str):
+    # First, try the built-in parser
+    try:
+        return datetime.datetime.fromisoformat(record_time_str)
+    except ValueError:
+        # If the string ends with a colon and two digits (e.g., ":00"), remove it.
+        if record_time_str.endswith(":00"):
+            record_time_str = record_time_str[:-3]
+        # Now, if there is a fractional seconds part, ensure it has at most 6 digits.
+        if '.' in record_time_str:
+            base, frac = record_time_str.split('.', 1)
+            # Check if there is a timezone indicator (+ or -)
+            m = re.match(r'(\d+)([+-].*)', frac)
+            if m:
+                digits, tz = m.groups()
+                digits = digits[:6]
+                frac = digits + tz
+            else:
+                frac = frac[:6]
+            record_time_str = base + '.' + frac
+        # Try again
+        try:
+            return datetime.datetime.fromisoformat(record_time_str)
+        except Exception as e:
+            raise ValueError(f"Could not parse recordTime '{record_time_str}'") from e
+
+
+# Apply the patch
+egi_mod._parse_record_time = patched_parse_record_time
+
+# ----------------------------------------------------------------
 
 import matplotlib
 
@@ -55,7 +114,6 @@ def average_hemispheric_channels(data, ch_names):
     left_indices = []
     right_indices = []
     for i, ch in enumerate(ch_names):
-        # Only process channels whose name ends with a digit.
         if ch and ch[-1].isdigit():
             if ch[-1] in ['1', '3', '5', '7', '9']:
                 left_indices.append(i)
@@ -65,7 +123,6 @@ def average_hemispheric_channels(data, ch_names):
         raise ValueError("No left hemisphere channels found.")
     if not right_indices:
         raise ValueError("No right hemisphere channels found.")
-
     left_avg = np.mean(data[left_indices, :], axis=0)
     right_avg = np.mean(data[right_indices, :], axis=0)
     return np.stack([left_avg, right_avg])
@@ -111,7 +168,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         coeffs_path: Output file path for quantized coefficients.
         chans_path: Output file path for channel labels.
         wavelet: Wavelet type (default 'db2').
-        level: Decomposition level (default 4).
+        level: Decomposition level (default: 4).
         window_len_sec: Window length in seconds (here, 15 sec).
         plot_windows: If True, plots selected windows.
         plot_random_n: If an integer and less than total windows, randomly selects that many windows to plot.
@@ -222,7 +279,6 @@ if __name__ == "__main__":
 
             try:
                 # Load the MFF data using MNE’s read_raw_egi.
-                # (MFF files from EGI can be read by read_raw_egi if the folder structure is correct.)
                 raw = mne.io.read_raw_egi(subject_path, preload=True, verbose=False)
             except Exception as e:
                 print(f"Error loading {subject_path}: {e}")
