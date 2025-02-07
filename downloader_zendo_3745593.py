@@ -18,12 +18,13 @@ Dataset description:
   - The resulting 2-channel data is preprocessed, windowed, decomposed using wavelets,
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
-NOTE: This version patches each subject’s info.xml file to fix the recordTime field.
+NOTE: This version patches each subject’s info.xml file to replace the recordTime
+      value with a dummy valid string so that recordTime errors are avoided.
 """
 
 # --- Preliminary Imports and Checks ---
 
-# Check that defusedxml is installed, as it is required by MNE for reading EGI MFF data.
+# Ensure defusedxml is installed.
 try:
     import defusedxml.ElementTree
 except ImportError:
@@ -53,9 +54,8 @@ from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 def patch_info_xml(subject_path):
     """
-    Patches the info.xml file in the given subject folder by fixing the <recordTime> field.
-    The problematic recordTime string (e.g., '2020-03-06T17:54:25.51953000:00')
-    is truncated to include only six fractional digits (e.g., '2020-03-06T17:54:25.519530').
+    Patches the info.xml file in the given subject folder by replacing the content of the
+    <recordTime> element with a dummy valid value. This bypasses parsing errors.
 
     Args:
         subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
@@ -66,20 +66,13 @@ def patch_info_xml(subject_path):
     with open(info_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Pattern to find the recordTime element.
-    pattern = r"(<recordTime>)(.*?)(</recordTime>)"
-
-    def repl(match):
-        rt_str = match.group(2)
-        # Use regex to capture the desired format: YYYY-MM-DDTHH:MM:SS.<6 digits>
-        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})", rt_str)
-        if m:
-            new_rt = m.group(1)
-        else:
-            new_rt = rt_str  # fallback (should not happen often)
-        return f"{match.group(1)}{new_rt}{match.group(3)}"
-
-    new_content = re.sub(pattern, repl, content)
+    # Replace any <recordTime>...</recordTime> with a dummy valid string.
+    # Here we use "1970-01-01T00:00:00.000000+00:00" as a placeholder.
+    new_content = re.sub(
+        r"(<recordTime>)(.*?)(</recordTime>)",
+        r"\11970-01-01T00:00:00.000000+00:00\3",
+        content
+    )
     with open(info_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
@@ -269,7 +262,7 @@ if __name__ == "__main__":
             subject_path = os.path.join(dataset_root, subj_entry)
             print(f"\nProcessing subject: {subject_id}")
 
-            # Patch the info.xml file to fix recordTime format.
+            # Patch the info.xml file to replace recordTime with a dummy value.
             patch_info_xml(subject_path)
 
             try:
