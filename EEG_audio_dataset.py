@@ -87,8 +87,6 @@ def process_and_save(data, sps, coeffs_path, chans_path,
     performs wavelet decomposition and quantization on each window,
     and writes the results to text files.
 
-    Optionally, it plots a subset of the windows.
-
     Args:
         data: NumPy array of shape (2, total_samples)
         sps: Sampling rate (Hz)
@@ -106,7 +104,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
     # Calculate the total number of windows.
     total_windows = len(range(0, total_samples - n_window_samples + 1, n_window_samples))
 
-    # If you want to plot a random subset of windows, select them now.
+    # Select random windows to plot if desired.
     if plot_random_n is not None and plot_random_n < total_windows:
         selected_windows = np.random.choice(range(1, total_windows + 1), size=plot_random_n, replace=False)
     else:
@@ -120,35 +118,36 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         for start_idx in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_counter += 1
             end_idx = start_idx + n_window_samples
-            window_data = data[:, start_idx:end_idx]
+            window_data = data[:, start_idx:end_idx]  # Shape: (2, n_window_samples)
 
-            # Determine whether to plot this window.
+            # Plot the window if requested.
             if selected_windows is not None:
                 if window_counter in selected_windows:
                     plot_window(window_data, sps, window_index=window_counter)
             elif plot_windows:
                 plot_window(window_data, sps, window_index=window_counter)
 
-            # Now do the wavelet decomposition and quantization.
+            # Call wavelet_decompose_window once with the entire 2-channel window.
+            (decomposed_channels,
+             coeffs_lengths,
+             num_samples,
+             normalized_data) = wavelet_decompose_window(
+                window_data,     # Pass both channels at once.
+                wavelet=wavelet,
+                level=level,
+                normalization=True
+            )
+
+            # Now, process each channel's decomposed coefficients.
             all_channel_coeffs = []
             all_channel_names = []
-            for ch_idx in range(2):
+            for ch_idx in range(decomposed_channels.shape[0]):  # Should be 2 channels.
                 ch_name = str(ch_idx)
-                channel_data = window_data[ch_idx, :]
-                channel_data_2d = channel_data[np.newaxis, :]
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wavelet,
-                    level=level,
-                    normalization=True
-                )
-                coeffs_flat = decomposed_channels.flatten()
+                coeffs_flat = decomposed_channels[ch_idx].flatten()
                 q_ids = [str(quantize_number(c)) for c in coeffs_flat]
                 all_channel_coeffs.extend(q_ids)
                 all_channel_names.extend([ch_name] * len(q_ids))
+
             f_coeffs.write(" ".join(all_channel_coeffs) + " ")
             f_chans.write(" ".join(all_channel_names) + " ")
 
