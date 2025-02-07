@@ -50,7 +50,7 @@ def plot_window(window_data, sps, window_index=None):
     plt.ylabel("Amplitude")
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"window_{window_index}.png")
     plt.close()
 
 
