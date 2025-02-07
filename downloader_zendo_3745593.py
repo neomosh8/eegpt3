@@ -20,8 +20,7 @@ Dataset description:
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
-      is generated using information from coordinates.xml. In generating the sensor layout,
-      only sensors with type "0" (EEG sensors) are included.
+      is generated using information from coordinates.xml.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -83,8 +82,9 @@ def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0".
-    If coordinates.xml exists, it extracts sensor elements and creates sensorLayout.xml.
+    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0" (EEG sensors).
+    If coordinates.xml exists, it extracts sensor elements from the
+    <sensorLayout>/<sensors> element and creates sensorLayout.xml.
     Otherwise, a minimal dummy sensorLayout.xml is created.
 
     Args:
@@ -100,27 +100,36 @@ def ensure_sensor_layout(subject_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
-            # Find sensor elements with type "0" (EEG sensors only)
-            sensors = [s for s in root.findall(".//ns:sensor", ns)
-                       if s.findtext("ns:type", default="") == "0"]
-            print(f"Found {len(sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
-            if not sensors:
+            # Find the sensors container inside sensorLayout
+            sensors_container = root.find("ns:sensorLayout/ns:sensors", ns)
+            if sensors_container is None:
+                raise ValueError("No <sensors> element found in coordinates.xml.")
+            sensors = sensors_container.findall("ns:sensor", ns)
+            # Filter sensors with type "0" (EEG sensors)
+            eeg_sensors = []
+            for s in sensors:
+                t = s.findtext("ns:type", default="", namespaces=ns)
+                if t.strip() == "0":
+                    eeg_sensors.append(s)
+            print(f"Found {len(eeg_sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
+            if not eeg_sensors:
                 raise ValueError("No sensor elements with type '0' found in coordinates.xml.")
-            # Create a new XML structure for sensorLayout.xml.
+            # Create new sensorLayout.xml
             layout_root = ET.Element("sensorLayout")
             sensors_elem = ET.SubElement(layout_root, "sensors")
-            for sensor in sensors:
-                sensor_id = sensor.findtext("ns:number", default="0", namespaces=ns)
-                label = sensor.findtext("ns:name", default=f"E{sensor_id}", namespaces=ns)
-                x = sensor.findtext("ns:x", default="0", namespaces=ns)
-                y = sensor.findtext("ns:y", default="0", namespaces=ns)
-                z = sensor.findtext("ns:z", default="0", namespaces=ns)
+            for sensor in eeg_sensors:
+                sensor_id = sensor.findtext("ns:number", default="0", namespaces=ns).strip()
+                label = sensor.findtext("ns:name", default=f"E{sensor_id}", namespaces=ns).strip()
+                x = sensor.findtext("ns:x", default="0", namespaces=ns).strip()
+                y = sensor.findtext("ns:y", default="0", namespaces=ns).strip()
+                z = sensor.findtext("ns:z", default="0", namespaces=ns).strip()
                 new_sensor = ET.SubElement(sensors_elem, "sensor")
                 new_sensor.set("id", sensor_id)
                 new_sensor.set("label", label)
                 new_sensor.set("x", x)
                 new_sensor.set("y", y)
                 new_sensor.set("z", z)
+                print(f"Added sensor {label} (id: {sensor_id}) at ({x}, {y}, {z})")
             tree_new = ET.ElementTree(layout_root)
             tree_new.write(sensor_layout_path, encoding="utf-8", xml_declaration=True)
             print(f"Created sensorLayout.xml from coordinates.xml in {subject_path}.")
