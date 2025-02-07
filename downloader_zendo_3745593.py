@@ -26,7 +26,7 @@ IMPORTANT:
       conda install -c conda-forge defusedxml
 """
 
-# First, ensure defusedxml is installed.
+# --- Check for defusedxml ---
 try:
     import defusedxml.ElementTree
 except ImportError:
@@ -38,12 +38,9 @@ except ImportError:
 import datetime
 import re
 
-# --- Monkey-patch MNE’s recordTime parser for EGI MFF files ---
-# The function _parse_record_time is used internally by mne.io.read_raw_egi.
-# We patch it so that it can handle recordTime strings such as:
-#   "2020-03-06T17:54:25.51953000:00"
-# by (1) removing a trailing ":00" if present, and (2) limiting fractional seconds to 6 digits.
-import mne.io.egi.egi as egi_mod
+# --- Patch the recordTime parser used by MNE for EGI MFF files ---
+# We patch the function in mne.io.egi (the namespace used by read_raw_egi).
+import mne.io.egi
 
 
 def patched_parse_record_time(record_time_str):
@@ -57,7 +54,7 @@ def patched_parse_record_time(record_time_str):
         # Now, if there is a fractional seconds part, ensure it has at most 6 digits.
         if '.' in record_time_str:
             base, frac = record_time_str.split('.', 1)
-            # Check if there is a timezone indicator (+ or -)
+            # Check if there is a timezone indicator (+ or -) after the fractional part.
             m = re.match(r'(\d+)([+-].*)', frac)
             if m:
                 digits, tz = m.groups()
@@ -73,9 +70,8 @@ def patched_parse_record_time(record_time_str):
             raise ValueError(f"Could not parse recordTime '{record_time_str}'") from e
 
 
-# Apply the patch
-egi_mod._parse_record_time = patched_parse_record_time
-
+# Apply the patch to the function used by read_raw_egi.
+mne.io.egi._parse_record_time = patched_parse_record_time
 # ----------------------------------------------------------------
 
 import matplotlib
