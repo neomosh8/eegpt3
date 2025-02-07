@@ -789,14 +789,14 @@ if small_model:
     B = 64
     T = 1024
 else:
-    # epoch_num = 20
-    # total_batch_size = 524288
-    # B = 16
-    # T = 1024
     epoch_num = 20
-    total_batch_size = 1638400
-    B = 8
+    total_batch_size = 524288
+    B = 16
     T = 1024
+    # epoch_num = 20
+    # total_batch_size = 1638400
+    # B = 8
+    # T = 1024
 
 
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
