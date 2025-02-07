@@ -4,7 +4,7 @@ This script processes the mental_attention EEG dataset.
 
 Dataset description:
   - 20 subjects performed an experiment in which they were instructed to
-    mentally concentrate on a target for 15-second periods (with interleaved
+    mentally concentrate on a target for 15-second periods (interleaved with
     relax/get-ready phases).
   - Each subject’s data is stored in an MFF folder (e.g., "sub-001.mff") inside
     the mental_attention.zip archive.
@@ -18,32 +18,21 @@ Dataset description:
   - The resulting 2-channel data is preprocessed, windowed, decomposed using wavelets,
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
-IMPORTANT:
-  This script patches the time parser used when reading EGI MFF files so that any
-  recordTime string (e.g., "2020-03-06T18:01:47.25318000:00") is ignored and replaced
-  with a fixed datetime value.
+NOTE: This version patches each subject’s info.xml file to fix the recordTime field.
 """
 
-############################################
-# 1. Patch the recordTime parser to ignore it
-############################################
+# --- Preliminary Imports and Checks ---
 
-import datetime
-import mne.io.egi.egi as egi_mod
+# Check that defusedxml is installed, as it is required by MNE for reading EGI MFF data.
+try:
+    import defusedxml.ElementTree
+except ImportError:
+    raise ImportError(
+        "For reading EGI MFF data, the module defusedxml is required. "
+        "Please install it with 'pip install defusedxml' or 'conda install -c conda-forge defusedxml'."
+    )
 
-
-def ignore_record_time(record_time_str):
-    # Instead of parsing the recordTime string, simply return a default value.
-    return datetime.datetime(1970, 1, 1)
-
-
-egi_mod._parse_record_time = ignore_record_time
-print("Patched mne.io.egi._parse_record_time to ignore recordTime errors.")
-
-############################################
-# 2. The rest of the processing script
-############################################
-
+import re
 import matplotlib
 
 matplotlib.use('Agg')
@@ -60,13 +49,50 @@ import boto3
 from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 
+# --- Helper Function to Patch info.xml ---
+
+def patch_info_xml(subject_path):
+    """
+    Patches the info.xml file in the given subject folder by fixing the <recordTime> field.
+    The problematic recordTime string (e.g., '2020-03-06T17:54:25.51953000:00')
+    is truncated to include only six fractional digits (e.g., '2020-03-06T17:54:25.519530').
+
+    Args:
+        subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
+    """
+    info_path = os.path.join(subject_path, "info.xml")
+    if not os.path.exists(info_path):
+        return
+    with open(info_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Pattern to find the recordTime element.
+    pattern = r"(<recordTime>)(.*?)(</recordTime>)"
+
+    def repl(match):
+        rt_str = match.group(2)
+        # Use regex to capture the desired format: YYYY-MM-DDTHH:MM:SS.<6 digits>
+        m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})", rt_str)
+        if m:
+            new_rt = m.group(1)
+        else:
+            new_rt = rt_str  # fallback (should not happen often)
+        return f"{match.group(1)}{new_rt}{match.group(3)}"
+
+    new_content = re.sub(pattern, repl, content)
+    with open(info_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+
+# --- Processing Functions ---
+
 def average_hemispheric_channels(data, ch_names):
     """
     Averages EEG channels into two hemispheric signals.
 
     Channels whose names end with an odd digit are considered left-hemisphere,
     while those ending with an even digit are considered right-hemisphere.
-    Channels that do not end with a digit (e.g., midline channels) are ignored.
+    Channels that do not end with a digit (e.g. midline channels) are ignored.
 
     Args:
         data: NumPy array of shape (n_channels, n_samples)
@@ -137,7 +163,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         level: Decomposition level (default: 4).
         window_len_sec: Window length in seconds (here, 15 sec).
         plot_windows: If True, plots selected windows.
-        plot_random_n: If an integer (and less than total windows), randomly selects that many windows to plot.
+        plot_random_n: If an integer and less than total windows, randomly selects that many windows to plot.
     """
     n_window_samples = int(window_len_sec * sps)
     total_samples = data.shape[1]
@@ -186,6 +212,8 @@ def process_and_save(data, sps, coeffs_path, chans_path,
             f_chans.write(" ".join(all_channel_names) + " ")
 
 
+# --- Main Processing Pipeline ---
+
 if __name__ == "__main__":
     # --- S3 and Dataset Configuration for the Mental Attention EEG Data ---
     s3_bucket = "dataframes--use1-az6--x-s3"
@@ -197,7 +225,7 @@ if __name__ == "__main__":
     output_base = "output-3745593"
     os.makedirs(output_base, exist_ok=True)
 
-    # Initialize the boto3 S3 client.
+    # Initialize boto3 S3 client.
     s3 = boto3.client("s3")
 
     # Create a temporary directory for download and extraction.
@@ -223,9 +251,7 @@ if __name__ == "__main__":
             exit(1)
 
         # Determine the dataset root.
-        # If the ZIP contains a folder (e.g., "mental_attention"), use it.
-        extracted_contents = os.listdir(extract_path)
-        if "mental_attention" in extracted_contents:
+        if "mental_attention" in os.listdir(extract_path):
             dataset_root = os.path.join(extract_path, "mental_attention")
         else:
             dataset_root = extract_path
@@ -238,10 +264,13 @@ if __name__ == "__main__":
             exit(1)
 
         for subj_entry in sorted(subject_entries):
-            # Remove the ".mff" extension to get a clean subject ID.
+            # Remove the ".mff" extension for a clean subject ID.
             subject_id = os.path.splitext(subj_entry)[0]
             subject_path = os.path.join(dataset_root, subj_entry)
             print(f"\nProcessing subject: {subject_id}")
+
+            # Patch the info.xml file to fix recordTime format.
+            patch_info_xml(subject_path)
 
             try:
                 # Load the MFF data using MNE’s read_raw_egi.
