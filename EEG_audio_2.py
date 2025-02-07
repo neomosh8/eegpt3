@@ -166,34 +166,38 @@ if __name__ == "__main__":
     import tarfile
     import tempfile
     import os
+    from urllib.parse import quote
 
-    # Base URL for the tar.gz files (note: the space is URL-encoded as %20)
-    base_url = "https://dataframes--use1-az6--x-s3.s3express-use1-az6.us-east-1.amazonaws.com/attention%20fintune/4518754"
-    # Process subjects S0.tar.gz through S10.tar.gz
+    # Define base URL and folder path.
+    base_url = "https://dataframes--use1-az6--x-s3.s3express-use1-az6.us-east-1.amazonaws.com"
+    folder_path = "attention fintune/4518754"  # Note the space; we'll URL-encode later.
+
+    # Process subjects S0.tar.gz through S30.tar.gz
     subject_ids = [f"S{n}" for n in range(30)]
-    output_base = "output_4518754"
+    output_base = "output-4518754"
     os.makedirs(output_base, exist_ok=True)
 
     # Create a temporary directory for downloading and extracting tar.gz files.
     with tempfile.TemporaryDirectory() as temp_dir:
         for subject_id in subject_ids:
-            print(f"Processing subject: {subject_id}")
             tar_filename = f"{subject_id}.tar.gz"
-            url = f"{base_url}/{tar_filename}"
-            local_tar_path = os.path.join(temp_dir, tar_filename)
+            # Construct the raw URL (it may contain spaces, so we'll encode it)
+            raw_url = f"{base_url}/{folder_path}/{tar_filename}"
+            encoded_url = quote(raw_url, safe=":/")  # Encode spaces and other unsafe characters
+            print(f"Processing subject: {subject_id}")
+            print(f"Downloading {encoded_url} ...")
             try:
-                print(f"Downloading {url} ...")
-                # Use a custom User-Agent header to help bypass potential 403 errors.
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers)
+                headers = {'User-Agent': 'Mozilla/5.0'}  # Custom User-Agent header
+                response = requests.get(encoded_url, headers=headers)
                 response.raise_for_status()  # Raise an exception for HTTP errors
-                with open(local_tar_path, 'wb') as f:
+                local_tar_path = os.path.join(temp_dir, tar_filename)
+                with open(local_tar_path, "wb") as f:
                     f.write(response.content)
             except Exception as e:
                 print(f"Error downloading {tar_filename}: {e}")
                 continue
 
-            # Extract the tar.gz file into a dedicated folder
+            # Extract the tar.gz file into a dedicated folder.
             extract_path = os.path.join(temp_dir, subject_id)
             os.makedirs(extract_path, exist_ok=True)
             try:
@@ -203,31 +207,32 @@ if __name__ == "__main__":
                 print(f"Error extracting {tar_filename}: {e}")
                 continue
 
-            # Load the raw subject data from the extracted directory
+            # Load the raw subject data from the extracted directory.
             try:
                 raw = load_subject_raw_data(extract_path, subject_id)
             except Exception as e:
                 print(f"Error loading subject {subject_id} from extracted data: {e}")
                 continue
 
-            # Retrieve data and sampling rate
+            # Retrieve data and sampling rate.
             eeg_data = raw.get_data()
             fs = raw.info["sfreq"]
 
-            # Preprocess the data and reduce to 2 channels
+            # Preprocess the data and reduce to 2 channels.
             prep_data, new_fs = preprocess_data(eeg_data, fs)
             twoch_data = average_alternate_channels(prep_data)
-            combined_data = twoch_data
+            combined_data = twoch_data  # Shape: (2, total_samples)
 
-            # Define output file paths for this subject
+            # Define output file paths for this subject.
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process the combined data: window, wavelet decompose, quantize, and optionally plot
+            # Process the combined data: windowing, wavelet decomposition, quantization, and (optionally) plotting.
             process_and_save(combined_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8,
-                             plot_windows=False, plot_random_n=1)
+                             plot_windows=False, plot_random_n=5)
             print(f"Finished processing subject: {subject_id}")
 
     print("Done!")
+
 
