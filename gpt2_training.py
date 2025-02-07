@@ -918,6 +918,7 @@ if not resume:
     with open(log_file, "w") as f: # open for writing to clear the file
         pass
 
+print("step:",start_step,max_steps)
 for step in range(start_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
