@@ -20,8 +20,9 @@ Dataset description:
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
-      is generated using information from coordinates.xml. In particular, a top-level
-      <name> element is included so that MNE’s header reader finds it.
+      is generated using information from coordinates.xml. In particular, if no
+      EEG sensors (type "0") are found in coordinates.xml, a fallback dummy layout
+      with 32 sensors is created.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -84,11 +85,9 @@ def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0"
-    (EEG sensors). It also includes a top-level <name> element.
-    If coordinates.xml exists, it extracts sensor elements from the
-    <sensorLayout>/<sensors> element and creates sensorLayout.xml.
-    Otherwise, a minimal dummy sensorLayout.xml is created.
+    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0" (EEG sensors).
+    If coordinates.xml exists and yields sensors, they are used.
+    Otherwise, a fallback dummy sensorLayout.xml with 32 sensors is created.
 
     Args:
         subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
@@ -103,14 +102,7 @@ def ensure_sensor_layout(subject_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
-            # Look for <sensorLayout> element and get its <name>
-            sensor_layout_elem = root.find("ns:sensorLayout", ns)
-            layout_name_text = "Exported from EEGLAB"
-            if sensor_layout_elem is not None:
-                name_elem = sensor_layout_elem.find("ns:name", ns)
-                if name_elem is not None and name_elem.text is not None:
-                    layout_name_text = name_elem.text.strip()
-            # Locate the sensors container.
+            # Look for <sensorLayout> element and its child <sensors>
             sensors_container = root.find("ns:sensorLayout/ns:sensors", ns)
             if sensors_container is None:
                 raise ValueError("No <sensors> element found in coordinates.xml.")
@@ -122,7 +114,7 @@ def ensure_sensor_layout(subject_path):
                 if sensor_type == "0":
                     eeg_sensors.append(s)
             print(f"Found {len(eeg_sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
-            # If there are 33 sensors, remove the one with label "Cz" (if present)
+            # If there are 33 sensors, remove the one with label "Cz" (if present).
             if len(eeg_sensors) == 33:
                 before = len(eeg_sensors)
                 eeg_sensors = [s for s in eeg_sensors if (s.findtext("ns:name", "").strip() != "Cz")]
@@ -132,7 +124,7 @@ def ensure_sensor_layout(subject_path):
             # Create new sensorLayout.xml with a top-level <name> element.
             layout_root = ET.Element("sensorLayout")
             layout_name_elem = ET.SubElement(layout_root, "name")
-            layout_name_elem.text = layout_name_text
+            layout_name_elem.text = "Exported from EEGLAB"
             sensors_elem = ET.SubElement(layout_root, "sensors")
             for sensor in eeg_sensors:
                 sensor_id = sensor.findtext("ns:number", default="0", namespaces=ns).strip()
@@ -143,6 +135,7 @@ def ensure_sensor_layout(subject_path):
                 new_sensor = ET.SubElement(sensors_elem, "sensor")
                 new_sensor.set("id", sensor_id)
                 new_sensor.set("label", label)
+                new_sensor.set("type", "0")  # include type element
                 new_sensor.set("x", x)
                 new_sensor.set("y", y)
                 new_sensor.set("z", z)
@@ -153,18 +146,22 @@ def ensure_sensor_layout(subject_path):
             return
         except Exception as e:
             print(f"Error creating sensorLayout.xml from coordinates.xml in {subject_path}: {e}")
-    # Fallback: create a minimal dummy sensorLayout.xml with a <name> element.
-    dummy_content = '''<?xml version="1.0" encoding="UTF-8"?>
+    # Fallback: create a dummy sensorLayout.xml with 32 sensors.
+    print(f"Using fallback dummy sensor layout for {subject_path}.")
+    dummy_sensors = []
+    for i in range(1, 33):
+        dummy_sensors.append(f'<sensor id="{i}" label="E{i}" type="0" x="0" y="0" z="0"/>')
+    dummy_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <sensorLayout>
   <name>Dummy Device</name>
   <sensors>
-    <sensor id="0" label="dummy" x="0" y="0" z="0"/>
+    {"".join(dummy_sensors)}
   </sensors>
 </sensorLayout>
 '''
     with open(sensor_layout_path, "w", encoding="utf-8") as f:
         f.write(dummy_content)
-    print(f"Created minimal dummy sensorLayout.xml in {subject_path}.")
+    print(f"Created fallback dummy sensorLayout.xml in {subject_path}.")
 
 
 def average_hemispheric_channels(data, ch_names):
