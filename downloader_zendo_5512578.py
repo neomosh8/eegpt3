@@ -1,24 +1,21 @@
 #!/usr/bin/env python
 """
-This script processes the EEG experiment data from a language/tactile dataset.
+This script processes the EEG experiment data from the language/tactile dataset.
 Each subject’s EEG data is provided as a ZIP file in the S3 directory:
     s3://dataframes--use1-az6--x-s3/attention fintune/5512578/
-Subject ZIP files are named using the subject IDs (e.g., "al.zip", "yr.zip", etc.).
-Each ZIP contains one folder per session (e.g., "al_EEG_1", "al_EEG_2") where the
-BrainVision files (.vhdr, .eeg, .vmrk) are located.
+Subject ZIP files are named (e.g.) "al.zip", "yr.zip", etc. When extracted, the ZIP may
+contain a subject folder (e.g. "chap") and inside that folder the session folders (e.g. "chap_EEG_1",
+"chap_EEG_2") are located.
 
-The processing pipeline is as follows:
+The processing pipeline is:
   1. Download the subject ZIP from S3 and extract it.
-  2. For each session folder, load the EEG recording using mne.io.read_raw_brainvision().
-  3. Concatenate sessions (if more than one) into a single Raw object.
-  4. Retain only EEG channels (excluding extra channels such as "Sound" and "Button").
-  5. Compute a hemispheric average: channels whose names end with an odd digit → left hemisphere;
-     those ending with an even digit → right hemisphere. Midline channels (e.g., "Fz", "Cz", "Pz")
-     are ignored.
-  6. Preprocess the resulting two‑channel signal using preprocess_data().
-  7. Segment the preprocessed data into windows, perform wavelet decomposition and quantization,
-     and save the quantized coefficient IDs and channel labels to text files.
-  8. Optionally plot selected windows.
+  2. Determine the subject folder and locate session folders.
+  3. For each session, load the BrainVision files (.vhdr, .eeg, .vmrk) using MNE.
+  4. Concatenate sessions (if >1), pick only EEG channels, and compute a two‐channel hemispheric average.
+  5. Preprocess the two‑channel data.
+  6. Segment the preprocessed data into windows, perform wavelet decomposition and quantization,
+     and save the outputs.
+  7. Optionally plot selected windows.
 """
 
 import os
@@ -32,7 +29,7 @@ import matplotlib.pyplot as plt
 import mne
 import pywt
 
-# Import your custom functions (make sure these are available in your PYTHONPATH)
+# Import your custom functions (ensure these are available in your PYTHONPATH)
 from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 # List of subject IDs (18 subjects)
@@ -42,7 +39,7 @@ SUBJECT_IDS = ['al', 'yr', 'alio', 'chap', 'sep', 'phil', 'lad', 'calco',
 
 # S3 configuration
 S3_BUCKET = "dataframes--use1-az6--x-s3"
-S3_FOLDER = "attention fintune/5512578"  # Files are stored directly under this prefix.
+S3_FOLDER = "attention fintune/5512578"  # Files are stored under this prefix
 
 # Output directory for processed files (local)
 OUTPUT_BASE = "output-5512578"
@@ -50,7 +47,36 @@ os.makedirs(OUTPUT_BASE, exist_ok=True)
 
 
 # -----------------------------------------------------------------------------
-# Utility functions
+# Helper functions
+
+def get_session_folders(extracted_dir, subject_id):
+    """
+    Given the directory where a subject’s ZIP file has been extracted,
+    attempt to find the subject folder and then list all session folders within it.
+    Session folders are those whose names contain "EEG" (case-insensitive).
+
+    Args:
+        extracted_dir: Path to the extraction directory.
+        subject_id: The subject ID string (e.g., "chap").
+
+    Returns:
+        A list of paths to session folders.
+    """
+    # First, check if there is a subfolder whose name matches the subject ID (case-insensitive)
+    subject_folder = None
+    for entry in os.listdir(extracted_dir):
+        if os.path.isdir(os.path.join(extracted_dir, entry)) and entry.lower() == subject_id.lower():
+            subject_folder = os.path.join(extracted_dir, entry)
+            break
+    base_dir = subject_folder if subject_folder is not None else extracted_dir
+
+    session_folders = []
+    for entry in os.listdir(base_dir):
+        path = os.path.join(base_dir, entry)
+        if os.path.isdir(path) and "EEG" in entry.upper():
+            session_folders.append(path)
+    return session_folders
+
 
 def average_hemispheric_channels(data, ch_names):
     """
@@ -62,7 +88,7 @@ def average_hemispheric_channels(data, ch_names):
 
     Args:
         data: NumPy array of shape (n_channels, n_samples)
-        ch_names: List of channel names corresponding to the rows in data.
+        ch_names: List of channel names corresponding to rows in data.
 
     Returns:
         A 2-channel NumPy array:
@@ -92,8 +118,8 @@ def plot_window(window_data, sps, window_index=None):
 
     Args:
         window_data: NumPy array of shape (2, n_samples) for the window.
-        sps: Sampling rate (Hz).
-        window_index: Optional window number for title/filename.
+        sps: Sampling rate in Hz.
+        window_index: Optional window number (used for title and filename).
     """
     n_samples = window_data.shape[1]
     time_axis = np.arange(n_samples) / sps
@@ -125,8 +151,8 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         sps: Sampling rate (Hz)
         coeffs_path: Output file path for quantized coefficients.
         chans_path: Output file path for channel labels.
-        wavelet: Wavelet type (default: 'db2').
-        level: Decomposition level (default: 4).
+        wavelet: Wavelet type (default 'db2').
+        level: Decomposition level (default 4).
         window_len_sec: Window length in seconds (e.g., 1.8 sec).
         plot_windows: If True, plots windows (or a random subset).
         plot_random_n: If an integer (and less than total windows), randomly selects that many windows to plot.
@@ -178,14 +204,14 @@ def process_and_save(data, sps, coeffs_path, chans_path,
 
 
 # -----------------------------------------------------------------------------
-# Main processing
+# Main processing function for a subject ZIP
 
 def process_subject_zip(subject_id, s3_client):
     """
     Downloads and processes a subject's EEG experiment ZIP file.
 
     Args:
-        subject_id: The subject's ID string (e.g., "al", "yr", etc.)
+        subject_id: The subject's ID string (e.g., "chap", "hudi", etc.)
         s3_client: An initialized boto3 S3 client.
 
     Returns:
@@ -195,7 +221,7 @@ def process_subject_zip(subject_id, s3_client):
     s3_key = f"{S3_FOLDER}/{zip_filename}"
     print(f"\nProcessing subject {subject_id} (S3 key: {s3_key})")
 
-    # Create a temporary directory for this subject
+    # Create a temporary directory for this subject's files.
     with tempfile.TemporaryDirectory() as temp_dir:
         local_zip_path = os.path.join(temp_dir, zip_filename)
         try:
@@ -205,7 +231,7 @@ def process_subject_zip(subject_id, s3_client):
             print(f"Error downloading {zip_filename}: {e}")
             return
 
-        # Extract the ZIP file
+        # Extract the ZIP file.
         try:
             import zipfile
             with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
@@ -215,20 +241,15 @@ def process_subject_zip(subject_id, s3_client):
             print(f"Error extracting {zip_filename}: {e}")
             return
 
-        # The extracted folder should contain a folder named like "{subject_id}_EEG_1", "{subject_id}_EEG_2", etc.
-        session_folders = []
-        for entry in os.listdir(temp_dir):
-            path = os.path.join(temp_dir, entry)
-            if os.path.isdir(path) and subject_id in entry and "EEG" in entry:
-                session_folders.append(path)
+        # Get the session folders.
+        session_folders = get_session_folders(temp_dir, subject_id)
         if not session_folders:
             print(f"No session folders found for subject {subject_id}.")
             return
 
         raw_list = []
-        # Process each session folder
+        # Process each session folder.
         for session_folder in sorted(session_folders):
-            # Look for the .vhdr file in this session folder
             vhdr_files = [f for f in os.listdir(session_folder) if f.lower().endswith(".vhdr")]
             if not vhdr_files:
                 print(f"No .vhdr file found in {session_folder}. Skipping this session.")
@@ -245,7 +266,7 @@ def process_subject_zip(subject_id, s3_client):
             print(f"No valid sessions loaded for subject {subject_id}.")
             return
 
-        # Concatenate sessions if more than one
+        # Concatenate sessions if more than one exists.
         if len(raw_list) > 1:
             try:
                 raw_combined = mne.concatenate_raws(raw_list)
@@ -256,15 +277,15 @@ def process_subject_zip(subject_id, s3_client):
         else:
             raw_combined = raw_list[0]
 
-        # Select only EEG channels (exclude extra channels like 'Sound' and 'Button')
+        # Retain only EEG channels (exclude channels such as "Sound" and "Button").
         raw_combined.pick_types(eeg=True)
         print(f"After picking EEG channels, shape: {raw_combined.get_data().shape}")
 
-        # Get EEG data and sampling rate
+        # Get the EEG data and sampling rate.
         eeg_data = raw_combined.get_data()  # shape: (n_channels, n_samples)
         fs = raw_combined.info["sfreq"]
 
-        # Compute hemispheric averages
+        # Compute hemispheric averages.
         try:
             twoch_data = average_hemispheric_channels(eeg_data, raw_combined.info["ch_names"])
         except Exception as e:
@@ -272,24 +293,27 @@ def process_subject_zip(subject_id, s3_client):
             return
         print(f"Hemispheric averaged data shape: {twoch_data.shape}")
 
-        # Preprocess the two-channel data
+        # Preprocess the two-channel data.
         prep_data, new_fs = preprocess_data(twoch_data, fs)
 
-        # Define output file paths
+        # Define output file paths.
         coeffs_path = os.path.join(OUTPUT_BASE, f"{subject_id}_combined_coeffs.txt")
         chans_path = os.path.join(OUTPUT_BASE, f"{subject_id}_combined_channels.txt")
 
-        # Process (windowing, wavelet decomposition, quantization) and save
+        # Process (windowing, wavelet decomposition, quantization) and save.
         process_and_save(prep_data, new_fs, coeffs_path, chans_path,
                          wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
         print(f"Finished processing subject: {subject_id}")
 
 
+# -----------------------------------------------------------------------------
+# Main script
+
 if __name__ == "__main__":
-    # Initialize boto3 S3 client
+    # Initialize boto3 S3 client.
     s3_client = boto3.client("s3")
 
-    # Process each subject
+    # Process each subject.
     for subject_id in sorted(SUBJECT_IDS):
         process_subject_zip(subject_id, s3_client)
 
