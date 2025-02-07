@@ -110,7 +110,8 @@ def ensure_sensor_layout(subject_path):
             # Filter sensors with type "0" (EEG sensors)
             eeg_sensors = []
             for s in sensors:
-                sensor_type = s.findtext("ns:type", default="").strip()
+                sensor_type = s.findtext("ns:type", default="", namespaces=ns).strip()
+                print(f"Sensor {s.findtext('ns:name', namespaces=ns).strip()} type: {sensor_type}") # DEBUG: Print sensor type
                 if sensor_type == "0":
                     eeg_sensors.append(s)
             print(f"Found {len(eeg_sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
