@@ -1,3 +1,4 @@
+#https://zenodo.org/records/2536267
 #!/usr/bin/env python
 """
 This script processes BIDS-formatted EEG meditation experiment data.
@@ -245,6 +246,8 @@ if __name__ == "__main__":
 
             # Retrieve EEG data and sampling rate.
             eeg_data = raw.get_data()
+            print(raw.info["ch_names"])
+            print(raw.get_data().shape)
             fs = raw.info["sfreq"]
 
             # Preprocess the data and reduce to 2 channels.
