@@ -19,8 +19,8 @@ Dataset description:
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
-      value with a dummy valid string and ensures that a dummy sensorLayout.xml exists
-      so that MNE can load the MFF folder without error.
+      value with a dummy valid string and ensures that a proper sensorLayout.xml
+      is generated using information from coordinates.xml if available.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -35,6 +35,7 @@ except ImportError:
     )
 
 import re
+import xml.etree.ElementTree as ET
 import matplotlib
 
 matplotlib.use('Agg')
@@ -67,9 +68,8 @@ def patch_info_xml(subject_path):
     with open(info_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Use a replacement function to avoid ambiguous backreferences.
     def repl(match):
-        # match.group(1) is the opening tag; match.group(3) is the closing tag.
+        # match.group(1): opening tag; match.group(3): closing tag.
         return match.group(1) + "1970-01-01T00:00:00.000000+00:00" + match.group(3)
 
     new_content = re.sub(r"(<recordTime>)(.*?)(</recordTime>)", repl, content)
@@ -79,22 +79,60 @@ def patch_info_xml(subject_path):
 
 def ensure_sensor_layout(subject_path):
     """
-    Checks for the existence of sensorLayout.xml in the subject folder.
-    If not found, creates a dummy sensorLayout.xml with minimal valid XML content.
+    Ensures that a sensorLayout.xml file exists in the subject folder.
+    If not, this function tries to generate one using coordinates.xml.
+    If coordinates.xml exists, it is parsed and sensor entries are created.
+    Otherwise, a minimal dummy sensorLayout.xml is created.
 
     Args:
         subject_path: Path to the subject folder (e.g., ".../sub-001.mff")
     """
     sensor_layout_path = os.path.join(subject_path, "sensorLayout.xml")
-    if not os.path.exists(sensor_layout_path):
-        print(f"sensorLayout.xml not found in {subject_path}. Creating dummy sensorLayout.xml.")
-        dummy_content = """<?xml version="1.0" encoding="UTF-8"?>
+    if os.path.exists(sensor_layout_path):
+        return
+
+    coordinates_path = os.path.join(subject_path, "coordinates.xml")
+    if os.path.exists(coordinates_path):
+        try:
+            tree = ET.parse(coordinates_path)
+            root = tree.getroot()
+            # Look for sensor elements; the exact tag may vary.
+            sensors = root.findall(".//sensor")
+            if not sensors:
+                sensors = root.findall("sensor")
+            # Create a new XML structure for sensorLayout.xml.
+            layout_root = ET.Element("sensorLayout")
+            sensors_elem = ET.SubElement(layout_root, "sensors")
+            for sensor in sensors:
+                sensor_id = sensor.get("id") or sensor.findtext("id") or "0"
+                label = sensor.get("label") or sensor.findtext("label") or f"E{sensor_id}"
+                x = sensor.findtext("x") or "0"
+                y = sensor.findtext("y") or "0"
+                z = sensor.findtext("z") or "0"
+                new_sensor = ET.SubElement(sensors_elem, "sensor")
+                new_sensor.set("id", sensor_id)
+                new_sensor.set("label", label)
+                new_sensor.set("x", x)
+                new_sensor.set("y", y)
+                new_sensor.set("z", z)
+            # Write out the new sensorLayout.xml file.
+            tree_new = ET.ElementTree(layout_root)
+            tree_new.write(sensor_layout_path, encoding="utf-8", xml_declaration=True)
+            print(f"Created sensorLayout.xml from coordinates.xml in {subject_path}.")
+            return
+        except Exception as e:
+            print(f"Error creating sensorLayout.xml from coordinates.xml in {subject_path}: {e}")
+    # Fallback: create a minimal dummy sensorLayout.xml.
+    dummy_content = '''<?xml version="1.0" encoding="UTF-8"?>
 <sensorLayout>
-  <sensors/>
+  <sensors>
+    <sensor id="0" label="dummy" x="0" y="0" z="0"/>
+  </sensors>
 </sensorLayout>
-"""
-        with open(sensor_layout_path, "w", encoding="utf-8") as f:
-            f.write(dummy_content)
+'''
+    with open(sensor_layout_path, "w", encoding="utf-8") as f:
+        f.write(dummy_content)
+    print(f"Created minimal dummy sensorLayout.xml in {subject_path}.")
 
 
 def average_hemispheric_channels(data, ch_names):
@@ -280,9 +318,9 @@ if __name__ == "__main__":
             subject_path = os.path.join(dataset_root, subj_entry)
             print(f"\nProcessing subject: {subject_id}")
 
-            # Patch the info.xml file to replace recordTime with a dummy value.
+            # Patch info.xml to replace recordTime.
             patch_info_xml(subject_path)
-            # Ensure sensorLayout.xml exists; if not, create a dummy file.
+            # Ensure sensorLayout.xml exists (using coordinates.xml if possible).
             ensure_sensor_layout(subject_path)
 
             try:
@@ -320,7 +358,7 @@ if __name__ == "__main__":
 
             # Process the preprocessed data: segment into 15-sec windows, decompose and quantize.
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
-                             wavelet='db2', level=4, window_len_sec=15, plot_windows=True)
+                             wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
             print(f"Finished processing subject: {subject_id}")
 
     print("Done!")
