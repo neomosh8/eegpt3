@@ -48,8 +48,6 @@ def average_alternate_channels(data):
     """
     even_channels = data[0::2, :]
     odd_channels = data[1::2, :]
-    print("even_channels",even_channels)
-    print("odd_channels",odd_channels)
     even_avg = np.mean(even_channels, axis=0)
     odd_avg = np.mean(odd_channels, axis=0)
     return np.stack([even_avg, odd_avg])
