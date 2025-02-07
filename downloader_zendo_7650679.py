@@ -3,15 +3,13 @@
 This script processes the raw EEG data from the project
 "Neural signatures of linguistic predictions and listener's attention to speaker's communication intention".
 
-The raw EEG data for Experiment 1 are provided as a ZIP file (DATA-EXP1.zip) stored in S3:
-    s3://dataframes--use1-az6--x-s3/attention fintune/7650679/DATA-EXP1.zip
+The raw EEG data for Experiment 1 and Experiment 2 are stored in S3:
+  - Exp1: s3://dataframes--use1-az6--x-s3/attention fintune/7650679/DATA-EXP1.zip
+  - Exp2: s3://dataframes--use1-az6--x-s3/attention fintune/7650679/DATA-EXP2.zip
 
 When extracted, the ZIP file creates a folder structure like:
-    <temp_dir>/DATA-EXP1/Data/EEGraw/
-        P01.bdf
-        P02.bdf
-        ...
-        P46.bdf
+    <temp_dir>/DATA-EXP1/Data/EEGraw/   (for Exp1)
+    <temp_dir>/DATA-EXP2/Data/EEGraw/   (for Exp2)
 
 For each subject’s BDF file, the processing pipeline is:
   1. Load the EEG data using mne.io.read_raw_bdf.
@@ -41,12 +39,18 @@ import pywt
 # Import your custom processing functions.
 from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
+# --- Configuration ---
+
+# Select which experiment to process: set to 1 for EXP1 or 2 for EXP2.
+EXPERIMENT_VERSION = 2  # Change to 2 to process DATA-EXP2.zip
+
 # S3 configuration
 S3_BUCKET = "dataframes--use1-az6--x-s3"
-S3_KEY = "attention fintune/7650679/DATA-EXP1.zip"
+# Build the S3 key based on the chosen experiment version.
+S3_KEY = f"attention fintune/7650679/DATA-EXP{EXPERIMENT_VERSION}.zip"
 
-# Output directory for processed files.
-OUTPUT_BASE = "output-7650679"
+# Output directory for processed files. (You can also include the exp number in the folder name.)
+OUTPUT_BASE = f"output-7650679-EXP{EXPERIMENT_VERSION}"
 os.makedirs(OUTPUT_BASE, exist_ok=True)
 
 
@@ -181,26 +185,26 @@ if __name__ == "__main__":
     # Create a temporary directory.
     with tempfile.TemporaryDirectory() as temp_dir:
         print(f"Using temporary directory: {temp_dir}")
-        local_zip_path = os.path.join(temp_dir, "DATA-EXP1.zip")
-        print(f"Downloading DATA-EXP1.zip from S3: s3://{S3_BUCKET}/{S3_KEY} ...")
+        local_zip_path = os.path.join(temp_dir, f"DATA-EXP{EXPERIMENT_VERSION}.zip")
+        print(f"Downloading DATA-EXP{EXPERIMENT_VERSION}.zip from S3: s3://{S3_BUCKET}/{S3_KEY} ...")
         try:
             s3.download_file(S3_BUCKET, S3_KEY, local_zip_path)
-            print(f"Downloaded DATA-EXP1.zip to {local_zip_path}")
+            print(f"Downloaded DATA-EXP{EXPERIMENT_VERSION}.zip to {local_zip_path}")
         except Exception as e:
-            print(f"Error downloading DATA-EXP1.zip: {e}")
+            print(f"Error downloading DATA-EXP{EXPERIMENT_VERSION}.zip: {e}")
             exit(1)
 
         # Extract the ZIP file.
         try:
             with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
-            print(f"Extracted DATA-EXP1.zip into {temp_dir}")
+            print(f"Extracted DATA-EXP{EXPERIMENT_VERSION}.zip into {temp_dir}")
         except Exception as e:
-            print(f"Error extracting DATA-EXP1.zip: {e}")
+            print(f"Error extracting DATA-EXP{EXPERIMENT_VERSION}.zip: {e}")
             exit(1)
 
         # Locate the EEG raw data folder.
-        eegraw_folder = os.path.join(temp_dir, "DATA-EXP1", "Data", "EEGraw")
+        eegraw_folder = os.path.join(temp_dir, f"DATA-EXP{EXPERIMENT_VERSION}", "Data", "EEGraw")
         if not os.path.isdir(eegraw_folder):
             print(f"EEGraw folder not found in extracted data at {eegraw_folder}")
             exit(1)
