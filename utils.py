@@ -431,15 +431,17 @@ def preprocess_data(data, original_sps):
     :return: Preprocessed 2D numpy array, and the new sampling rate (after resampling).
     """
     # Resample the data to 128 Hz (example)
-    resampled_data = resample_windows(data, original_sps, new_rate=100)
+    filtered_data = filter_band_pass_windows(data, original_sps)
+
+    resampled_data = resample_windows(filtered_data, original_sps, new_rate=100)
     new_sps = 100
 
     # Filter (Band-pass)
-    filtered_data = filter_band_pass_windows(resampled_data, new_sps)
+    # filtered_data = filter_band_pass_windows(resampled_data, new_sps)
     # avg_referenced_data = filtered_data - np.mean(filtered_data, axis=0, keepdims=True)
 
     # return avg_referenced_data, new_sps
-    return filtered_data, new_sps
+    return resampled_data, new_sps
 
 # --------------------------------------------------------------------------------
 # Calculate sampling rate from CSV
