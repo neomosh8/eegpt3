@@ -13,53 +13,57 @@ def average_left_right(raw):
     """
     Averages EEG channels into left and right hemispheric signals.
 
-    This function first reassigns non-EEG channels (e.g. EXG, GSR, etc.) to type 'misc'
-    so that only channels with names starting with 'A' or 'B' are treated as EEG channels.
-    Then it sets the BioSemi64 montage (ignoring missing channels) and picks only EEG channels.
-    Channels with an x-coordinate (first element in the location vector) < 0 are assumed
-    to be on the left, and those with x > 0 on the right.
+    This function:
+      1. Assumes that channels with names starting with "A" or "B" are EEG channels.
+      2. Reassigns all other channels to type 'misc', so that they are excluded
+         from montage assignment.
+      3. Sets the BioSemi64 montage (ignoring channels missing from the montage).
+      4. Picks only EEG channels and groups them by their x-coordinate (from the channel 'loc').
+         Channels with x < 0 are considered left, and those with x > 0 are right.
 
     Args:
-        raw: mne.io.Raw object with data from a BIDS EEG dataset.
+        raw: mne.io.Raw object from a BIDS dataset.
 
     Returns:
-        combined_data: A 2-channel NumPy array (shape: [2, total_samples]) where the
-                       first row is the left hemisphere average and the second row is
-                       the right hemisphere average.
+        combined_data: A 2-channel NumPy array (shape: [2, total_samples]) where
+                       row 0 is the left hemisphere average and row 1 is the right hemisphere average.
     """
-    # Reassign non-EEG channels to 'misc'
-    # (We assume that EEG channels are labeled with names starting with "A" or "B".)
-    non_eeg = {ch: 'misc' for ch in raw.info["ch_names"] if not (ch.startswith("A") or ch.startswith("B"))}
-    if non_eeg:
-        raw.set_channel_types(non_eeg)
+    # Determine which channels are EEG: assume those starting with "A" or "B"
+    eeg_names = [ch for ch in raw.info["ch_names"] if ch.startswith("A") or ch.startswith("B")]
+    non_eeg_names = [ch for ch in raw.info["ch_names"] if ch not in eeg_names]
 
-    # Pick only EEG channels.
+    # Reassign non-EEG channels to 'misc'
+    if non_eeg_names:
+        mapping = {ch: 'misc' for ch in non_eeg_names}
+        raw.set_channel_types(mapping)
+
+    # Now, pick only EEG channels
     picks = mne.pick_types(raw.info, eeg=True, exclude='bads')
 
-    # Set montage only if not already set.
-    if raw.get_montage() is None:
-        montage = mne.channels.make_standard_montage("biosemi64")
-        # on_missing='ignore' will skip channels not in the montage
-        raw.set_montage(montage, on_missing='ignore')
+    # Set montage using the standard BioSemi64 montage.
+    # on_missing='ignore' tells MNE to ignore channels not present in the montage.
+    montage = mne.channels.make_standard_montage("biosemi64")
+    raw.set_montage(montage, on_missing='ignore')
 
     data = raw.get_data(picks=picks)
 
     left_signals = []
     right_signals = []
 
-    # Loop over the EEG channels
+    # Group channels by the x coordinate in their location info.
     for i, idx in enumerate(picks):
         ch_info = raw.info["chs"][idx]
-        loc = ch_info["loc"][:3]  # x, y, z coordinates in meters
+        # The first three entries in 'loc' are the x, y, z coordinates (in meters)
+        loc = ch_info["loc"][:3]
         if loc[0] < 0:
             left_signals.append(data[i])
         elif loc[0] > 0:
             right_signals.append(data[i])
         else:
-            # Channels exactly on midline can be ignored or assigned to either side.
+            # Channels with x == 0 (on the midline) can be ignored or handled specially.
             pass
 
-    # Compute averages (if no channels are found for one hemisphere, use zeros)
+    # Compute averages; if one hemisphere has no channels, fill with zeros.
     left_avg = np.mean(left_signals, axis=0) if left_signals else np.zeros(data.shape[1])
     right_avg = np.mean(right_signals, axis=0) if right_signals else np.zeros(data.shape[1])
 
@@ -73,7 +77,7 @@ def plot_window(window_data, sps, window_index=None):
     Args:
         window_data: NumPy array of shape (2, n_samples)
         sps: Sampling rate in Hz.
-        window_index: (Optional) Window number for the title.
+        window_index: (Optional) window number for the title.
     """
     n_samples = window_data.shape[1]
     time_axis = np.arange(n_samples) / sps
