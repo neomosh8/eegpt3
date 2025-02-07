@@ -198,7 +198,7 @@ if __name__ == "__main__":
     # --- S3 and Dataset Configuration for BIDS Data ---
     s3_bucket = "dataframes--use1-az6--x-s3"
     s3_folder = "attention fintune/2536267"
-    zip_filename = "BIDS_EEG_meditation_experiment_v2.zip"
+    zip_filename = "BIDS_EEG_meditation_experiment.zip"
     s3_key = f"{s3_folder}/{zip_filename}"
 
     output_base = "output-2536267"
