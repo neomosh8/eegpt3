@@ -1,34 +1,39 @@
 #!/usr/bin/env python
 """
-This script processes an EEG dataset recorded during a language comprehension experiment.
-Participants listened to isochronous streams of monosyllabic words while EEG was recorded.
-The data are provided in BrainVision format (.eeg, .vhdr, .vmrk) and are packaged in a ZIP archive.
-For each subject the processing pipeline is as follows:
-  1. Load the subject’s BrainVision EEG data using MNE.
-  2. Pick only EEG channels.
-  3. Compute hemispheric averages by:
-       - Averaging channels whose names end with an odd digit → left hemisphere.
-       - Averaging channels whose names end with an even digit → right hemisphere.
-     (Channels without a trailing digit—typically midline channels—are ignored.)
-  4. Preprocess the resulting two‐channel signal (using a custom preprocess_data function).
-  5. Segment the preprocessed data into non‐overlapping windows.
-  6. For each window, perform wavelet decomposition and quantization.
-  7. Save the quantized coefficients and their channel labels to text files.
+This script processes a language-EEG dataset stored in BrainVision format on S3.
+The files are located in the S3 directory:
+    dataframes--use1-az6--x-s3/attention fintune/4385970/
+Each subject’s recording is defined by three files with a common stem (e.g. “P10_6_12_2018”):
+    - P10_6_12_2018.vhdr  (header)
+    - P10_6_12_2018.eeg   (data)
+    - P10_6_12_2018.vmrk  (markers)
+
+For each subject, the script:
+  1. Downloads the three files into a temporary folder.
+  2. Loads the data using mne.io.read_raw_brainvision().
+  3. Picks EEG channels.
+  4. Computes a two-channel hemispheric average:
+       - Left hemisphere: average of channels whose names end with an odd digit.
+       - Right hemisphere: average of channels whose names end with an even digit.
+       (Midline channels—those that do not end in a digit—are ignored.)
+  5. Preprocesses the two-channel data using preprocess_data().
+  6. Segments the data into windows, applies wavelet decomposition and quantization,
+     and writes the quantized coefficients and channel labels to text files.
 """
 
+import os
+import boto3
+import tempfile
+import zipfile  # not used here since files are not zipped
+import numpy as np
 import matplotlib
 
 matplotlib.use('Agg')
-import os
-import numpy as np
 import matplotlib.pyplot as plt
 import mne
 import pywt
-import zipfile
-import tempfile
-import boto3
 
-# These functions are assumed to be defined in your custom utils module.
+# Import your custom processing functions.
 from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 
@@ -38,11 +43,11 @@ def average_hemispheric_channels(data, ch_names):
 
     Channels whose names end with an odd digit are assigned to the left hemisphere,
     while channels whose names end with an even digit are assigned to the right hemisphere.
-    Channels that do not end with a digit (e.g. midline channels such as Fz, Cz, Pz) are ignored.
+    Channels that do not end with a digit (e.g. midline channels like Fz, Cz, Pz) are ignored.
 
     Args:
         data: NumPy array of shape (n_channels, n_samples)
-        ch_names: List of channel names corresponding to the rows in data.
+        ch_names: List of channel names corresponding to rows in data.
 
     Returns:
         A 2-channel NumPy array:
@@ -72,8 +77,8 @@ def plot_window(window_data, sps, window_index=None):
 
     Args:
         window_data: NumPy array of shape (2, n_samples) for the window.
-        sps: Sampling rate in Hz.
-        window_index: Optional window number (used for title and filename).
+        sps: Sampling rate (Hz).
+        window_index: Optional window number for title/filename.
     """
     n_samples = window_data.shape[1]
     time_axis = np.arange(n_samples) / sps
@@ -103,13 +108,14 @@ def process_and_save(data, sps, coeffs_path, chans_path,
     Args:
         data: NumPy array of shape (2, total_samples)
         sps: Sampling rate (Hz)
-        coeffs_path: Output file path for quantized coefficients.
-        chans_path: Output file path for channel labels.
-        wavelet: Wavelet type (default 'db2').
-        level: Decomposition level (default 4).
+        coeffs_path: Path to the output coefficients text file.
+        chans_path: Path to the output channel labels text file.
+        wavelet: Wavelet type (default: 'db2').
+        level: Decomposition level (default: 4).
         window_len_sec: Window length in seconds (e.g., 1.8 sec).
         plot_windows: If True, plots windows (or a random subset).
-        plot_random_n: If an integer (less than the total number of windows), randomly select that many windows to plot.
+        plot_random_n: If an integer (and less than total number of windows),
+                       randomly select that many windows to plot.
     """
     n_window_samples = int(window_len_sec * sps)
     total_samples = data.shape[1]
@@ -157,78 +163,103 @@ def process_and_save(data, sps, coeffs_path, chans_path,
             f_chans.write(" ".join(all_channel_names) + " ")
 
 
-if __name__ == "__main__":
-    # --- S3 and Dataset Configuration for the Language Processing EEG Data ---
-    s3_bucket = "dataframes--use1-az6--x-s3"
-    s3_folder = "attention fintune/4385970"
-    # We assume the dataset is provided as a ZIP archive containing BrainVision files.
-    zip_filename = "EEG_language.zip"
-    s3_key = f"{s3_folder}/{zip_filename}"
+def download_subject_files(s3_client, bucket, subject_prefix, local_subject_dir):
+    """
+    Given a subject’s common file prefix (e.g. "attention fintune/4385970/P10_6_12_2018.vhdr"),
+    download the associated BrainVision files (.vhdr, .eeg, .vmrk) into a local directory.
 
-    # Local output directory for processed files.
+    Args:
+        s3_client: An initialized boto3 S3 client.
+        bucket: S3 bucket name.
+        subject_prefix: Full S3 key of the subject's .vhdr file.
+        local_subject_dir: Local directory where files will be saved.
+
+    Returns:
+        local_vhdr_path: Path to the downloaded .vhdr file.
+    """
+    # Extract the base filename (e.g., "P10_6_12_2018")
+    base_filename = os.path.splitext(os.path.basename(subject_prefix))[0]
+    extensions = ['.vhdr', '.eeg', '.vmrk']
+
+    for ext in extensions:
+        key = os.path.join(os.path.dirname(subject_prefix), base_filename + ext)
+        local_path = os.path.join(local_subject_dir, base_filename + ext)
+        try:
+            s3_client.download_file(bucket, key, local_path)
+            print(f"Downloaded {key} to {local_path}")
+        except Exception as e:
+            print(f"Error downloading {key}: {e}")
+            raise e
+    return os.path.join(local_subject_dir, base_filename + ".vhdr")
+
+
+if __name__ == "__main__":
+    # --- S3 and Dataset Configuration for the Language EEG Data ---
+    s3_bucket = "dataframes--use1-az6--x-s3"
+    s3_prefix = "attention fintune/4385970/"  # Note: files are directly under this prefix.
+
+    # Output directory for processed files.
     output_base = "output-4385970"
     os.makedirs(output_base, exist_ok=True)
 
-    # Initialize the boto3 S3 client.
+    # Initialize boto3 S3 client.
     s3 = boto3.client("s3")
 
-    # Create a temporary directory for download and extraction.
+    # List all objects under the specified prefix.
+    response = s3.list_objects_v2(Bucket=s3_bucket, Prefix=s3_prefix)
+    if 'Contents' not in response:
+        print("No files found in the specified S3 directory.")
+        exit(1)
+
+    # Identify all BrainVision header files (.vhdr).
+    vhdr_keys = []
+    for obj in response['Contents']:
+        key = obj['Key']
+        if key.lower().endswith(".vhdr"):
+            vhdr_keys.append(key)
+    if not vhdr_keys:
+        print("No .vhdr files found in the S3 directory.")
+        exit(1)
+
+    # Process each subject.
     with tempfile.TemporaryDirectory() as temp_dir:
-        local_zip_path = os.path.join(temp_dir, zip_filename)
-        print(f"Downloading s3://{s3_bucket}/{s3_key} ...")
-        try:
-            s3.download_file(s3_bucket, s3_key, local_zip_path)
-            print(f"Downloaded {zip_filename} to {local_zip_path}")
-        except Exception as e:
-            print(f"Error downloading {zip_filename}: {e}")
-            exit(1)
-
-        # Extract the ZIP archive.
-        extract_path = os.path.join(temp_dir, "extracted")
-        os.makedirs(extract_path, exist_ok=True)
-        try:
-            with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_path)
-            print(f"Extracted {zip_filename} to {extract_path}")
-        except Exception as e:
-            print(f"Error extracting {zip_filename}: {e}")
-            exit(1)
-
-        # Recursively find all BrainVision header files (.vhdr) in the extracted folder.
-        vhdr_files = []
-        for root, dirs, files in os.walk(extract_path):
-            for file in files:
-                if file.endswith(".vhdr"):
-                    vhdr_files.append(os.path.join(root, file))
-        if not vhdr_files:
-            print("No BrainVision header (.vhdr) files found in the extracted data.")
-            exit(1)
-
-        # Process each subject's file.
-        for vhdr_file in sorted(vhdr_files):
-            subject_id = os.path.splitext(os.path.basename(vhdr_file))[0]
+        print(f"Using temporary directory: {temp_dir}")
+        for vhdr_key in sorted(vhdr_keys):
+            subject_id = os.path.splitext(os.path.basename(vhdr_key))[0]
             print(f"\nProcessing subject: {subject_id}")
+
+            # Create a local folder for this subject.
+            local_subject_dir = os.path.join(temp_dir, subject_id)
+            os.makedirs(local_subject_dir, exist_ok=True)
+
             try:
-                raw = mne.io.read_raw_brainvision(vhdr_file, preload=True, verbose=False)
+                local_vhdr_path = download_subject_files(s3, s3_bucket, vhdr_key, local_subject_dir)
             except Exception as e:
-                print(f"Error loading {vhdr_file}: {e}")
+                print(f"Skipping subject {subject_id} due to download error.")
+                continue
+
+            # Load the subject's BrainVision data.
+            try:
+                raw = mne.io.read_raw_brainvision(local_vhdr_path, preload=True, verbose=False)
+            except Exception as e:
+                print(f"Error loading {local_vhdr_path}: {e}")
                 continue
 
             print("Channel names:", raw.info["ch_names"])
             print("Raw data shape:", raw.get_data().shape)
 
-            # Pick only EEG channels.
+            # Keep only EEG channels.
             raw.pick_types(eeg=True)
             print("After picking EEG channels, shape:", raw.get_data().shape)
 
             eeg_data = raw.get_data()  # shape: (n_channels, n_samples)
-            fs = raw.info["sfreq"]  # sampling rate (e.g., 500, 1000 Hz, etc.)
+            fs = raw.info["sfreq"]  # sampling rate
 
             # Compute hemispheric averages.
             try:
                 twoch_data = average_hemispheric_channels(eeg_data, raw.info["ch_names"])
             except Exception as e:
-                print(f"Error in hemispheric averaging for {subject_id}: {e}")
+                print(f"Error computing hemispheric averages for {subject_id}: {e}")
                 continue
             print("Hemispheric averaged data shape:", twoch_data.shape)
 
@@ -239,7 +270,7 @@ if __name__ == "__main__":
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process (windowing, wavelet decomposition, quantization) and save.
+            # Process the data (windowing, wavelet decomposition, quantization) and save.
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
             print(f"Finished processing subject: {subject_id}")
