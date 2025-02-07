@@ -162,16 +162,16 @@ def load_subject_raw_data(raw_folder, subject_id):
 
 
 if __name__ == "__main__":
-    import urllib.request
+    import requests
     import tarfile
     import tempfile
-    import shutil
+    import os
 
-    # Base URL for the tar.gz files (note the space encoded as %20)
+    # Base URL for the tar.gz files (note: the space is URL-encoded as %20)
     base_url = "https://dataframes--use1-az6--x-s3.s3express-use1-az6.us-east-1.amazonaws.com/attention%20fintune/4518754"
     # Process subjects S0.tar.gz through S10.tar.gz
     subject_ids = [f"S{n}" for n in range(30)]
-    output_base = "output"
+    output_base = "output_4518754"
     os.makedirs(output_base, exist_ok=True)
 
     # Create a temporary directory for downloading and extracting tar.gz files.
@@ -183,7 +183,12 @@ if __name__ == "__main__":
             local_tar_path = os.path.join(temp_dir, tar_filename)
             try:
                 print(f"Downloading {url} ...")
-                urllib.request.urlretrieve(url, local_tar_path)
+                # Use a custom User-Agent header to help bypass potential 403 errors.
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                response = requests.get(url, headers=headers)
+                response.raise_for_status()  # Raise an exception for HTTP errors
+                with open(local_tar_path, 'wb') as f:
+                    f.write(response.content)
             except Exception as e:
                 print(f"Error downloading {tar_filename}: {e}")
                 continue
@@ -198,8 +203,7 @@ if __name__ == "__main__":
                 print(f"Error extracting {tar_filename}: {e}")
                 continue
 
-            # The extracted folder is assumed to contain files like:
-            #   {subject_id}_AAD_1L.dat, {subject_id}_AAD_1R.dat, etc.
+            # Load the raw subject data from the extracted directory
             try:
                 raw = load_subject_raw_data(extract_path, subject_id)
             except Exception as e:
@@ -226,3 +230,4 @@ if __name__ == "__main__":
             print(f"Finished processing subject: {subject_id}")
 
     print("Done!")
+
