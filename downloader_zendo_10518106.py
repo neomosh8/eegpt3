@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-This script processes the raw EEG data from the paper:
+This script processes the raw EEG data accompanying the paper:
 "Do syntactic and semantic similarity lead to interference effects? Evidence from self-paced reading and event-related potentials using German".
 
 The raw EEG data are provided as several ZIP files stored in S3:
@@ -13,16 +13,17 @@ The relevant ZIP files are:
     EEG_rawdata_session2_subj61_100.zip
     EEG_rawdata_session2_subj101_149.zip
 
-Each ZIP contains one or more BDF files (one per subject). For each subject’s BDF file, the pipeline is:
-  1. Load the EEG data using mne.io.read_raw_bdf.
+Each ZIP file contains one or more BrainVision recordings (with .eeg, .vhdr, and .vmrk files).
+For each unique recording (e.g. those with base filename "s1_pandora_0001"), the pipeline is:
+  1. Load the EEG data via mne.io.read_raw_brainvision.
   2. Retain only EEG channels.
   3. Compute a two‑channel hemispheric average:
-       - Left hemisphere: average of lateral channels whose names end with an odd digit.
-       - Right hemisphere: average of lateral channels whose names end with an even digit.
-       (Midline channels are ignored.)
-  4. Preprocess the two‑channel data (using the custom function preprocess_data).
-  5. Segment the data into non‑overlapping windows, perform wavelet decomposition and quantization,
-     and write the quantized coefficients and channel labels to text files.
+         - Left hemisphere: average of lateral channels whose names end with an odd digit.
+         - Right hemisphere: average of lateral channels whose names end with an even digit.
+         (Midline channels are ignored.)
+  4. Preprocess the two‑channel data using preprocess_data.
+  5. Segment the data into windows, perform wavelet decomposition and quantization,
+         and save the quantized coefficients and channel labels to text files.
   6. Optionally, plot selected windows.
 """
 
@@ -66,7 +67,7 @@ def average_hemispheric_channels(data, ch_names):
 
     Channels whose names end with an odd digit are assigned to the left hemisphere,
     while channels whose names end with an even digit are assigned to the right hemisphere.
-    Channels that do not end with a digit (e.g., midline channels such as Fz, Cz, Pz) are ignored.
+    Channels that do not end with a digit (e.g., midline channels like Fz, Cz, Pz) are ignored.
 
     Args:
         data: NumPy array of shape (n_channels, n_samples)
@@ -183,19 +184,22 @@ def process_and_save(data, sps, coeffs_path, chans_path,
             f_chans.write(" ".join(all_channel_names) + " ")
 
 
-def process_bdf_file(bdf_path):
+def process_vhdr_file(vhdr_path):
     """
-    Processes an individual BDF file.
-    Loads the BDF file, retains only EEG channels, computes the hemispheric average,
-    preprocesses the data, and performs windowing, wavelet decomposition, and quantization.
-    The results are saved to text files.
+    Processes a single BrainVision recording.
+    Loads the EEG data using mne.io.read_raw_brainvision, retains only EEG channels,
+    computes the hemispheric average, preprocesses the data, segments it into windows,
+    and performs wavelet decomposition and quantization. Output files are saved.
+
+    Args:
+        vhdr_path: Full path to the .vhdr file.
     """
-    subject_id = os.path.splitext(os.path.basename(bdf_path))[0]
-    print(f"\nProcessing subject: {subject_id} from {bdf_path}")
+    subject_id = os.path.splitext(os.path.basename(vhdr_path))[0]  # e.g., "s1_pandora_0001"
+    print(f"\nProcessing subject: {subject_id} from {vhdr_path}")
     try:
-        raw = mne.io.read_raw_bdf(bdf_path, preload=True, verbose=False)
+        raw = mne.io.read_raw_brainvision(vhdr_path, preload=True, verbose=False)
     except Exception as e:
-        print(f"Error loading {bdf_path}: {e}")
+        print(f"Error loading {vhdr_path}: {e}")
         return
     print("Channel names:", raw.info["ch_names"])
     print("Raw data shape:", raw.get_data().shape)
@@ -204,7 +208,7 @@ def process_bdf_file(bdf_path):
     raw.pick_types(eeg=True)
     print("After picking EEG channels, shape:", raw.get_data().shape)
 
-    eeg_data = raw.get_data()
+    eeg_data = raw.get_data()  # (n_channels, n_samples)
     fs = raw.info["sfreq"]
 
     try:
@@ -228,10 +232,10 @@ def process_bdf_file(bdf_path):
 
 def process_zip_file(s3_key, s3_client):
     """
-    Downloads a ZIP file from S3 and processes all BDF files contained within.
+    Downloads a ZIP file from S3 and processes all BrainVision recordings (.vhdr files) contained within.
 
     Args:
-        s3_key: The name of the ZIP file (e.g., "EEG_rawdata_session1_subj01_50.zip")
+        s3_key: The ZIP file name (e.g., "EEG_rawdata_session1_subj01_50.zip")
         s3_client: An initialized boto3 S3 client.
     """
     print(f"\nProcessing ZIP file: {s3_key}")
@@ -252,18 +256,18 @@ def process_zip_file(s3_key, s3_client):
             print(f"Error extracting {s3_key}: {e}")
             return
 
-        # Recursively search for .bdf files in the temporary directory.
-        bdf_files = []
+        # Recursively search for .vhdr files.
+        vhdr_files = []
         for root, dirs, files in os.walk(temp_dir):
             for file in files:
-                if file.lower().endswith(".bdf"):
-                    bdf_files.append(os.path.join(root, file))
-        if not bdf_files:
-            print(f"No BDF files found in {s3_key}")
+                if file.lower().endswith(".vhdr"):
+                    vhdr_files.append(os.path.join(root, file))
+        if not vhdr_files:
+            print(f"No .vhdr files found in {s3_key}")
             return
-        print(f"Found {len(bdf_files)} BDF files in {s3_key}.")
-        for bdf in sorted(bdf_files):
-            process_bdf_file(bdf)
+        print(f"Found {len(vhdr_files)} .vhdr files in {s3_key}.")
+        for vhdr in sorted(vhdr_files):
+            process_vhdr_file(vhdr)
 
 
 # --- Main Script ---
