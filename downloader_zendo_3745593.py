@@ -20,8 +20,8 @@ Dataset description:
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
-      is generated using information from coordinates.xml (with namespace handling)
-      if available.
+      is generated using information from coordinates.xml. In generating the sensor layout,
+      only sensors with type "0" (EEG sensors) are included.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -76,13 +76,14 @@ def patch_info_xml(subject_path):
     new_content = re.sub(r"(<recordTime>)(.*?)(</recordTime>)", repl, content)
     with open(info_path, "w", encoding="utf-8") as f:
         f.write(new_content)
+    print(f"Patched info.xml in {subject_path}")
 
 
 def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    It uses namespace handling to parse coordinates.xml.
+    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0".
     If coordinates.xml exists, it extracts sensor elements and creates sensorLayout.xml.
     Otherwise, a minimal dummy sensorLayout.xml is created.
 
@@ -99,9 +100,13 @@ def ensure_sensor_layout(subject_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
-            sensors = root.findall(".//ns:sensor", ns)
+            # Find sensor elements with type "0" (EEG sensors only)
+            sensors = [s for s in root.findall(".//ns:sensor", ns)
+                       if s.findtext("ns:type", default="") == "0"]
+            print(f"Found {len(sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
             if not sensors:
-                raise ValueError("No sensor elements found in coordinates.xml.")
+                raise ValueError("No sensor elements with type '0' found in coordinates.xml.")
+            # Create a new XML structure for sensorLayout.xml.
             layout_root = ET.Element("sensorLayout")
             sensors_elem = ET.SubElement(layout_root, "sensors")
             for sensor in sensors:
