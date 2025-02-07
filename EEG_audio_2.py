@@ -162,72 +162,73 @@ def load_subject_raw_data(raw_folder, subject_id):
 
 
 if __name__ == "__main__":
-    import requests
+    import boto3
     import tarfile
     import tempfile
     import os
-    from urllib.parse import quote
 
-    # Define base URL and folder path.
-    base_url = "https://dataframes--use1-az6--x-s3.s3express-use1-az6.us-east-1.amazonaws.com"
-    folder_path = "attention fintune/4518754"  # Note the space; we'll URL-encode later.
+    # It is assumed that the following functions have been imported:
+    # load_subject_raw_data, preprocess_data, average_alternate_channels, process_and_save
 
-    # Process subjects S0.tar.gz through S30.tar.gz
-    subject_ids = [f"S{n}" for n in range(30)]
+    # S3 configuration
+    s3_bucket = "dataframes--use1-az6--x-s3"
+    s3_folder = "attention fintune/4518754"  # Note the space in the folder name
+    subject_ids = [f"S{n}" for n in range(30)]  # S0.tar.gz, S1.tar.gz, ..., S10.tar.gz
+
+    # Local output directory for processed files
     output_base = "output-4518754"
     os.makedirs(output_base, exist_ok=True)
 
-    # Create a temporary directory for downloading and extracting tar.gz files.
+    # Initialize the boto3 S3 client (make sure AWS credentials are properly configured)
+    s3 = boto3.client("s3")
+
+    # Create a temporary directory for downloads and extraction
     with tempfile.TemporaryDirectory() as temp_dir:
         for subject_id in subject_ids:
             tar_filename = f"{subject_id}.tar.gz"
-            # Construct the raw URL (it may contain spaces, so we'll encode it)
-            raw_url = f"{base_url}/{folder_path}/{tar_filename}"
-            encoded_url = quote(raw_url, safe=":/")  # Encode spaces and other unsafe characters
+            s3_key = f"{s3_folder}/{tar_filename}"
+            local_tar_path = os.path.join(temp_dir, tar_filename)
             print(f"Processing subject: {subject_id}")
-            print(f"Downloading {encoded_url} ...")
             try:
-                headers = {'User-Agent': 'Mozilla/5.0'}  # Custom User-Agent header
-                response = requests.get(encoded_url, headers=headers)
-                response.raise_for_status()  # Raise an exception for HTTP errors
-                local_tar_path = os.path.join(temp_dir, tar_filename)
-                with open(local_tar_path, "wb") as f:
-                    f.write(response.content)
+                print(f"Downloading s3://{s3_bucket}/{s3_key} ...")
+                s3.download_file(s3_bucket, s3_key, local_tar_path)
+                print(f"Downloaded {tar_filename} to {local_tar_path}")
             except Exception as e:
                 print(f"Error downloading {tar_filename}: {e}")
                 continue
 
-            # Extract the tar.gz file into a dedicated folder.
+            # Extract the tar.gz file into a dedicated folder
             extract_path = os.path.join(temp_dir, subject_id)
             os.makedirs(extract_path, exist_ok=True)
             try:
                 with tarfile.open(local_tar_path, "r:gz") as tar:
                     tar.extractall(path=extract_path)
+                print(f"Extracted {tar_filename} to {extract_path}")
             except Exception as e:
                 print(f"Error extracting {tar_filename}: {e}")
                 continue
 
-            # Load the raw subject data from the extracted directory.
+            # Load the raw EEG data from the extracted files
             try:
                 raw = load_subject_raw_data(extract_path, subject_id)
             except Exception as e:
                 print(f"Error loading subject {subject_id} from extracted data: {e}")
                 continue
 
-            # Retrieve data and sampling rate.
+            # Retrieve the EEG data and sampling frequency
             eeg_data = raw.get_data()
             fs = raw.info["sfreq"]
 
-            # Preprocess the data and reduce to 2 channels.
+            # Preprocess the data and reduce to 2 channels
             prep_data, new_fs = preprocess_data(eeg_data, fs)
             twoch_data = average_alternate_channels(prep_data)
-            combined_data = twoch_data  # Shape: (2, total_samples)
+            combined_data = twoch_data  # Combined data shape: (2, total_samples)
 
-            # Define output file paths for this subject.
+            # Define output file paths for the processed results
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process the combined data: windowing, wavelet decomposition, quantization, and (optionally) plotting.
+            # Process the combined data (windowing, wavelet decomposition, quantization, and optional plotting)
             process_and_save(combined_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8,
                              plot_windows=False, plot_random_n=5)
