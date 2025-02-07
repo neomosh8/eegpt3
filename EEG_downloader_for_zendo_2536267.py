@@ -11,49 +11,55 @@ from utils import preprocess_data, wavelet_decompose_window, quantize_number
 
 def average_left_right(raw):
     """
-    Average EEG channels separately for left and right hemispheres.
+    Averages EEG channels into left and right hemispheric signals.
 
-    This function first selects only EEG channels (thereby excluding non‐EEG channels
-    such as EXG, GSR, etc.). It then ensures a montage is set (using the standard
-    BioSemi64 montage) so that the channel locations are available. Channels with an
-    x-coordinate (first element in the location vector) < 0 are considered left-hemisphere
-    and those with x > 0 as right-hemisphere.
+    This function first reassigns non-EEG channels (e.g. EXG, GSR, etc.) to type 'misc'
+    so that only channels with names starting with 'A' or 'B' are treated as EEG channels.
+    Then it sets the BioSemi64 montage (ignoring missing channels) and picks only EEG channels.
+    Channels with an x-coordinate (first element in the location vector) < 0 are assumed
+    to be on the left, and those with x > 0 on the right.
 
     Args:
-        raw : mne.io.Raw object with EEG data.
+        raw: mne.io.Raw object with data from a BIDS EEG dataset.
 
     Returns:
-        combined_data : A 2-channel NumPy array of shape (2, total_samples) where
-                        combined_data[0, :] is the average left hemisphere signal and
-                        combined_data[1, :] is the average right hemisphere signal.
+        combined_data: A 2-channel NumPy array (shape: [2, total_samples]) where the
+                       first row is the left hemisphere average and the second row is
+                       the right hemisphere average.
     """
-    # Pick only EEG channels (excludes non-EEG channels like EXG, GSR, etc.)
+    # Reassign non-EEG channels to 'misc'
+    # (We assume that EEG channels are labeled with names starting with "A" or "B".)
+    non_eeg = {ch: 'misc' for ch in raw.info["ch_names"] if not (ch.startswith("A") or ch.startswith("B"))}
+    if non_eeg:
+        raw.set_channel_types(non_eeg)
+
+    # Pick only EEG channels.
     picks = mne.pick_types(raw.info, eeg=True, exclude='bads')
 
-    # Ensure the montage is set. If not, assign the standard BioSemi64 montage.
+    # Set montage only if not already set.
     if raw.get_montage() is None:
-        montage = mne.channels.make_standard_montage("biosemi64")  # :contentReference[oaicite:0]{index=0}
-        raw.set_montage(montage)
+        montage = mne.channels.make_standard_montage("biosemi64")
+        # on_missing='ignore' will skip channels not in the montage
+        raw.set_montage(montage, on_missing='ignore')
 
     data = raw.get_data(picks=picks)
 
     left_signals = []
     right_signals = []
 
-    # Loop over the picked EEG channels.
+    # Loop over the EEG channels
     for i, idx in enumerate(picks):
         ch_info = raw.info["chs"][idx]
-        # The first three entries in 'loc' are the x, y, z coordinates (in meters)
-        loc = ch_info["loc"][:3]
+        loc = ch_info["loc"][:3]  # x, y, z coordinates in meters
         if loc[0] < 0:
             left_signals.append(data[i])
         elif loc[0] > 0:
             right_signals.append(data[i])
         else:
-            # In case x == 0, you might choose to assign it to one side or ignore.
+            # Channels exactly on midline can be ignored or assigned to either side.
             pass
 
-    # Compute the average for each hemisphere.
+    # Compute averages (if no channels are found for one hemisphere, use zeros)
     left_avg = np.mean(left_signals, axis=0) if left_signals else np.zeros(data.shape[1])
     right_avg = np.mean(right_signals, axis=0) if right_signals else np.zeros(data.shape[1])
 
@@ -95,12 +101,12 @@ def process_and_save(data, sps, coeffs_path, chans_path,
 
     Args:
         data: NumPy array of shape (2, total_samples)
-        sps: Sampling rate (Hz)
-        coeffs_path: Output file path for quantized coefficients
-        chans_path: Output file path for channel labels
-        wavelet: Wavelet type (default 'db2')
-        level: Decomposition level (default 4)
-        window_len_sec: Window length in seconds (default 1.8 sec)
+        sps: Sampling rate in Hz.
+        coeffs_path: Output file path for quantized coefficients.
+        chans_path: Output file path for channel labels.
+        wavelet: Wavelet type (default 'db2').
+        level: Decomposition level (default 4).
+        window_len_sec: Window length in seconds (default 1.8 sec).
         plot_windows: If True, plots each window.
         plot_random_n: If an integer, randomly selects that many windows to plot.
     """
@@ -244,12 +250,12 @@ if __name__ == "__main__":
                 print(f"Error loading subject {subject}: {e}")
                 continue
 
-            # Retrieve EEG data and sampling rate
             fs = raw.info["sfreq"]
 
-            # Preprocess data using the provided function (e.g., filtering, downsampling, etc.)
+            # Preprocess data (e.g., filtering, downsampling) using your custom function.
             prep_data, new_fs = preprocess_data(raw.get_data(), fs)
-            # Now average only EEG channels into left and right hemispheric signals.
+
+            # Average only EEG channels into left/right hemispheric signals.
             combined_data = average_left_right(raw)
 
             coeffs_path = os.path.join(output_base, f"{subject}_combined_coeffs.txt")
