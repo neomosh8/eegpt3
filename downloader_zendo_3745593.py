@@ -9,7 +9,7 @@ Dataset description:
   - Each subject’s data is stored in an MFF folder (e.g., "sub-001.mff") inside
     the mental_attention.zip archive.
   - The EEG is assumed to be recorded continuously; here we segment the data
-    into non-overlapping 15-second windows.
+    into non-overlapping 1.8-second windows.
   - For each subject, after picking only EEG channels, a hemispheric averaging is
     performed using the following logic:
        • Channels whose names end with an odd digit are averaged to produce a left-hemisphere signal.
@@ -20,7 +20,8 @@ Dataset description:
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
-      is generated using information from coordinates.xml if available.
+      is generated using information from coordinates.xml (with namespace handling)
+      if available.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -81,7 +82,8 @@ def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    If coordinates.xml exists, it is parsed and sensor entries are created.
+    It uses namespace handling to parse coordinates.xml.
+    If coordinates.xml exists, it extracts sensor elements and creates sensorLayout.xml.
     Otherwise, a minimal dummy sensorLayout.xml is created.
 
     Args:
@@ -92,30 +94,28 @@ def ensure_sensor_layout(subject_path):
         return
 
     coordinates_path = os.path.join(subject_path, "coordinates.xml")
+    ns = {'ns': 'http://www.egi.com/coordinates_mff'}
     if os.path.exists(coordinates_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
-            # Look for sensor elements; the exact tag may vary.
-            sensors = root.findall(".//sensor")
+            sensors = root.findall(".//ns:sensor", ns)
             if not sensors:
-                sensors = root.findall("sensor")
-            # Create a new XML structure for sensorLayout.xml.
+                raise ValueError("No sensor elements found in coordinates.xml.")
             layout_root = ET.Element("sensorLayout")
             sensors_elem = ET.SubElement(layout_root, "sensors")
             for sensor in sensors:
-                sensor_id = sensor.get("id") or sensor.findtext("id") or "0"
-                label = sensor.get("label") or sensor.findtext("label") or f"E{sensor_id}"
-                x = sensor.findtext("x") or "0"
-                y = sensor.findtext("y") or "0"
-                z = sensor.findtext("z") or "0"
+                sensor_id = sensor.findtext("ns:number", default="0", namespaces=ns)
+                label = sensor.findtext("ns:name", default=f"E{sensor_id}", namespaces=ns)
+                x = sensor.findtext("ns:x", default="0", namespaces=ns)
+                y = sensor.findtext("ns:y", default="0", namespaces=ns)
+                z = sensor.findtext("ns:z", default="0", namespaces=ns)
                 new_sensor = ET.SubElement(sensors_elem, "sensor")
                 new_sensor.set("id", sensor_id)
                 new_sensor.set("label", label)
                 new_sensor.set("x", x)
                 new_sensor.set("y", y)
                 new_sensor.set("z", z)
-            # Write out the new sensorLayout.xml file.
             tree_new = ET.ElementTree(layout_root)
             tree_new.write(sensor_layout_path, encoding="utf-8", xml_declaration=True)
             print(f"Created sensorLayout.xml from coordinates.xml in {subject_path}.")
@@ -196,7 +196,7 @@ def plot_window(window_data, sps, window_index=None):
 
 
 def process_and_save(data, sps, coeffs_path, chans_path,
-                     wavelet='db2', level=4, window_len_sec=15,
+                     wavelet='db2', level=4, window_len_sec=1.8,
                      plot_windows=False, plot_random_n=1):
     """
     Segments a two-channel signal into non-overlapping windows,
@@ -210,7 +210,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         chans_path: Output file path for channel labels.
         wavelet: Wavelet type (default 'db2').
         level: Decomposition level (default: 4).
-        window_len_sec: Window length in seconds (here, 15 sec).
+        window_len_sec: Window length in seconds (here, 1.8 sec).
         plot_windows: If True, plots selected windows.
         plot_random_n: If an integer and less than total windows, randomly selects that many windows to plot.
     """
@@ -356,7 +356,7 @@ if __name__ == "__main__":
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process the preprocessed data: segment into 15-sec windows, decompose and quantize.
+            # Process the preprocessed data: segment into 1.8-sec windows, decompose and quantize.
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
             print(f"Finished processing subject: {subject_id}")
