@@ -20,8 +20,8 @@ Dataset description:
 
 NOTE: This version patches each subject’s info.xml file to replace the recordTime
       value with a dummy valid string and ensures that a proper sensorLayout.xml
-      is generated using information from coordinates.xml.
-      In generating the sensor layout, if 33 sensors are found, any sensor with label "Cz" is skipped.
+      is generated using information from coordinates.xml. In particular, a top-level
+      <name> element is included so that MNE’s header reader finds it.
 """
 
 # --- Preliminary Imports and Checks ---
@@ -84,8 +84,10 @@ def ensure_sensor_layout(subject_path):
     """
     Ensures that a sensorLayout.xml file exists in the subject folder.
     If not, this function tries to generate one using coordinates.xml.
-    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0".
-    If 33 sensors are found, it removes any sensor with label "Cz".
+    It uses namespace handling to parse coordinates.xml and includes only sensors with type "0"
+    (EEG sensors). It also includes a top-level <name> element.
+    If coordinates.xml exists, it extracts sensor elements from the
+    <sensorLayout>/<sensors> element and creates sensorLayout.xml.
     Otherwise, a minimal dummy sensorLayout.xml is created.
 
     Args:
@@ -101,6 +103,13 @@ def ensure_sensor_layout(subject_path):
         try:
             tree = ET.parse(coordinates_path)
             root = tree.getroot()
+            # Look for <sensorLayout> element and get its <name>
+            sensor_layout_elem = root.find("ns:sensorLayout", ns)
+            layout_name_text = "Exported from EEGLAB"
+            if sensor_layout_elem is not None:
+                name_elem = sensor_layout_elem.find("ns:name", ns)
+                if name_elem is not None and name_elem.text is not None:
+                    layout_name_text = name_elem.text.strip()
             # Locate the sensors container.
             sensors_container = root.find("ns:sensorLayout/ns:sensors", ns)
             if sensors_container is None:
@@ -113,14 +122,17 @@ def ensure_sensor_layout(subject_path):
                 if sensor_type == "0":
                     eeg_sensors.append(s)
             print(f"Found {len(eeg_sensors)} EEG sensor(s) in coordinates.xml for {subject_path}")
-            # If we have 33 sensors, remove the one with label "Cz" (if present).
+            # If there are 33 sensors, remove the one with label "Cz" (if present)
             if len(eeg_sensors) == 33:
+                before = len(eeg_sensors)
                 eeg_sensors = [s for s in eeg_sensors if (s.findtext("ns:name", "").strip() != "Cz")]
-                print(f"After removing 'Cz', {len(eeg_sensors)} EEG sensor(s) remain.")
+                print(f"Removed 'Cz': {before - len(eeg_sensors)} sensor(s) removed; {len(eeg_sensors)} remain.")
             if not eeg_sensors:
                 raise ValueError("No sensor elements with type '0' found in coordinates.xml.")
-            # Create a new XML structure for sensorLayout.xml.
+            # Create new sensorLayout.xml with a top-level <name> element.
             layout_root = ET.Element("sensorLayout")
+            layout_name_elem = ET.SubElement(layout_root, "name")
+            layout_name_elem.text = layout_name_text
             sensors_elem = ET.SubElement(layout_root, "sensors")
             for sensor in eeg_sensors:
                 sensor_id = sensor.findtext("ns:number", default="0", namespaces=ns).strip()
@@ -141,9 +153,10 @@ def ensure_sensor_layout(subject_path):
             return
         except Exception as e:
             print(f"Error creating sensorLayout.xml from coordinates.xml in {subject_path}: {e}")
-    # Fallback: create a minimal dummy sensorLayout.xml.
+    # Fallback: create a minimal dummy sensorLayout.xml with a <name> element.
     dummy_content = '''<?xml version="1.0" encoding="UTF-8"?>
 <sensorLayout>
+  <name>Dummy Device</name>
   <sensors>
     <sensor id="0" label="dummy" x="0" y="0" z="0"/>
   </sensors>
@@ -257,15 +270,20 @@ def process_and_save(data, sps, coeffs_path, chans_path,
             elif plot_windows:
                 plot_window(window_data, sps, window_index=window_counter)
 
-            (decomposed_channels,
-             coeffs_lengths,
-             num_samples,
-             normalized_data) = wavelet_decompose_window(
-                window_data,
-                wavelet=wavelet,
-                level=level,
-                normalization=True
-            )
+            try:
+                (decomposed_channels,
+                 coeffs_lengths,
+                 num_samples,
+                 normalized_data) = wavelet_decompose_window(
+                    window_data,
+                    wavelet=wavelet,
+                    level=level,
+                    normalization=True
+                )
+            except Exception as e:
+                print(f"Error in wavelet decomposition in window {window_counter}: {e}")
+                traceback.print_exc()
+                continue
 
             all_channel_coeffs = []
             all_channel_names = []
@@ -332,18 +350,14 @@ if __name__ == "__main__":
             exit(1)
 
         for subj_entry in sorted(subject_entries):
-            # Remove the ".mff" extension for a clean subject ID.
             subject_id = os.path.splitext(subj_entry)[0]
             subject_path = os.path.join(dataset_root, subj_entry)
             print(f"\nProcessing subject: {subject_id}")
 
-            # Patch info.xml to replace recordTime.
             patch_info_xml(subject_path)
-            # Ensure sensorLayout.xml exists (using coordinates.xml if possible).
             ensure_sensor_layout(subject_path)
 
             try:
-                # Load the MFF data using MNE’s read_raw_egi.
                 try:
                     raw = mne.io.read_raw_egi(subject_path, preload=True, verbose=False)
                 except Exception as e:
@@ -357,15 +371,12 @@ if __name__ == "__main__":
             print("Channel names:", raw.info["ch_names"])
             print("Raw data shape:", raw.get_data().shape)
 
-            # Retain only EEG channels.
             raw.pick_types(eeg=True)
             print("After picking EEG channels, shape:", raw.get_data().shape)
 
-            # Get the EEG data and sampling frequency.
             eeg_data = raw.get_data()
             fs = raw.info["sfreq"]
 
-            # Compute hemispheric averages.
             try:
                 twoch_data = average_hemispheric_channels(eeg_data, raw.info["ch_names"])
             except Exception as e:
@@ -373,14 +384,11 @@ if __name__ == "__main__":
                 continue
             print("Hemispheric averaged data shape:", twoch_data.shape)
 
-            # Preprocess the two-channel data.
             prep_data, new_fs = preprocess_data(twoch_data, fs)
 
-            # Define output file paths.
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process the preprocessed data: segment into 1.8-sec windows, decompose and quantize.
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
             print(f"Finished processing subject: {subject_id}")
