@@ -234,7 +234,7 @@ if __name__ == "__main__":
             exit(1)
 
         # Extract the ZIP file.
-        extract_path = os.path.join(temp_dir, "extracted")
+        extract_path = os.path.join(temp_dir, "mental_attention/extracted")
         os.makedirs(extract_path, exist_ok=True)
         try:
             with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
