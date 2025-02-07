@@ -19,73 +19,30 @@ Dataset description:
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
 IMPORTANT:
-  This script patches the time parser used when reading EGI MFF files so that recordTime
-  strings such as "2020-03-06T18:01:47.25318000:00" are normalized into a format that can be parsed.
+  This script patches the time parser used when reading EGI MFF files so that any
+  recordTime string (e.g., "2020-03-06T18:01:47.25318000:00") is ignored and replaced
+  with a fixed datetime value.
 """
 
-###########################
-# 1. Patch the time parser
-###########################
+############################################
+# 1. Patch the recordTime parser to ignore it
+############################################
 
-import re, datetime
-
-# Try to import mffpy.time. If available, patch its MFFTime.__init__.
-try:
-    import mffpy.time
-
-    HAVE_MFFPY = True
-    orig_MFFTime_init = mffpy.time.MFFTime.__init__
+import datetime
+import mne.io.egi.egi as egi_mod
 
 
-    def _patched_MFFTime_init(self, dt_str):
-        # Remove trailing ":00" if present.
-        if dt_str.endswith(":00"):
-            dt_str = dt_str[:-3]
-        # If there's a fractional part, limit it to 6 digits.
-        if '.' in dt_str:
-            base, frac = dt_str.split('.', 1)
-            # Look for a timezone indicator (+ or -) after the fraction.
-            m = re.match(r'(\d+)([+-].*)', frac)
-            if m:
-                digits, tz = m.groups()
-                digits = digits[:6]
-                frac = digits + tz
-            else:
-                frac = frac[:6]
-            dt_str = base + '.' + frac
-        return orig_MFFTime_init(self, dt_str)
+def ignore_record_time(record_time_str):
+    # Instead of parsing the recordTime string, simply return a default value.
+    return datetime.datetime(1970, 1, 1)
 
 
-    mffpy.time.MFFTime.__init__ = _patched_MFFTime_init
-    print("Patched mffpy.time.MFFTime.__init__")
-except ModuleNotFoundError:
-    HAVE_MFFPY = False
-    # If mffpy is not available, patch MNE’s built-in parser.
-    import mne.io.egi.egi as egi_mod
+egi_mod._parse_record_time = ignore_record_time
+print("Patched mne.io.egi._parse_record_time to ignore recordTime errors.")
 
-
-    def _patched_parse_record_time(record_time_str):
-        if record_time_str.endswith(":00"):
-            record_time_str = record_time_str[:-3]
-        if '.' in record_time_str:
-            base, frac = record_time_str.split('.', 1)
-            m = re.match(r'(\d+)([+-].*)', frac)
-            if m:
-                digits, tz = m.groups()
-                digits = digits[:6]
-                frac = digits + tz
-            else:
-                frac = frac[:6]
-            record_time_str = base + '.' + frac
-        return datetime.datetime.fromisoformat(record_time_str)
-
-
-    egi_mod._parse_record_time = _patched_parse_record_time
-    print("Patched mne.io.egi._parse_record_time")
-
-###########################
-# 2. The Rest of the Script
-###########################
+############################################
+# 2. The rest of the processing script
+############################################
 
 import matplotlib
 
