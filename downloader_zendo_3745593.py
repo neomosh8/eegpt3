@@ -19,51 +19,73 @@ Dataset description:
     quantized, and then the quantized coefficients and their channel labels are saved to text files.
 
 IMPORTANT:
-  This script patches the mffpy time parser so that recordTime strings such as
-  "2020-03-06T18:01:47.25318000:00" are normalized to a format that can be parsed.
+  This script patches the time parser used when reading EGI MFF files so that recordTime
+  strings such as "2020-03-06T18:01:47.25318000:00" are normalized into a format that can be parsed.
 """
 
-# --- Ensure required modules are installed ---
+###########################
+# 1. Patch the time parser
+###########################
+
+import re, datetime
+
+# Try to import mffpy.time. If available, patch its MFFTime.__init__.
 try:
-    import defusedxml.ElementTree
-except ImportError:
-    raise ImportError(
-        "For reading EGI MFF data, the module defusedxml is required. "
-        "Please install it with 'pip install defusedxml' or 'conda install -c conda-forge defusedxml'."
-    )
+    import mffpy.time
 
-# --- Monkey-patch mffpy's time parser ---
-import re
-import datetime
-import mffpy.time
-
-# Save the original __init__ method of MFFTime
-_orig_MFFTime_init = mffpy.time.MFFTime.__init__
+    HAVE_MFFPY = True
+    orig_MFFTime_init = mffpy.time.MFFTime.__init__
 
 
-def _patched_MFFTime_init(self, dt_str):
-    # If the string ends with ":00", remove that portion.
-    if dt_str.endswith(":00"):
-        dt_str = dt_str[:-3]
-    # If there is a fractional seconds part, limit it to 6 digits.
-    if '.' in dt_str:
-        base, frac = dt_str.split('.', 1)
-        # Look for a timezone indicator (e.g., +08:00 or -05:00)
-        match = re.match(r'(\d+)([+-].*)', frac)
-        if match:
-            digits, tz = match.groups()
-            digits = digits[:6]
-            frac = digits + tz
-        else:
-            frac = frac[:6]
-        dt_str = base + '.' + frac
-    return _orig_MFFTime_init(self, dt_str)
+    def _patched_MFFTime_init(self, dt_str):
+        # Remove trailing ":00" if present.
+        if dt_str.endswith(":00"):
+            dt_str = dt_str[:-3]
+        # If there's a fractional part, limit it to 6 digits.
+        if '.' in dt_str:
+            base, frac = dt_str.split('.', 1)
+            # Look for a timezone indicator (+ or -) after the fraction.
+            m = re.match(r'(\d+)([+-].*)', frac)
+            if m:
+                digits, tz = m.groups()
+                digits = digits[:6]
+                frac = digits + tz
+            else:
+                frac = frac[:6]
+            dt_str = base + '.' + frac
+        return orig_MFFTime_init(self, dt_str)
 
 
-# Apply the patch to mffpy.time.MFFTime.__init__
-mffpy.time.MFFTime.__init__ = _patched_MFFTime_init
+    mffpy.time.MFFTime.__init__ = _patched_MFFTime_init
+    print("Patched mffpy.time.MFFTime.__init__")
+except ModuleNotFoundError:
+    HAVE_MFFPY = False
+    # If mffpy is not available, patch MNE’s built-in parser.
+    import mne.io.egi.egi as egi_mod
 
-# ------------------------------------------------------------------
+
+    def _patched_parse_record_time(record_time_str):
+        if record_time_str.endswith(":00"):
+            record_time_str = record_time_str[:-3]
+        if '.' in record_time_str:
+            base, frac = record_time_str.split('.', 1)
+            m = re.match(r'(\d+)([+-].*)', frac)
+            if m:
+                digits, tz = m.groups()
+                digits = digits[:6]
+                frac = digits + tz
+            else:
+                frac = frac[:6]
+            record_time_str = base + '.' + frac
+        return datetime.datetime.fromisoformat(record_time_str)
+
+
+    egi_mod._parse_record_time = _patched_parse_record_time
+    print("Patched mne.io.egi._parse_record_time")
+
+###########################
+# 2. The Rest of the Script
+###########################
 
 import matplotlib
 
@@ -155,7 +177,7 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         coeffs_path: Output file path for quantized coefficients.
         chans_path: Output file path for channel labels.
         wavelet: Wavelet type (default 'db2').
-        level: Decomposition level (default 4).
+        level: Decomposition level (default: 4).
         window_len_sec: Window length in seconds (here, 15 sec).
         plot_windows: If True, plots selected windows.
         plot_random_n: If an integer (and less than total windows), randomly selects that many windows to plot.
