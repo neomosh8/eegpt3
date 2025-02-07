@@ -55,14 +55,11 @@ def plot_window(window_data, sps, window_index=None):
 
 
 def process_and_save(data, sps, coeffs_path, chans_path,
-                     wavelet='db2', level=4, window_len_sec=1.8,
-                     plot_windows=False, plot_random_n=None):
+                     wavelet='db2', level=4, window_len_sec=1.8, plot_windows=False, plot_random_n=1):
     """
     Segments a 2-channel signal into non-overlapping windows,
     performs wavelet decomposition and quantization on each window,
     and writes the results to text files.
-
-    Optionally, plots a random subset of windows.
 
     Args:
         data: NumPy array of shape (2, total_samples)
@@ -73,54 +70,61 @@ def process_and_save(data, sps, coeffs_path, chans_path,
         level: Decomposition level (default 4)
         window_len_sec: Window length in seconds (here, 1.8 sec)
         plot_windows: If True, plots every window.
-        plot_random_n: If set to an integer, randomly selects that many windows to plot.
+        plot_random_n: If set to an integer, randomly select that many windows to plot.
     """
     n_window_samples = int(window_len_sec * sps)
     total_samples = data.shape[1]
 
-    # Determine total number of windows.
+    # Calculate the total number of windows.
     total_windows = len(range(0, total_samples - n_window_samples + 1, n_window_samples))
+
+    # Select random windows to plot if desired.
     if plot_random_n is not None and plot_random_n < total_windows:
         selected_windows = np.random.choice(range(1, total_windows + 1), size=plot_random_n, replace=False)
     else:
-        selected_windows = None
+        selected_windows = None  # This means plot all windows if plot_windows is True
 
     os.makedirs(os.path.dirname(coeffs_path), exist_ok=True)
     window_counter = 0
 
     with open(coeffs_path, 'w') as f_coeffs, open(chans_path, 'w') as f_chans:
+        # Process each non-overlapping window.
         for start_idx in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_counter += 1
             end_idx = start_idx + n_window_samples
-            window_data = data[:, start_idx:end_idx]
+            window_data = data[:, start_idx:end_idx]  # Shape: (2, n_window_samples)
 
+            # Plot the window if requested.
             if selected_windows is not None:
                 if window_counter in selected_windows:
                     plot_window(window_data, sps, window_index=window_counter)
             elif plot_windows:
                 plot_window(window_data, sps, window_index=window_counter)
 
+            # Call wavelet_decompose_window once with the entire 2-channel window.
+            (decomposed_channels,
+             coeffs_lengths,
+             num_samples,
+             normalized_data) = wavelet_decompose_window(
+                window_data,     # Pass both channels at once.
+                wavelet=wavelet,
+                level=level,
+                normalization=True
+            )
+
+            # Now, process each channel's decomposed coefficients.
             all_channel_coeffs = []
             all_channel_names = []
-            for ch_idx in range(2):
+            for ch_idx in range(decomposed_channels.shape[0]):  # Should be 2 channels.
                 ch_name = str(ch_idx)
-                channel_data = window_data[ch_idx, :]
-                channel_data_2d = channel_data[np.newaxis, :]
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wavelet,
-                    level=level,
-                    normalization=True
-                )
-                coeffs_flat = decomposed_channels.flatten()
+                coeffs_flat = decomposed_channels[ch_idx].flatten()
                 q_ids = [str(quantize_number(c)) for c in coeffs_flat]
                 all_channel_coeffs.extend(q_ids)
                 all_channel_names.extend([ch_name] * len(q_ids))
+
             f_coeffs.write(" ".join(all_channel_coeffs) + " ")
             f_chans.write(" ".join(all_channel_names) + " ")
+
 
 
 def load_subject_raw_data(raw_folder, subject_id):
@@ -158,46 +162,67 @@ def load_subject_raw_data(raw_folder, subject_id):
 
 
 if __name__ == "__main__":
-    # Set the folder where the raw Curry files (extracted from Sx.tar.gzip) are located.
-    raw_eeg_folder = "C:/Users/rabie/Desktop/gg/S0"  # Adjust this path accordingly
-    subject_ids = [f"S{n}" for n in range(2)]  # S0, S1, ..., S29
+    import urllib.request
+    import tarfile
+    import tempfile
+    import shutil
+
+    # Base URL for the tar.gz files (note the space encoded as %20)
+    base_url = "https://dataframes--use1-az6--x-s3.s3express-use1-az6.us-east-1.amazonaws.com/attention%20fintune/4518754"
+    # Process subjects S0.tar.gz through S10.tar.gz
+    subject_ids = [f"S{n}" for n in range(30)]
     output_base = "output"
+    os.makedirs(output_base, exist_ok=True)
 
-    for subject_id in subject_ids:
-        print(f"Processing subject: {subject_id}")
-        try:
-            raw = load_subject_raw_data(raw_eeg_folder, subject_id)
-        except Exception as e:
-            print(f"Error loading subject {subject_id}: {e}")
-            continue
+    # Create a temporary directory for downloading and extracting tar.gz files.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for subject_id in subject_ids:
+            print(f"Processing subject: {subject_id}")
+            tar_filename = f"{subject_id}.tar.gz"
+            url = f"{base_url}/{tar_filename}"
+            local_tar_path = os.path.join(temp_dir, tar_filename)
+            try:
+                print(f"Downloading {url} ...")
+                urllib.request.urlretrieve(url, local_tar_path)
+            except Exception as e:
+                print(f"Error downloading {tar_filename}: {e}")
+                continue
 
-        # Get the EEG data and sampling rate from the Raw object.
-        # raw.get_data() returns an array of shape (n_channels, n_samples)
-        eeg_data = raw.get_data()
-        fs = raw.info["sfreq"]
+            # Extract the tar.gz file into a dedicated folder
+            extract_path = os.path.join(temp_dir, subject_id)
+            os.makedirs(extract_path, exist_ok=True)
+            try:
+                with tarfile.open(local_tar_path, "r:gz") as tar:
+                    tar.extractall(path=extract_path)
+            except Exception as e:
+                print(f"Error extracting {tar_filename}: {e}")
+                continue
 
-        # (Optional) Select a subset of channels if needed, for example the first 64 channels:
-        # eeg_data = eeg_data[:64, :]
+            # The extracted folder is assumed to contain files like:
+            #   {subject_id}_AAD_1L.dat, {subject_id}_AAD_1R.dat, etc.
+            try:
+                raw = load_subject_raw_data(extract_path, subject_id)
+            except Exception as e:
+                print(f"Error loading subject {subject_id} from extracted data: {e}")
+                continue
 
-        # Preprocess each segment of data as if it were a trial.
-        # In this example we split the continuous data into trials based on events
-        # (if available) or simply treat the entire recording as one long trial.
-        # Here we simply treat the entire data as one "trial" for simplicity.
-        trial_T = eeg_data  # Already in (channels, samples)
-        # Preprocess (e.g., filtering, downsampling, etc.)
-        prep_data, new_fs = preprocess_data(trial_T, fs)
-        # Reduce to 2 channels by averaging alternate channels.
-        twoch_data = average_alternate_channels(prep_data)
-        # In this example we treat the whole processed data as one combined recording.
-        combined_data = twoch_data  # Shape: (2, total_samples)
+            # Retrieve data and sampling rate
+            eeg_data = raw.get_data()
+            fs = raw.info["sfreq"]
 
-        # Define output file paths.
-        coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
-        chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
+            # Preprocess the data and reduce to 2 channels
+            prep_data, new_fs = preprocess_data(eeg_data, fs)
+            twoch_data = average_alternate_channels(prep_data)
+            combined_data = twoch_data
 
-        # Process (window, wavelet decompose, quantize) the combined data.
-        # For example, we can plot 5 random windows:
-        process_and_save(combined_data, new_fs, coeffs_path, chans_path,
-                         wavelet='db2', level=4, window_len_sec=1.8,
-                         plot_windows=True, plot_random_n=5)
+            # Define output file paths for this subject
+            coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
+            chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
+
+            # Process the combined data: window, wavelet decompose, quantize, and optionally plot
+            process_and_save(combined_data, new_fs, coeffs_path, chans_path,
+                             wavelet='db2', level=4, window_len_sec=1.8,
+                             plot_windows=False, plot_random_n=1)
+            print(f"Finished processing subject: {subject_id}")
+
     print("Done!")
