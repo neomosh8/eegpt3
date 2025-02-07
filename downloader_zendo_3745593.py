@@ -66,13 +66,14 @@ def patch_info_xml(subject_path):
     with open(info_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Replace any <recordTime>...</recordTime> with a dummy valid string.
-    # Here we use "1970-01-01T00:00:00.000000+00:00" as a placeholder.
-    new_content = re.sub(
-        r"(<recordTime>)(.*?)(</recordTime>)",
-        r"\11970-01-01T00:00:00.000000+00:00\3",
-        content
-    )
+    # Use a replacement function to avoid ambiguous backreferences.
+    def repl(match):
+        # match.group(1) is the opening tag, match.group(3) is the closing tag.
+        # Replace whatever is in between with a dummy recordTime.
+        return match.group(1) + "1970-01-01T00:00:00.000000+00:00" + match.group(3)
+
+    new_content = re.sub(r"(<recordTime>)(.*?)(</recordTime>)", repl, content)
+
     with open(info_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
