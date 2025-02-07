@@ -167,9 +167,6 @@ if __name__ == "__main__":
     import tempfile
     import os
 
-    # It is assumed that the following functions have been imported:
-    # load_subject_raw_data, preprocess_data, average_alternate_channels, process_and_save
-
     # S3 configuration
     s3_bucket = "dataframes--use1-az6--x-s3"
     s3_folder = "attention fintune/4518754"  # Note the space in the folder name
@@ -179,7 +176,7 @@ if __name__ == "__main__":
     output_base = "output-4518754"
     os.makedirs(output_base, exist_ok=True)
 
-    # Initialize the boto3 S3 client (make sure AWS credentials are properly configured)
+    # Initialize the boto3 S3 client (ensure your AWS credentials are properly configured)
     s3 = boto3.client("s3")
 
     # Create a temporary directory for downloads and extraction
@@ -208,27 +205,36 @@ if __name__ == "__main__":
                 print(f"Error extracting {tar_filename}: {e}")
                 continue
 
-            # Load the raw EEG data from the extracted files
+            # Check for a nested folder: if extraction produces a single subdirectory, use it.
+            subdirs = [d for d in os.listdir(extract_path)
+                       if os.path.isdir(os.path.join(extract_path, d))]
+            if len(subdirs) == 1:
+                raw_folder = os.path.join(extract_path, subdirs[0])
+                print(f"Found nested folder {raw_folder}, using it as raw folder.")
+            else:
+                raw_folder = extract_path
+
+            # Load the raw EEG data from the (possibly nested) extracted directory.
             try:
-                raw = load_subject_raw_data(extract_path, subject_id)
+                raw = load_subject_raw_data(raw_folder, subject_id)
             except Exception as e:
                 print(f"Error loading subject {subject_id} from extracted data: {e}")
                 continue
 
-            # Retrieve the EEG data and sampling frequency
+            # Retrieve EEG data and sampling rate.
             eeg_data = raw.get_data()
             fs = raw.info["sfreq"]
 
-            # Preprocess the data and reduce to 2 channels
+            # Preprocess and reduce to 2 channels.
             prep_data, new_fs = preprocess_data(eeg_data, fs)
             twoch_data = average_alternate_channels(prep_data)
-            combined_data = twoch_data  # Combined data shape: (2, total_samples)
+            combined_data = twoch_data  # Shape: (2, total_samples)
 
-            # Define output file paths for the processed results
+            # Define output file paths.
             coeffs_path = os.path.join(output_base, f"{subject_id}_combined_coeffs.txt")
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
-            # Process the combined data (windowing, wavelet decomposition, quantization, and optional plotting)
+            # Process the combined data (windowing, wavelet decomposition, quantization, etc.)
             process_and_save(combined_data, new_fs, coeffs_path, chans_path,
                              wavelet='db2', level=4, window_len_sec=1.8,
                              plot_windows=False, plot_random_n=5)
