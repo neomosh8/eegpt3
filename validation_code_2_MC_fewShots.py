@@ -448,7 +448,7 @@ model.eval()
 
 # Example: Evaluate over 10 epochs using three shards.
 accs = []
-epochs = 10
+epochs = 4
 for epoch in range(epochs):
     print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
     acc = evaluate_multiclass_with_channels(
