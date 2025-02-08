@@ -90,16 +90,16 @@ if __name__ == "__main__":
     # )
 
     # 2. Download the prefix uploads/local_shards from S3 into a local folder
-    # download_folder_from_s3(
-    #     bucket_name="dataframes--use1-az6--x-s3",
-    #     s3_prefix="uploads/local_shards/",
-    #     local_folder_path="./local_shards"
-    # )
     download_folder_from_s3(
         bucket_name="dataframes--use1-az6--x-s3",
-        s3_prefix="uploads/finetune_shards/",
+        s3_prefix="uploads/local_shards/",
         local_folder_path="./local_shards"
     )
+    # download_folder_from_s3(
+    #     bucket_name="dataframes--use1-az6--x-s3",
+    #     s3_prefix="uploads/finetune_shards/",
+    #     local_folder_path="./local_shards"
+    # )
     # 3.
     # # upload_folder_to_s3(
     # #     local_folder_path="./validation_datasets_imageNet",
