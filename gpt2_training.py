@@ -987,11 +987,12 @@ for step in range(start_step,max_steps):
                 'optimizer_state':optimizer.state_dict(),
             }
             torch.save(checkpoint, checkpoint_path)
-            upload_folder_to_s3(
-                local_folder_path="./log",
-                bucket_name="dataframes--use1-az6--x-s3",
-                s3_prefix="training_XL/log"
-            )
+            if master_process:
+                upload_folder_to_s3(
+                    local_folder_path="./log",
+                    bucket_name="dataframes--use1-az6--x-s3",
+                    s3_prefix="training_XL/log"
+                )
 
     # if (step>0 and step % 1000 == 0) or last_step:
     #     #### once in a while, Perform Multiclass force choice validation

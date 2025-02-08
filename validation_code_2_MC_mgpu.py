@@ -412,7 +412,7 @@ def main():
     if small_model:
         checkpoint_path = 'log/model_15000.pt'
     else:
-        checkpoint_path = 'log/model_30000.pt'
+        checkpoint_path = 'log/model_34500.pt'
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
     orig_sd = checkpoint['model']
