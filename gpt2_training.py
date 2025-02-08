@@ -1067,12 +1067,13 @@ for step in range(start_step,max_steps):
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     token_per_second = tokens_processed/dt
     current_lrs = [pg['lr'] for pg in optimizer.param_groups]
+    formatted_lrs = ", ".join(f"{lr:.4e}" for lr in current_lrs)
 
     if master_process:
-        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {current_lrs:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {formatted_lrs} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
-            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {current_lrs:.4e} | norm {norm:.4f}\n")
+            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {formatted_lrs} | norm {norm:.4f}\n")
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
