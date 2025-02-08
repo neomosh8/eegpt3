@@ -397,7 +397,7 @@ for epoch in range(epochs):
         model=model,
         shard_paths=[
             "output_MEMA/shards/shard_train_0.pt",
-            # "output_MEMA/shards/shard_train_1.pt",
+            "output_MEMA/shards/shard_train_1.pt",
             "output_MEMA/shards/shard_train_2.pt"
         ],
         device=d,
