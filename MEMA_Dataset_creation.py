@@ -45,56 +45,94 @@ def plot_eeg_channels(df, fs=500, title="EEG Channels"):
     plt.tight_layout()
     plt.show()
 
+def plot_window(window_data, sps, window_index=None):
+    """
+    Plots one window of two-channel EEG data.
+
+    Args:
+        window_data: NumPy array of shape (2, n_samples) for the window.
+        sps: Sampling rate in Hz.
+        window_index: Optional window number (used in title and filename).
+    """
+    n_samples = window_data.shape[1]
+    time_axis = np.arange(n_samples) / sps
+    plt.figure(figsize=(10, 4))
+    plt.plot(time_axis, window_data[0, :], label="Left Hemisphere")
+    plt.plot(time_axis, window_data[1, :], label="Right Hemisphere")
+    if window_index is not None:
+        plt.title(f"Window {window_index}")
+    else:
+        plt.title("EEG Window")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"window_{window_index}.png")
+    plt.close()
 
 def process_and_save(data, sps, coeffs_path, chans_path,
-                     wavelet='db2', level=2, window_len_sec=1.0):
+                     wavelet='db2', level=4, window_len_sec=1.8,
+                     plot_windows=False, plot_random_n=1):
     """
-    data shape: (2, total_samples)
-    Breaks the signal into non-overlapping windows of length window_len_sec * sps,
+    Segments a two-channel EEG signal into non-overlapping windows,
     performs wavelet decomposition and quantization on each window,
-    and writes the quantized coefficients and corresponding channel IDs to text files.
+    and writes the resulting quantized coefficients and channel labels to text files.
+
+    Args:
+        data: NumPy array of shape (2, total_samples)
+        sps: Sampling rate in Hz.
+        coeffs_path: Output file path for quantized coefficients.
+        chans_path: Output file path for channel labels.
+        wavelet: Wavelet type (default 'db2').
+        level: Decomposition level (default 4).
+        window_len_sec: Window length in seconds (e.g., 1.8 sec).
+        plot_windows: If True, plots windows (or a random subset).
+        plot_random_n: If an integer (and less than total windows), randomly selects that many windows to plot.
     """
     n_window_samples = int(window_len_sec * sps)
     total_samples = data.shape[1]
+    total_windows = len(range(0, total_samples - n_window_samples + 1, n_window_samples))
 
-    # Ensure output directory exists
+    if plot_random_n is not None and plot_random_n < total_windows:
+        selected_windows = np.random.choice(range(1, total_windows + 1), size=plot_random_n, replace=False)
+    else:
+        selected_windows = None
+
     os.makedirs(os.path.dirname(coeffs_path), exist_ok=True)
-
+    window_counter = 0
     with open(coeffs_path, 'w') as f_coeffs, open(chans_path, 'w') as f_chans:
-        # Slide in non-overlapping windows
         for start_idx in range(0, total_samples - n_window_samples + 1, n_window_samples):
+            window_counter += 1
             end_idx = start_idx + n_window_samples
+            window_data = data[:, start_idx:end_idx]
+
+            if selected_windows is not None:
+                if window_counter in selected_windows:
+                    plot_window(window_data, sps, window_index=window_counter)
+            elif plot_windows:
+                plot_window(window_data, sps, window_index=window_counter)
+
+            (decomposed_channels,
+             coeffs_lengths,
+             num_samples,
+             normalized_data) = wavelet_decompose_window(
+                window_data,
+                wavelet=wavelet,
+                level=level,
+                normalization=True
+            )
 
             all_channel_coeffs = []
             all_channel_names = []
-
-            # Process each of the 2 channels
-            for ch_idx in range(2):
-                ch_name_id = str(ch_idx)
-                channel_data = data[ch_idx, start_idx:end_idx]
-                channel_data_2d = channel_data[np.newaxis, :]
-
-                (decomposed_channels,
-                 coeffs_lengths,
-                 num_samples,
-                 normalized_data) = wavelet_decompose_window(
-                    channel_data_2d,
-                    wavelet=wavelet,
-                    level=level,
-                    normalization=True
-                )
-
-                coeffs_flat = decomposed_channels.flatten()
+            for ch_idx in range(decomposed_channels.shape[0]):
+                ch_name = str(ch_idx)
+                coeffs_flat = decomposed_channels[ch_idx].flatten()
                 q_ids = [str(quantize_number(c)) for c in coeffs_flat]
-
                 all_channel_coeffs.extend(q_ids)
-                all_channel_names.extend([ch_name_id] * len(q_ids))
+                all_channel_names.extend([ch_name] * len(q_ids))
 
-            coeffs_line = " ".join(all_channel_coeffs) + " "
-            chans_line = " ".join(all_channel_names) + " "
-
-            f_coeffs.write(coeffs_line + " ")
-            f_chans.write(chans_line + " ")
+            f_coeffs.write(" ".join(all_channel_coeffs) + " ")
+            f_chans.write(" ".join(all_channel_names) + " ")
 
 
 def load_mat_epoch_data(mat_file_path):
