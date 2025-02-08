@@ -15,7 +15,7 @@ import numpy as np
 from torch.special import logit
 import boto3
 small_model = False
-resume = True
+resume = False
 from handle_tokenized import upload_folder_to_s3
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
@@ -143,13 +143,13 @@ class GPTConfig:
         n_head: int = 12  # number of heads
         n_embd: int = 768  # embedding dimension
     else:
-        n_layer: int = 36
-        n_head: int = 20
-        n_embd: int = 1280
+        # n_layer: int = 36
+        # n_head: int = 20
+        # n_embd: int = 1280
         #model xL
-        # n_layer: int = 48  # reduced from 64 (multiple of 8)
-        # n_head: int = 24  # reduced from 32 (multiple of 8)
-        # n_embd: int = 1536  # reduced from 2048 (multiple of 128)
+        n_layer: int = 48  # reduced from 64 (multiple of 8)
+        n_head: int = 24  # reduced from 32 (multiple of 8)
+        n_embd: int = 1536  # reduced from 2048 (multiple of 128)
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -789,14 +789,15 @@ if small_model:
     B = 64
     T = 1024
 else:
-    epoch_num = 20
-    total_batch_size = 524288
-    B = 16
-    T = 1024
     # epoch_num = 20
-    # total_batch_size = 1638400
-    # B = 8
+    # total_batch_size = 524288
+    # B = 16
     # T = 1024
+    #for XL
+    epoch_num = 20
+    total_batch_size = 1638400
+    B = 8
+    T = 1024
 
 
 assert total_batch_size % (B*T* ddp_world_size) == 0 , "make sure Total batch size is divisible by B*T* ddp_world_size"
@@ -854,22 +855,31 @@ best_val_loss = float('inf')
 no_improvement_count = 0
 patience = 3
 
-def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps):
-    if step < warmup_steps:
-        lr = max_lr * (step + 1) / warmup_steps
-    else:
-        ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
-        ratio = min(1.0, max(0.0, ratio))
-        lr = max_lr * (min_lr / max_lr) ** ratio
-        lr = max(lr, min_lr)
-    # multiply by 0.1^plateau_count
-    factor = 0.1 ** plateau_count
-    lr_final = lr * factor
-    # return max(lr_final, 1e-10)
-    return 1e-6
+# def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=max_steps):
+#     if step < warmup_steps:
+#         lr = max_lr * (step + 1) / warmup_steps
+#     else:
+#         ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
+#         ratio = min(1.0, max(0.0, ratio))
+#         lr = max_lr * (min_lr / max_lr) ** ratio
+#         lr = max(lr, min_lr)
+#     # multiply by 0.1^plateau_count
+#     factor = 0.1 ** plateau_count
+#     lr_final = lr * factor
+#     return max(lr_final, 1e-10)
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1,learning_rate=6e-3,device=device)
+max_lr_main = 6e-3
+max_lr_channel = max_lr_main * 0.1
 
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=[max_lr_main, max_lr_main, max_lr_channel],
+    total_steps=max_steps,              # total number of training steps
+    pct_start=warmup_steps / max_steps,   # fraction of steps for warmup
+    anneal_strategy='cos',                # cosine annealing for decay
+    cycle_momentum=False                  # typically False for AdamW
+)
 start_step = 0
 
 ####RESUME
@@ -1045,20 +1055,24 @@ for step in range(start_step,max_steps):
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}, wce={wce_grad_norm:.4f}")
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(),2)
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr']=lr
+    # lr = get_lr(step)
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr']=lr
     optimizer.step()
+    scheduler.step()  # updates the learning rate according to OneCycleLR
+
     torch.cuda.synchronize()
     t1=time.time()
     dt = t1-t0
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     token_per_second = tokens_processed/dt
+    current_lrs = [pg['lr'] for pg in optimizer.param_groups]
+
     if master_process:
-        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {lr:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+        print(f"Step {step }: Loss:{loss_accum.item():.6f} | lr: {current_lrs:.4e} | norm {norm:.4f} | dt: {1000*dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
-            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {lr:.4e} | norm {norm:.4f}\n")
+            f.write(f"{step} train loss: {train_loss_val:.6f} lr: {current_lrs:.4e} | norm {norm:.4f}\n")
         # update train_losses and steps  ### ADDED LINES ###
         train_losses.append(train_loss_val)
         train_steps.append(step)
