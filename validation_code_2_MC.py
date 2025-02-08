@@ -356,7 +356,7 @@ model = GPT(GPTConfig).to(device)
 if small_model:
     checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
 else:
-    checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
+    checkpoint = torch.load('log/model_34500.pt', map_location=device, weights_only=False)
 orig_sd = checkpoint['model']
 fixed_sd = {}
 for k, v in orig_sd.items():
