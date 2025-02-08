@@ -77,8 +77,8 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 6460
     if small_model:
-        n_layer: int = 12   # number of layers
-        n_head: int = 12    # number of heads
+        n_layer: int = 12  # number of layers
+        n_head: int = 12   # number of heads
         n_embd: int = int(768)  # embedding dimension
     else:
         n_layer: int = 36
@@ -179,22 +179,23 @@ class GPT(nn.Module):
 
 device = 'cpu'
 
-# === Helper function for computing completion loss ===
+# === Helper function for computing completion loss (unchanged) ===
 def compute_completion_loss_with_channels(
         model,
         prompt_tokens, prompt_channels,
         completion_tokens, completion_channels,
         device="cuda"
 ):
-    # Concatenate prompt and candidate completion.
+    # 1) Concatenate prompt + completion for tokens and channels
     full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
     full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
+    total_len = full_tokens.size(1)
     prompt_len = prompt_tokens.size(0)
-    mask_vals = [0] * prompt_len + [1] * completion_tokens.size(0)
+    completion_len = completion_tokens.size(0)
+    mask_vals = [0] * prompt_len + [1] * completion_len
     mask = torch.tensor(mask_vals, device=device).unsqueeze(0)
     with torch.no_grad():
         logits, _ = model(idx=full_tokens, channel_idx=full_channels)
-    # Compute loss only on the candidate (completion) portion.
     shift_logits = logits[:, :-1, :].contiguous()
     shift_tokens = full_tokens[:, 1:].contiguous()
     shift_mask = mask[:, 1:].contiguous()
@@ -208,34 +209,30 @@ def compute_completion_loss_with_channels(
     avg_loss = sum_loss / (num_completion_tokens + 1e-9)
     return avg_loss.item()
 
-# === Few-shot multi-class forced choice evaluation ===
+# === New multi-class few-shot force choice evaluation function with confusion matrix ===
 def evaluate_multiclass_with_channels(
-        model,           # trained model
-        shard_paths,     # list of shard file paths
+        model,           # the trained model
+        shard_paths,     # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
         device="cuda",
-        num_evals=5,     # number of evaluations per shard
+        segment_size=512,   # candidate completion length remains 512 tokens
         prompt_stride=256
 ):
     """
-    For each shard:
-      - Sample two demonstration pairs. Each demonstration pair is a contiguous 256-token segment:
-           * The first 128 tokens are the input.
-           * The following 128 tokens are the associated correct continuation.
-      - Concatenate the two demonstration pairs to form a 512-token few-shot prompt.
-      - Then sample a candidate continuation (512 tokens) from the same shard—ensuring its token window does not overlap either demonstration pair.
-        This is the "correct" candidate.
-      - For every other shard, sample a candidate continuation of 512 tokens.
-      - For each candidate, compute the loss (when appended to the few-shot prompt) over only the candidate portion.
-      - The candidate with the lowest loss is selected.
-      - A confusion matrix is built and overall accuracy is reported.
+    For each shard in shard_paths, we perform an evaluation block where:
+      - We sample a few-shot prompt from the shard consisting of n shots (n default=4) of 128 consecutive tokens each.
+        The start of each shot is forced to be a multiple of 256.
+      - We choose a correct continuation (from the same shard) that does not overlap any of the prompt shots.
+      - For every other shard, we sample one candidate continuation.
+      - We compute the average cross-entropy loss for each candidate given the prompt.
+      - The candidate with the lowest loss is considered the model's prediction.
+    We record the ground truth (the prompt's shard) and the predicted candidate's shard
+    in order to build a confusion matrix.
+    Returns overall accuracy and prints the confusion matrix.
     """
-    # Candidate continuation length (in tokens)
-    candidate_length = 512
-
     # Load all shards into memory.
     shards = []
     for path in shard_paths:
-        shard = torch.load(path, map_location="cpu")  # expected to contain {'tokens': ..., 'channels': ...}
+        shard = torch.load(path, weights_only=False)  # expected to contain {'tokens': ..., 'channels': ...}
         tokens = shard['tokens'].cpu()
         channels = shard['channels'].cpu()
         shards.append({
@@ -247,74 +244,84 @@ def evaluate_multiclass_with_channels(
     num_shards = len(shards)
     # Initialize confusion matrix: rows = true (prompt) shard, columns = predicted candidate shard.
     confusion_matrix = np.zeros((num_shards, num_shards), dtype=int)
+
     total_evals = 0
     correct_count = 0
 
-    # A simple helper to check if two intervals [a_start, a_end) and [b_start, b_end) overlap.
-    def overlaps(a_start, a_end, b_start, b_end):
-        return not (a_end <= b_start or a_start >= b_end)
-
-    # For each shard, use it as the source for the few-shot prompt and the correct candidate.
+    # For each shard, use it as the source of the prompt and the correct candidate.
     for i, shard in enumerate(shards):
         tokens_i = shard['tokens']
         chans_i = shard['channels']
-        len_i = tokens_i.size(0)
-        # We require enough tokens to sample demonstration pairs and candidate.
-        if len_i < 256 or len_i < candidate_length:
-            print(f"Shard {i} is too short for evaluation. Skipping...")
-            continue
+        len_i = shard['length']
+        block_index = 0
+        pos = 0
+        # Process blocks until we run out of tokens (using a step of 2*segment_size per block)
+        while pos + 2 * segment_size <= len_i:
+            block_index += 1
+            print(f"\n[Shard {i}] Processing block {block_index} at pos={pos} ...")
+            # Few-shot prompt parameters.
+            few_shot_n = 4     # number of shots (default 4)
+            shot_len = 128     # each shot is 128 tokens long
+            total_prompt_len = few_shot_n * shot_len  # total prompt length = 512 tokens
 
-        for eval_idx in range(num_evals):
-            print(f"\n[Shard {i}] Evaluation {eval_idx+1} ...")
-            # --- Sample Demonstration Pair 1 ---
-            # Choose a random index such that a contiguous 256-token block can be taken.
-            demo1_start = random.randint(0, len_i - 256)
-            demo1_tokens = tokens_i[demo1_start : demo1_start + 256]
-            demo1_chans = chans_i[demo1_start : demo1_start + 256]
+            # Determine valid starting positions for shots.
+            # (We require the start to be a multiple of 256 so that, e.g., 0, 256, 512, ... are valid.)
+            possible_shot_starts = list(range(0, len_i - shot_len + 1, 256))
+            if len(possible_shot_starts) < few_shot_n:
+                print(f"Not enough tokens in shard {i} for a few-shot prompt. Skipping...")
+                break
+            # Randomly sample few_shot_n distinct shot start indices and sort them.
+            chosen_shot_starts = random.sample(possible_shot_starts, few_shot_n)
+            chosen_shot_starts.sort()
+            # Construct the few-shot prompt by concatenating the shots.
+            prompt_tokens = torch.cat([ tokens_i[start: start + shot_len] for start in chosen_shot_starts ], dim=0)
+            prompt_chans  = torch.cat([ chans_i[start: start + shot_len] for start in chosen_shot_starts ], dim=0)
+            # For candidate selection, define the prompt intervals.
+            prompt_intervals = [(start, start + shot_len) for start in chosen_shot_starts]
 
-            # --- Sample Demonstration Pair 2 ---
-            demo2_start = random.randint(0, len_i - 256)
-            demo2_tokens = tokens_i[demo2_start : demo2_start + 256]
-            demo2_chans = chans_i[demo2_start : demo2_start + 256]
+            # Helper function: check that a candidate block (of length candidate_len) does not overlap any prompt interval.
+            def candidate_non_overlapping(c, candidate_len, intervals):
+                candidate_end = c + candidate_len
+                for (s, e) in intervals:
+                    # Overlap if candidate starts before the end of a prompt shot
+                    # and candidate ends after the start of that prompt shot.
+                    if c < e and candidate_end > s:
+                        return False
+                return True
 
-            # Construct the 512-token few-shot prompt.
-            few_shot_prompt_tokens = torch.cat([demo1_tokens, demo2_tokens], dim=0)
-            few_shot_prompt_chans  = torch.cat([demo1_chans, demo2_chans], dim=0)
-
-            # --- Prepare the correct candidate continuation (512 tokens) from the same shard ---
-            # Its window must not overlap with either demonstration pair.
-            candidate_offsets = [c for c in range(0, len_i - candidate_length + 1, prompt_stride)
-                                 if (not overlaps(c, c + candidate_length, demo1_start, demo1_start + 256)
-                                     and not overlaps(c, c + candidate_length, demo2_start, demo2_start + 256))]
-            if not candidate_offsets:
-                print(f"No valid candidate window in shard {i} for evaluation {eval_idx+1}. Skipping this evaluation.")
+            # For the correct candidate (from the same shard), pick a 512-token block that does not overlap any prompt shot.
+            all_candidates = list(range(0, len_i - segment_size + 1, prompt_stride))
+            correct_offset_candidates = [c for c in all_candidates if candidate_non_overlapping(c, segment_size, prompt_intervals)]
+            if not correct_offset_candidates:
+                print(f"No valid correct candidate offsets in shard {i} for the few-shot prompt. Skipping block...")
+                pos += 2 * segment_size
                 continue
-            correct_offset = random.choice(candidate_offsets)
-            correct_tokens = tokens_i[correct_offset : correct_offset + candidate_length]
-            correct_chans = chans_i[correct_offset : correct_offset + candidate_length]
+            correct_offset = random.choice(correct_offset_candidates)
+            correct_tokens = tokens_i[correct_offset : correct_offset + segment_size]
+            correct_chans  = chans_i[correct_offset : correct_offset + segment_size]
 
+            # Build the list of candidate completions:
+            # First candidate: correct (from the same shard)
             candidate_info = []
             candidate_info.append({
                 'tokens': correct_tokens,
                 'channels': correct_chans,
                 'label': 'correct',
-                'source_shard': i
+                'source_shard': i  # correct candidate is from the same shard as the prompt
             })
-
-            # --- Prepare candidate continuations from every other shard ---
+            # For every other shard, sample one candidate continuation.
             for j, other_shard in enumerate(shards):
                 if j == i:
                     continue
+                len_j = other_shard['length']
                 tokens_j = other_shard['tokens']
-                chans_j = other_shard['channels']
-                len_j = tokens_j.size(0)
-                if len_j < candidate_length:
-                    print(f"Shard {j} is too short for candidate sampling. Skipping candidate from this shard.")
+                chans_j  = other_shard['channels']
+                if len_j < segment_size:
+                    print(f"Shard {j} is too short. Skipping candidate from this shard.")
                     continue
-                # Sample a candidate block using a random valid offset.
-                wrong_offset = random.randint(0, len_j - candidate_length)
-                wrong_tokens = tokens_j[wrong_offset : wrong_offset + candidate_length]
-                wrong_chans = chans_j[wrong_offset : wrong_offset + candidate_length]
+                wrong_offset = random.randint(0, len_j - segment_size)
+                wrong_tokens = tokens_j[wrong_offset : wrong_offset + segment_size]
+                wrong_chans  = chans_j[wrong_offset : wrong_offset + segment_size]
                 candidate_info.append({
                     'tokens': wrong_tokens,
                     'channels': wrong_chans,
@@ -322,35 +329,38 @@ def evaluate_multiclass_with_channels(
                     'source_shard': j
                 })
 
-            # --- Evaluate each candidate ---
+            # Evaluate each candidate using the helper function.
             candidate_losses = []
             for candidate in candidate_info:
                 loss = compute_completion_loss_with_channels(
                     model,
-                    few_shot_prompt_tokens, few_shot_prompt_chans,
+                    prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
                     device=device
                 )
                 candidate_losses.append(loss)
-            # Pick the candidate with the lowest loss.
+            # Find the candidate with the lowest loss.
             min_loss_index = np.argmin(candidate_losses)
             chosen = candidate_info[min_loss_index]
             predicted_shard = chosen['source_shard']
-            confusion_matrix[i, predicted_shard] += 1
+            true_shard = i  # The prompt always comes from shard i
+            confusion_matrix[true_shard, predicted_shard] += 1
+
             if chosen['label'] == 'correct':
                 correct_count += 1
             total_evals += 1
 
-            print(f"[Shard {i}] Eval {eval_idx+1} candidate losses: {candidate_losses}")
+            print(f"[Shard {i}] Block {block_index} losses: {candidate_losses}")
             print(f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
             print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
+            pos += 2 * segment_size  # advance the block position
 
     if total_evals == 0:
         print("No evaluations were performed (possibly not enough tokens in the shards).")
         return 0.0
 
     accuracy = correct_count / total_evals
-    print(f"\n[Few-shot Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
+    print(f"\n[Multi-class Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
 
     # Print the confusion matrix.
     print("\nConfusion Matrix (rows: true prompt shard, columns: predicted candidate shard):")
@@ -366,9 +376,9 @@ d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 if small_model:
-    checkpoint = torch.load('log/model_15000.pt', map_location=device)
+    checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
 else:
-    checkpoint = torch.load('log/model_34500.pt', map_location=device)
+    checkpoint = torch.load('log/model_34500.pt', map_location=device, weights_only=False)
 orig_sd = checkpoint['model']
 fixed_sd = {}
 for k, v in orig_sd.items():
@@ -380,7 +390,7 @@ model.eval()
 
 # Example: Evaluate over 10 epochs using three shards.
 accs = []
-epochs = 100
+epochs = 10
 for epoch in range(epochs):
     print(f"\n=== Epoch {epoch+1}/{epochs} ===")
     acc = evaluate_multiclass_with_channels(
@@ -391,8 +401,7 @@ for epoch in range(epochs):
             "output_MEMA/shards/shard_train_2.pt"
         ],
         device=d,
-        num_evals=5,
-        prompt_stride=256
+        segment_size=512
     )
     accs.append(acc)
 mean = np.mean(accs)
