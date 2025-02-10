@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
+
 small_model = False
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
@@ -45,12 +46,13 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(y)
         return y
 
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = nn.GELU(approximate='tanh')
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate='tanh')
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
@@ -58,6 +60,7 @@ class MLP(nn.Module):
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
+
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -72,13 +75,14 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
 @dataclass
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 6460
     if small_model:
         n_layer: int = 12  # number of layers
-        n_head: int = 12   # number of heads
+        n_head: int = 12  # number of heads
         n_embd: int = int(768)  # embedding dimension
     else:
         n_layer: int = 36
@@ -88,6 +92,7 @@ class GPTConfig:
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
+
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -142,6 +147,27 @@ class GPT(nn.Module):
             )
         return logits, loss
 
+    def encode(self, idx, channel_idx=None):
+        """
+        Returns the final transformer representations for the given tokens.
+        This function is used for computing similarity between sequences.
+        """
+        B, T = idx.size()
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        tok_emb = self.transformer.wte(idx)
+        pos_emb = self.transformer.wpe(pos)
+        if channel_idx is not None:
+            cha_emb_small = self.wce(channel_idx)
+            cha_emb_large = self.channel_proj(cha_emb_small)
+            cha_emb_scaled = self.channel_scale * cha_emb_large
+            x = tok_emb + pos_emb + cha_emb_scaled
+        else:
+            x = tok_emb + pos_emb
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        return x
+
     def configure_optimizer(self, weight_decay, learning_rate, device):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
@@ -177,69 +203,11 @@ class GPT(nn.Module):
         )
         return optimizer
 
-    def encode(self, idx, channel_idx=None):
-        """
-        Compute the final transformer representation (after ln_f) for the given tokens.
-        Returns a tensor of shape [B, T, D].
-        """
-        B, T = idx.size()
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        tok_emb = self.transformer.wte(idx)
-        pos_emb = self.transformer.wpe(pos)
-        if channel_idx is not None:
-            cha_emb_small = self.wce(channel_idx)
-            cha_emb_large = self.channel_proj(cha_emb_small)
-            cha_emb_scaled = self.channel_scale * cha_emb_large
-            x = tok_emb + pos_emb + cha_emb_scaled
-        else:
-            x = tok_emb + pos_emb
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
-        return x
 
 device = 'cpu'
 
-# === Helper function for computing completion loss (unchanged) ===
 
-def compute_similarity_loss_with_channels(
-        model,
-        prompt_tokens, prompt_channels,
-        candidate_tokens, candidate_channels,
-        device="cuda"
-):
-    """
-    Computes a similarity loss between the prompt and candidate completions.
-    The loss is defined as 1 - cosine_similarity, so a lower loss means higher similarity.
-    """
-    # Add batch dimension and move to device.
-    prompt_tokens = prompt_tokens.unsqueeze(0).to(device)  # shape: [1, L_prompt]
-    prompt_channels = prompt_channels.unsqueeze(0).to(device)
-    candidate_tokens = candidate_tokens.unsqueeze(0).to(device)  # shape: [1, L_candidate]
-    candidate_channels = candidate_channels.unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        # Get transformer representations.
-        prompt_rep = model.encode(prompt_tokens, prompt_channels)  # shape: [1, L_prompt, D]
-        candidate_rep = model.encode(candidate_tokens, candidate_channels)  # shape: [1, L_candidate, D]
-
-    # Pool the representations. (Here we simply take the mean over the token dimension.)
-    prompt_pool = prompt_rep.mean(dim=1)  # shape: [1, D]
-    candidate_pool = candidate_rep.mean(dim=1)  # shape: [1, D]
-
-    # Normalize the pooled representations.
-    prompt_pool = F.normalize(prompt_pool, p=2, dim=-1)
-    candidate_pool = F.normalize(candidate_pool, p=2, dim=-1)
-
-    # Compute cosine similarity.
-    cosine_sim = (prompt_pool * candidate_pool).sum(dim=-1)  # shape: [1]
-
-    # Define a loss so that a higher similarity gives a lower loss.
-    # (Cosine similarity is in [-1, 1], but if your representations are “good” it should be closer to 1.)
-    loss = 1 - cosine_sim
-    return loss.item()
-
-
+# === Original completion loss function (unused in this variant) ===
 def compute_completion_loss_with_channels(
         model,
         prompt_tokens, prompt_channels,
@@ -269,22 +237,74 @@ def compute_completion_loss_with_channels(
     avg_loss = sum_loss / (num_completion_tokens + 1e-9)
     return avg_loss.item()
 
-# === New multi-class few-shot force choice evaluation function with confusion matrix ===
+
+# === New Attention-Based Similarity Loss Function ===
+def compute_similarity_loss_with_attention(
+        model,
+        prompt_tokens, prompt_channels,
+        candidate_tokens, candidate_channels,
+        device="cuda"
+):
+    """
+    Computes a similarity loss between the prompt and candidate using an attention-based approach.
+    The procedure is:
+      1. Encode prompt and candidate to obtain token-level representations.
+      2. Normalize the representations.
+      3. Compute a similarity matrix between candidate and prompt tokens.
+      4. For each candidate token, take the maximum similarity to any prompt token,
+         and vice versa; then average these scores.
+      5. Define the loss as 1 - (average similarity).
+    """
+    # Prepare inputs (add batch dimension)
+    prompt_tokens = prompt_tokens.unsqueeze(0).to(device)  # shape: [1, L_prompt]
+    prompt_channels = prompt_channels.unsqueeze(0).to(device)
+    candidate_tokens = candidate_tokens.unsqueeze(0).to(device)  # shape: [1, L_candidate]
+    candidate_channels = candidate_channels.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        # Get token-level representations: [1, L, D]
+        prompt_rep = model.encode(prompt_tokens, prompt_channels)
+        candidate_rep = model.encode(candidate_tokens, candidate_channels)
+
+    # Normalize along the embedding dimension (D)
+    prompt_rep = F.normalize(prompt_rep, p=2, dim=-1)  # [1, L_prompt, D]
+    candidate_rep = F.normalize(candidate_rep, p=2, dim=-1)  # [1, L_candidate, D]
+
+    # Compute similarity matrix (cosine similarity) between candidate and prompt tokens.
+    # Shape: [1, L_candidate, L_prompt]
+    sim_matrix = torch.matmul(candidate_rep, prompt_rep.transpose(1, 2))
+
+    # For each candidate token, get maximum similarity with any prompt token.
+    candidate_to_prompt_sim = sim_matrix.max(dim=-1)[0]  # shape: [1, L_candidate]
+    candidate_sim_avg = candidate_to_prompt_sim.mean(dim=-1)  # shape: [1]
+
+    # For each prompt token, get maximum similarity with any candidate token.
+    prompt_to_candidate_sim = sim_matrix.max(dim=1)[0]  # shape: [1, L_prompt]
+    prompt_sim_avg = prompt_to_candidate_sim.mean(dim=-1)  # shape: [1]
+
+    # Average both directions to obtain a symmetric similarity score.
+    similarity_score = (candidate_sim_avg + prompt_sim_avg) / 2.0  # shape: [1]
+
+    # Define the loss: lower loss for higher similarity.
+    loss = 1 - similarity_score
+    return loss.item()
+
+
+# === Modified multi-class few-shot force choice evaluation function ===
 def evaluate_multiclass_with_channels(
-        model,           # the trained model
-        shard_paths,     # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
+        model,  # the trained model
+        shard_paths,  # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
         device="cuda",
-        segment_size=512,   # candidate completion length remains 512 tokens
+        segment_size=512,  # candidate completion length remains 512 tokens
         prompt_stride=256
 ):
     """
     For each shard in shard_paths, we perform an evaluation block where:
       - We sample a few-shot prompt from the shard consisting of n shots (n default=4) of 128 consecutive tokens each.
-        The start of each shot is forced to be a multiple of 256.
       - We choose a correct continuation (from the same shard) that does not overlap any of the prompt shots.
       - For every other shard, we sample one candidate continuation.
-      - We compute the average cross-entropy loss for each candidate given the prompt.
-      - The candidate with the lowest loss is considered the model's prediction.
+      - We compute an attention-based similarity loss for each candidate given the prompt.
+      - The candidate with the lowest loss (i.e. highest similarity) is considered the model's prediction.
     We record the ground truth (the prompt's shard) and the predicted candidate's shard
     in order to build a confusion matrix.
     Returns overall accuracy and prints the confusion matrix.
@@ -320,12 +340,11 @@ def evaluate_multiclass_with_channels(
             block_index += 1
             print(f"\n[Shard {i}] Processing block {block_index} at pos={pos} ...")
             # Few-shot prompt parameters.
-            few_shot_n = 4     # number of shots (default 4)
-            shot_len = 128     # each shot is 128 tokens long
+            few_shot_n = 4  # number of shots (default 4)
+            shot_len = 128  # each shot is 128 tokens long
             total_prompt_len = few_shot_n * shot_len  # total prompt length = 512 tokens
 
             # Determine valid starting positions for shots.
-            # (We require the start to be a multiple of 256 so that, e.g., 0, 256, 512, ... are valid.)
             possible_shot_starts = list(range(0, len_i - shot_len + 1, 256))
             if len(possible_shot_starts) < few_shot_n:
                 print(f"Not enough tokens in shard {i} for a few-shot prompt. Skipping...")
@@ -334,8 +353,8 @@ def evaluate_multiclass_with_channels(
             chosen_shot_starts = random.sample(possible_shot_starts, few_shot_n)
             chosen_shot_starts.sort()
             # Construct the few-shot prompt by concatenating the shots.
-            prompt_tokens = torch.cat([ tokens_i[start: start + shot_len] for start in chosen_shot_starts ], dim=0)
-            prompt_chans  = torch.cat([ chans_i[start: start + shot_len] for start in chosen_shot_starts ], dim=0)
+            prompt_tokens = torch.cat([tokens_i[start: start + shot_len] for start in chosen_shot_starts], dim=0)
+            prompt_chans = torch.cat([chans_i[start: start + shot_len] for start in chosen_shot_starts], dim=0)
             # For candidate selection, define the prompt intervals.
             prompt_intervals = [(start, start + shot_len) for start in chosen_shot_starts]
 
@@ -343,25 +362,23 @@ def evaluate_multiclass_with_channels(
             def candidate_non_overlapping(c, candidate_len, intervals):
                 candidate_end = c + candidate_len
                 for (s, e) in intervals:
-                    # Overlap if candidate starts before the end of a prompt shot
-                    # and candidate ends after the start of that prompt shot.
                     if c < e and candidate_end > s:
                         return False
                 return True
 
             # For the correct candidate (from the same shard), pick a 512-token block that does not overlap any prompt shot.
             all_candidates = list(range(0, len_i - segment_size + 1, prompt_stride))
-            correct_offset_candidates = [c for c in all_candidates if candidate_non_overlapping(c, segment_size, prompt_intervals)]
+            correct_offset_candidates = [c for c in all_candidates if
+                                         candidate_non_overlapping(c, segment_size, prompt_intervals)]
             if not correct_offset_candidates:
                 print(f"No valid correct candidate offsets in shard {i} for the few-shot prompt. Skipping block...")
                 pos += 2 * segment_size
                 continue
             correct_offset = random.choice(correct_offset_candidates)
-            correct_tokens = tokens_i[correct_offset : correct_offset + segment_size]
-            correct_chans  = chans_i[correct_offset : correct_offset + segment_size]
+            correct_tokens = tokens_i[correct_offset: correct_offset + segment_size]
+            correct_chans = chans_i[correct_offset: correct_offset + segment_size]
 
             # Build the list of candidate completions:
-            # First candidate: correct (from the same shard)
             candidate_info = []
             candidate_info.append({
                 'tokens': correct_tokens,
@@ -375,13 +392,13 @@ def evaluate_multiclass_with_channels(
                     continue
                 len_j = other_shard['length']
                 tokens_j = other_shard['tokens']
-                chans_j  = other_shard['channels']
+                chans_j = other_shard['channels']
                 if len_j < segment_size:
                     print(f"Shard {j} is too short. Skipping candidate from this shard.")
                     continue
                 wrong_offset = random.randint(0, len_j - segment_size)
-                wrong_tokens = tokens_j[wrong_offset : wrong_offset + segment_size]
-                wrong_chans  = chans_j[wrong_offset : wrong_offset + segment_size]
+                wrong_tokens = tokens_j[wrong_offset: wrong_offset + segment_size]
+                wrong_chans = chans_j[wrong_offset: wrong_offset + segment_size]
                 candidate_info.append({
                     'tokens': wrong_tokens,
                     'channels': wrong_chans,
@@ -389,17 +406,17 @@ def evaluate_multiclass_with_channels(
                     'source_shard': j
                 })
 
-            # Evaluate each candidate using the helper function.
+            # Evaluate each candidate using the new attention-based similarity function.
             candidate_losses = []
             for candidate in candidate_info:
-                loss = compute_similarity_loss_with_channels(
+                loss = compute_similarity_loss_with_attention(
                     model,
                     prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
                     device=device
                 )
                 candidate_losses.append(loss)
-            # Find the candidate with the lowest loss.
+            # Find the candidate with the lowest loss (i.e. highest similarity).
             min_loss_index = np.argmin(candidate_losses)
             chosen = candidate_info[min_loss_index]
             predicted_shard = chosen['source_shard']
@@ -410,8 +427,9 @@ def evaluate_multiclass_with_channels(
                 correct_count += 1
             total_evals += 1
 
-            print(f"[Shard {i}] Block {block_index} losses: {candidate_losses}")
-            print(f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
+            print(f"[Shard {i}] Block {block_index} similarity losses: {candidate_losses}")
+            print(
+                f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
             print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
             pos += 2 * segment_size  # advance the block position
 
@@ -431,8 +449,9 @@ def evaluate_multiclass_with_channels(
         print(f"Shd{i} : {row_counts}")
     return accuracy
 
+
 # === Main script ===
-d = 'cpu'
+d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 if small_model:
@@ -452,7 +471,7 @@ model.eval()
 accs = []
 epochs = 10
 for epoch in range(epochs):
-    print(f"\n=== Epoch {epoch+1}/{epochs} ===")
+    print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
     acc = evaluate_multiclass_with_channels(
         model=model,
         shard_paths=[
