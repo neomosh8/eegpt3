@@ -484,9 +484,9 @@ device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
 # Optionally, load a pretrained checkpoint here if desired.
-# checkpoint = torch.load('log/model_34500.pt', map_location=device)
-# fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
-# model.load_state_dict(fixed_sd, strict=False)
+checkpoint = torch.load('log/model_34500.pt', map_location=device)
+fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
+model.load_state_dict(fixed_sd, strict=False)
 
 optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d)
 
