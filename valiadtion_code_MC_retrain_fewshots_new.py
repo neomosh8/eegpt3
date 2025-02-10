@@ -491,9 +491,9 @@ model.load_state_dict(fixed_sd, strict=False)
 optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d)
 
 shard_paths = [
-    "output_MEMA/shards/shard_train_0.pt",
-    "output_MEMA/shards/shard_train_1.pt",
-    "output_MEMA/shards/shard_train_2.pt"
+    "output_EMOTIV/shards/shard_train_0.pt",
+    "output_EMOTIV/shards/shard_train_1.pt",
+    "output_EMOTIV/shards/shard_train_2.pt"
 ]
 
 print("\n=== Starting Training ===")
@@ -505,12 +505,12 @@ eval_acc = evaluate_multiclass_with_similarity(model, shard_paths, device=d,
                                                segment_size=512, prompt_stride=256, shot_len=128)
 print(f"Final Evaluation Accuracy: {eval_acc * 100:.2f}%")
 # Define the new shard paths for evaluation.
-shard_paths = [
-    "output_EMOTIV/shards/shard_train_0.pt",
-    "output_EMOTIV/shards/shard_train_1.pt",
-    "output_EMOTIV/shards/shard_train_2.pt"
-]
 
+shard_paths = [
+    "output_MEMA/shards/shard_train_0.pt",
+    "output_MEMA/shards/shard_train_1.pt",
+    "output_MEMA/shards/shard_train_2.pt"
+]
 # Make sure the model is in evaluation mode.
 model.eval()
 
