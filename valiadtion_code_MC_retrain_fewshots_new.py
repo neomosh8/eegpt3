@@ -221,7 +221,8 @@ class GPT(nn.Module):
 def load_shards(shard_paths):
     shards = []
     for path in shard_paths:
-        shard = torch.load(path, map_location="cpu")  # Expected keys: 'tokens', 'channels'
+        # Warning: if you don't control the file, consider setting weights_only=True.
+        shard = torch.load(path, map_location="cpu")
         tokens = shard['tokens'].cpu()
         channels = shard['channels'].cpu()
         shards.append({
@@ -258,10 +259,13 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     prompt_channels_shots = prompt_channels.view(few_shot_n, shot_len)
 
     shot_embeddings = []
+    # If model is wrapped in DataParallel, get the underlying module.
+    model_to_use = model.module if hasattr(model, "module") else model
+
     for i in range(few_shot_n):
         shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
         shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
-        rep = model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
+        rep = model_to_use.encode(shot_tok, shot_cha)  # [1, shot_len, D]
         pooled = rep.mean(dim=1)  # [1, D]
         shot_embeddings.append(pooled)
     shot_embeddings = torch.cat(shot_embeddings, dim=0)  # [few_shot_n, D]
@@ -271,8 +275,8 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     candidate_tokens_batch = torch.stack(candidate_tokens_list, dim=0).to(device)  # [num_candidates, seg_len]
     candidate_channels_batch = torch.stack(candidate_channels_list, dim=0).to(device)  # [num_candidates, seg_len]
 
-    cand_rep = model.encode(candidate_tokens_batch, candidate_channels_batch)  # [num_candidates, seg_len, D]
-    cand_pool = cand_rep.mean(dim=1)  # [num_candidates, D]
+    rep_cand = model_to_use.encode(candidate_tokens_batch, candidate_channels_batch)  # [num_candidates, seg_len, D]
+    cand_pool = rep_cand.mean(dim=1)  # [num_candidates, D]
     cand_pool = F.normalize(cand_pool, p=2, dim=-1)
 
     # Compute similarity matrix between each shot and each candidate.
@@ -362,7 +366,6 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                     candidate_channels_list.append(wrong_chans)
 
                 optimizer.zero_grad()
-                # Vectorized candidate similarity computation.
                 sims = compute_candidate_similarities_vectorized(model,
                                                                  prompt_tokens, prompt_chans,
                                                                  candidate_tokens_list, candidate_channels_list,
@@ -371,7 +374,6 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 loss.backward()
                 optimizer.step()
 
-                # For training accuracy, check whether the highest similarity is for candidate 0.
                 pred = torch.argmax(sims).item()
                 correct = 1 if pred == 0 else 0
 
@@ -497,7 +499,7 @@ d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
-# Optionally load your pretrained model to leverage unsupervised training:
+# Optionally load your pretrained model to leverage unsupervised training.
 pretrained_path = 'log/model_15000.pt'
 if os.path.exists(pretrained_path):
     checkpoint = torch.load(pretrained_path, map_location=device)
@@ -511,6 +513,7 @@ if torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
 model.to(device)
 
+# When using DataParallel, call configure_optimizer on the underlying module.
 optimizer = model.module.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d) if isinstance(model,
                                                                                                            nn.DataParallel) else model.configure_optimizer(
     weight_decay=0.1, learning_rate=1e-3, device=d)
