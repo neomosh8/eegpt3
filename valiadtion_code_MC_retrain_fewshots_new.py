@@ -16,7 +16,7 @@ import torch.utils.checkpoint  # for gradient checkpointing
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
 # Set small_model flag as desired:
-small_model = False  # When False, use large model config
+small_model = True  # When False, use large model config
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
@@ -484,7 +484,7 @@ device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
 # Optionally, load a pretrained checkpoint here if desired.
-checkpoint = torch.load('log/model_34500.pt', map_location=device)
+checkpoint = torch.load('log/model_15000.pt', map_location=device)
 fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
 model.load_state_dict(fixed_sd, strict=False)
 
