@@ -444,6 +444,9 @@ def evaluate_multiclass_with_similarity(
             print(
                 f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
             print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
+            running_accuracy = correct_count / total_evals if total_evals > 0 else 0.0
+            print(f"Running accuracy so far: {running_accuracy*100:.2f}% ({correct_count}/{total_evals})")
+
             pos += 2 * segment_size
 
     if total_evals == 0:
