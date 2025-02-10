@@ -14,7 +14,7 @@ from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
-small_model = True  # set True for a very small model during training
+small_model = False  # set True for a very small model during training
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
