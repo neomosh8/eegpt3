@@ -488,7 +488,7 @@ checkpoint = torch.load('log/model_15000.pt', map_location=device)
 fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
 model.load_state_dict(fixed_sd, strict=False)
 
-optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-4, device=d)
+optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d)
 
 shard_paths = [
     "output_MEMA/shards/shard_train_0.pt",
