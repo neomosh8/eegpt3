@@ -503,9 +503,27 @@ pretrained_path = 'log/model_15000.pt'
 if os.path.exists(pretrained_path):
     checkpoint = torch.load(pretrained_path, map_location=device)
     fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
-    model.load_state_dict(fixed_sd, strict=False)
-    print("Pretrained model loaded.")
+    print("Pretrained model state_dict loaded.")
 
+    # Get the current model's state_dict.
+    model_sd = model.state_dict()
+    # Create a new state_dict to load: only include keys where the shapes match.
+    new_sd = {}
+    for key in fixed_sd:
+        if key in model_sd:
+            if model_sd[key].shape == fixed_sd[key].shape:
+                new_sd[key] = fixed_sd[key]
+            else:
+                print(
+                    f"Skipping parameter {key}: checkpoint shape {fixed_sd[key].shape} vs model shape {model_sd[key].shape}")
+        else:
+            print(f"Parameter {key} not found in model state_dict.")
+
+    # Now load the new state dict into the model (strict=False allows missing parameters).
+    model.load_state_dict(new_sd, strict=False)
+    print("Pretrained weights loaded (only matching parameters).")
+else:
+    print("Pretrained checkpoint not found. Training from scratch.")
 # Use DataParallel if multiple GPUs are available.
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs for training.")
