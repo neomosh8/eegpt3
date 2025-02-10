@@ -488,7 +488,7 @@ checkpoint = torch.load('log/model_15000.pt', map_location=device)
 fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
 model.load_state_dict(fixed_sd, strict=False)
 
-optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d)
+optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-4, device=d)
 
 shard_paths = [
     "output_MEMA/shards/shard_train_0.pt",
@@ -498,9 +498,30 @@ shard_paths = [
 
 print("\n=== Starting Training ===")
 train_on_shards(model, shard_paths, optimizer, device=d,
-                segment_size=512, shot_len=128, prompt_stride=256, num_epochs=3)
+                segment_size=512, shot_len=128, prompt_stride=256, num_epochs=5)
 
 print("\n=== Evaluating the Trained Model ===")
 eval_acc = evaluate_multiclass_with_similarity(model, shard_paths, device=d,
                                                segment_size=512, prompt_stride=256, shot_len=128)
 print(f"Final Evaluation Accuracy: {eval_acc * 100:.2f}%")
+# Define the new shard paths for evaluation.
+shard_paths = [
+    "output_EMOTIV/shards/shard_train_0.pt",
+    "output_EMOTIV/shards/shard_train_1.pt",
+    "output_EMOTIV/shards/shard_train_2.pt"
+]
+
+# Make sure the model is in evaluation mode.
+model.eval()
+
+# Call the evaluation function.
+eval_acc = evaluate_multiclass_with_similarity(
+    model=model,
+    shard_paths=shard_paths,
+    device=device,
+    segment_size=512,    # candidate completion length (in tokens)
+    prompt_stride=256,   # stride for candidate sampling
+    shot_len=128         # length of each prompt shot
+)
+
+print(f"Final Evaluation Accuracy: {eval_acc*100:.2f}%")
