@@ -451,7 +451,7 @@ def evaluate_multiclass_with_channels(
 
 
 # === Main script ===
-d = 'cuda'
+d = 'cpu'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 if small_model:
