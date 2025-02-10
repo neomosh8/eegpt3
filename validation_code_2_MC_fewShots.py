@@ -490,9 +490,9 @@ for epoch in range(epochs):
     acc = evaluate_multiclass_with_similarity(
         model=model,
         shard_paths=[
-            "output_MEMA/shards/shard_train_0.pt",
-            "output_MEMA/shards/shard_train_1.pt",
-            "output_MEMA/shards/shard_train_2.pt"
+            "output_EMOTIV/shards/shard_train_0.pt",
+            "output_EMOTIV/shards/shard_train_1.pt",
+            "output_EMOTIV/shards/shard_train_2.pt"
         ],
         device=d,
         segment_size=512,
