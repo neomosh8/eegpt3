@@ -17,11 +17,11 @@ from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 # -----------------------------
 # Configuration Flags and Hyperparameters
 # -----------------------------
-small_model = True  # Set to True for a small model, False for a large model.
-freeze_pretrained = False  # Set to True to freeze all layers except the similarity head.
-margin_value = 0.2         # Margin used in the loss function.
-lr_similarity = 5e-4       # Learning rate for the similarity head.
-lr_other = 1e-3            # Learning rate for all other parameters.
+small_model = True        # Set to True for a small model, False for a large model.
+freeze_pretrained = False # Set to True to freeze all layers except the similarity head.
+margin_value = 0.2        # Margin used in the loss function.
+lr_similarity = 5e-4      # Learning rate for the similarity head.
+lr_other = 1e-3           # Learning rate for all other parameters.
 
 # -----------------------------
 # Tokenizer Loading
@@ -105,7 +105,7 @@ class GPTConfig:
 
 
 # -----------------------------
-# Learned Similarity Head
+# Original Bilinear Similarity
 # -----------------------------
 class BilinearSimilarity(nn.Module):
     def __init__(self, embed_dim):
@@ -117,8 +117,27 @@ class BilinearSimilarity(nn.Module):
         nn.init.xavier_uniform_(self.W)
 
     def forward(self, u, v):
-        # u and v are expected to be [B, D] vectors.
+        # u and v are [B, D] vectors.
         return torch.sum((u @ self.W) * v, dim=-1)
+
+
+# -----------------------------
+# Scaled (Temperature) Similarity Head
+# -----------------------------
+class ScaledBilinearSimilarity(nn.Module):
+    def __init__(self, embed_dim, init_scale=10.0):
+        """
+        Computes a scaled cosine similarity.
+        :param embed_dim: Dimensionality of the embeddings.
+        :param init_scale: Initial scaling factor (temperature). A higher value can magnify small differences.
+        """
+        super().__init__()
+        self.bilinear = BilinearSimilarity(embed_dim)
+        self.scale = nn.Parameter(torch.tensor(init_scale, dtype=torch.float))
+
+    def forward(self, u, v):
+        raw_sim = self.bilinear(u, v)  # This computes a cosine-like similarity if u and v are normalized.
+        return self.scale * raw_sim
 
 
 # -----------------------------
@@ -139,9 +158,10 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Weight tying: share weights between wte and lm_head.
+        # Weight tying: share the embedding matrix between input and output.
         self.transformer.wte.weight = self.lm_head.weight
-        self.similarity_head = BilinearSimilarity(config.n_embd)
+        # Replace the similarity head with our scaled (temperature) version.
+        self.similarity_head = ScaledBilinearSimilarity(config.n_embd, init_scale=10.0)
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -200,7 +220,7 @@ class GPT(nn.Module):
         return x
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
-        # Separate out the similarity head parameters so we can assign a different learning rate.
+        # Separate out similarity head parameters so we can assign a different learning rate.
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
         nodecay_params = []
@@ -232,7 +252,7 @@ class GPT(nn.Module):
 def load_shards(shard_paths):
     shards = []
     for path in shard_paths:
-        # Note: if you don't control the file, consider using weights_only=True.
+        # If you don't control the file, consider setting weights_only=True.
         shard = torch.load(path, map_location="cpu")
         tokens = shard['tokens'].cpu()
         channels = shard['channels'].cpu()
@@ -265,7 +285,7 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     Returns a tensor of shape [num_candidates] with similarity scores.
     """
     few_shot_n = prompt_tokens.size(0) // shot_len
-    # Reshape prompt tokens and channels: shape [few_shot_n, shot_len]
+    # Reshape prompt tokens and channels: [few_shot_n, shot_len]
     prompt_tokens_shots = prompt_tokens.view(few_shot_n, shot_len)
     prompt_channels_shots = prompt_channels.view(few_shot_n, shot_len)
 
@@ -320,8 +340,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
     """
     Fine-tune the pretrained model on prompt shots with positive and negative candidates.
     Uses a margin loss over candidate similarity scores.
-    Additionally, prints out the positive similarity (s_pos) and negative similarities (s_negs)
-    every 50 steps for inspection.
+    Also prints the positive (s_pos) and negative (s_negs) similarity scores every 50 steps.
     """
     model.train()
     shards = load_shards(shard_paths)
@@ -359,7 +378,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 correct_tokens = tokens_i[correct_offset: correct_offset + segment_size]
                 correct_chans = chans_i[correct_offset: correct_offset + segment_size]
 
-                # Candidate 0 is the correct one; sample negatives from other shards.
+                # Candidate 0 is correct; sample negatives from other shards.
                 candidate_tokens_list = [correct_tokens]
                 candidate_channels_list = [correct_chans]
                 for j, other_shard in enumerate(shards):
@@ -385,7 +404,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 loss.backward()
                 optimizer.step()
 
-                # Inspect similarity scores: positive vs. negatives.
+                # For inspection: print s_pos and s_negs.
                 s_pos = sims[0].item()
                 s_negs = sims[1:].tolist()
 
@@ -493,7 +512,8 @@ def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
 
             running_accuracy = correct_count / total_evals * 100
             print(f"[Shard {i}] Block {block_index}: Similarity Scores = {[f'{s.item():.4f}' for s in sims]}")
-            print(f" -> Predicted candidate from shard {predicted_shard} (label: {chosen['label']}). Running Acc = {running_accuracy:.2f}% ({correct_count}/{total_evals})")
+            print(f" -> Predicted candidate from shard {predicted_shard} (label: {chosen['label']}). "
+                  f"Running Acc = {running_accuracy:.2f}% ({correct_count}/{total_evals})")
             pos += 2 * segment_size
 
     final_acc = correct_count / total_evals if total_evals > 0 else 0.0
@@ -522,7 +542,7 @@ if os.path.exists(pretrained_path):
     model.load_state_dict(fixed_sd, strict=False)
     print("Pretrained model loaded.")
 
-# Optionally freeze pretrained layers except the similarity head.
+# Optionally freeze pretrained layers except for the similarity head.
 if freeze_pretrained:
     print("Freezing all layers except similarity head.")
     for name, param in model.named_parameters():
