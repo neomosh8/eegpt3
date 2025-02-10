@@ -16,7 +16,7 @@ from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
 # Set this flag as desired.
 # When False, you get a "large" model configuration (e.g. n_embd=1280) which may not fully match your pretrained checkpoint.
-small_model = False
+small_model = True
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
