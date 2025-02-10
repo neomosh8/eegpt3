@@ -14,8 +14,7 @@ from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
-# Set this flag as desired.
-# When False, you get a "large" model configuration (e.g. n_embd=1280) which may not fully match your pretrained checkpoint.
+# Set small_model flag as desired (set to False for large model)
 small_model = True
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
@@ -108,12 +107,12 @@ class BilinearSimilarity(nn.Module):
         nn.init.xavier_uniform_(self.W)
 
     def forward(self, u, v):
-        # u and v are assumed to be [B, D] vectors.
+        # u and v are [B, D] vectors.
         return torch.sum((u @ self.W) * v, dim=-1)
 
 
 # -----------------------------
-# GPT Model Definition (Without gradient checkpointing or AMP)
+# GPT Model Definition (No Gradient Checkpointing)
 # -----------------------------
 class GPT(nn.Module):
     def __init__(self, config):
@@ -130,8 +129,7 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Weight tying.
-        self.transformer.wte.weight = self.lm_head.weight
+        self.transformer.wte.weight = self.lm_head.weight  # weight tying
         self.similarity_head = BilinearSimilarity(config.n_embd)
         self.apply(self._init_weights)
 
@@ -172,6 +170,7 @@ class GPT(nn.Module):
         """
         Returns the final transformer representations (after ln_f) for a given sequence.
         Shape: [B, T, D]
+        (No gradient checkpointing is applied here.)
         """
         B, T = idx.size()
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
@@ -217,13 +216,6 @@ class GPT(nn.Module):
 
 
 # -----------------------------
-# Helper: If model is wrapped in DataParallel, return underlying module.
-# -----------------------------
-def get_model(model):
-    return model.module if isinstance(model, nn.DataParallel) else model
-
-
-# -----------------------------
 # Data & Candidate Sampling Helpers
 # -----------------------------
 def load_shards(shard_paths):
@@ -260,7 +252,6 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     compute similarity scores for all candidates in a vectorized manner.
     Returns a tensor of shape [num_candidates] with similarity scores.
     """
-    actual_model = get_model(model)
     few_shot_n = prompt_tokens.size(0) // shot_len
     # Reshape prompt tokens and channels: shape [few_shot_n, shot_len]
     prompt_tokens_shots = prompt_tokens.view(few_shot_n, shot_len)
@@ -270,7 +261,7 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     for i in range(few_shot_n):
         shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
         shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
-        rep = actual_model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
+        rep = model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
         pooled = rep.mean(dim=1)  # [1, D]
         shot_embeddings.append(pooled)
     shot_embeddings = torch.cat(shot_embeddings, dim=0)  # [few_shot_n, D]
@@ -280,13 +271,13 @@ def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_chann
     candidate_tokens_batch = torch.stack(candidate_tokens_list, dim=0).to(device)  # [num_candidates, seg_len]
     candidate_channels_batch = torch.stack(candidate_channels_list, dim=0).to(device)  # [num_candidates, seg_len]
 
-    cand_rep = actual_model.encode(candidate_tokens_batch, candidate_channels_batch)  # [num_candidates, seg_len, D]
+    cand_rep = model.encode(candidate_tokens_batch, candidate_channels_batch)  # [num_candidates, seg_len, D]
     cand_pool = cand_rep.mean(dim=1)  # [num_candidates, D]
     cand_pool = F.normalize(cand_pool, p=2, dim=-1)
 
     # Compute similarity matrix between each shot and each candidate.
     sims = torch.matmul(shot_embeddings, cand_pool.transpose(0, 1))  # [few_shot_n, num_candidates]
-    # Aggregate similarities across shots (using mean).
+    # Aggregate similarity across shots (using mean).
     candidate_scores = sims.mean(dim=0)  # [num_candidates]
     return candidate_scores
 
@@ -353,7 +344,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 correct_tokens = tokens_i[correct_offset: correct_offset + segment_size]
                 correct_chans = chans_i[correct_offset: correct_offset + segment_size]
 
-                # Candidate 0 is the correct one; then sample negatives from other shards.
+                # Candidate 0 is correct; then sample negatives from other shards.
                 candidate_tokens_list = [correct_tokens]
                 candidate_channels_list = [correct_chans]
                 for j, other_shard in enumerate(shards):
@@ -371,6 +362,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                     candidate_channels_list.append(wrong_chans)
 
                 optimizer.zero_grad()
+                # Vectorized candidate similarity computation.
                 sims = compute_candidate_similarities_vectorized(model,
                                                                  prompt_tokens, prompt_chans,
                                                                  candidate_tokens_list, candidate_channels_list,
@@ -379,6 +371,7 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 loss.backward()
                 optimizer.step()
 
+                # For training accuracy, check whether the highest similarity is for candidate 0.
                 pred = torch.argmax(sims).item()
                 correct = 1 if pred == 0 else 0
 
@@ -498,41 +491,26 @@ def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
 
 
 # -----------------------------
-# Main Script: Pretrained Loading, Training, and Evaluation
+# Main Script: Loading Pretrained, Training, and Evaluation
 # -----------------------------
 d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
-# Optionally load your pretrained checkpoint to leverage unsupervised training:
+# Optionally load your pretrained model to leverage unsupervised training:
 pretrained_path = 'log/model_15000.pt'
 if os.path.exists(pretrained_path):
     checkpoint = torch.load(pretrained_path, map_location=device)
     fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
-    print("Pretrained model state_dict loaded.")
-    model_sd = model.state_dict()
-    new_sd = {}
-    for key in fixed_sd:
-        if key in model_sd:
-            if model_sd[key].shape == fixed_sd[key].shape:
-                new_sd[key] = fixed_sd[key]
-            else:
-                print(
-                    f"Skipping parameter {key}: checkpoint shape {fixed_sd[key].shape} vs model shape {model_sd[key].shape}")
-        else:
-            print(f"Parameter {key} not found in model state_dict.")
-    model.load_state_dict(new_sd, strict=False)
-    print("Pretrained weights loaded (only matching parameters).")
-else:
-    print("Pretrained checkpoint not found. Training from scratch.")
+    model.load_state_dict(fixed_sd, strict=False)
+    print("Pretrained model loaded.")
 
-# Use DataParallel if more than one GPU is available.
+# Use DataParallel if multiple GPUs are available.
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs for training.")
     model = nn.DataParallel(model)
 model.to(device)
 
-# Get optimizer from the underlying module if using DataParallel.
 optimizer = model.module.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d) if isinstance(model,
                                                                                                            nn.DataParallel) else model.configure_optimizer(
     weight_decay=0.1, learning_rate=1e-3, device=d)
