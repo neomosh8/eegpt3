@@ -498,7 +498,8 @@ device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
 # Optionally load your pretrained model to leverage unsupervised training:
-pretrained_path = 'log/model_34500.pt'
+pretrained_path = 'log/model_15000.pt'
+
 if os.path.exists(pretrained_path):
     checkpoint = torch.load(pretrained_path, map_location=device)
     fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
