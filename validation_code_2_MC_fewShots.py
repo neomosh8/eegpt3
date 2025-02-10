@@ -209,60 +209,6 @@ def compute_completion_loss_with_channels(
     avg_loss = sum_loss / (num_completion_tokens + 1e-9)
     return avg_loss.item()
 
-def compute_similarity_loss_with_channels(
-        model,
-        prompt_tokens, prompt_channels,
-        completion_tokens, completion_channels,
-        device="cuda"
-):
-    """
-    Computes a loss based on the cosine similarity between
-    a pooled representation of the prompt and candidate completion.
-    A lower loss indicates that the candidate shares similar features with the prompt.
-    """
-    # 1) Concatenate prompt and candidate tokens (and channels)
-    full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
-    full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
-    total_len = full_tokens.size(1)
-    prompt_len = prompt_tokens.size(0)
-    candidate_len = completion_tokens.size(0)
-
-    # 2) Create positional indices and obtain token and channel embeddings.
-    pos = torch.arange(0, total_len, device=device).unsqueeze(0)
-    tok_emb = model.transformer.wte(full_tokens)
-    pos_emb = model.transformer.wpe(pos)
-    if full_channels is not None:
-        # Process channels the same as in the forward() method.
-        cha_emb_small = model.wce(full_channels)
-        cha_emb_large = model.channel_proj(cha_emb_small)
-        cha_emb_scaled = model.channel_scale * cha_emb_large
-        x = tok_emb + pos_emb + cha_emb_scaled
-    else:
-        x = tok_emb + pos_emb
-
-    # 3) Run through transformer blocks and final layer norm.
-    for block in model.transformer.h:
-        x = block(x)
-    x = model.transformer.ln_f(x)  # shape: [B, total_len, n_embd]
-
-    # 4) Pool representations:
-    #    For simplicity, we use mean pooling over the tokens in each segment.
-    prompt_rep = x[:, :prompt_len, :].mean(dim=1)       # shape: [B, n_embd]
-    candidate_rep = x[:, prompt_len:, :].mean(dim=1)       # shape: [B, n_embd]
-
-    # 5) Normalize embeddings to use cosine similarity.
-    prompt_rep = F.normalize(prompt_rep, p=2, dim=-1)
-    candidate_rep = F.normalize(candidate_rep, p=2, dim=-1)
-
-    # 6) Compute cosine similarity. Higher similarity means more similar.
-    cosine_sim = (prompt_rep * candidate_rep).sum(dim=-1)  # shape: [B]
-
-    # 7) Define the loss. We want cosine similarity to be as close to 1 as possible.
-    #    Loss = 1 - cosine similarity.
-    loss = 1 - cosine_sim  # Lower loss for more similar representations
-
-    return loss.mean()
-
 # === New multi-class few-shot force choice evaluation function with confusion matrix ===
 def evaluate_multiclass_with_channels(
         model,           # the trained model
@@ -386,7 +332,7 @@ def evaluate_multiclass_with_channels(
             # Evaluate each candidate using the helper function.
             candidate_losses = []
             for candidate in candidate_info:
-                loss = compute_similarity_loss_with_channels(
+                loss = compute_completion_loss_with_channels(
                     model,
                     prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
