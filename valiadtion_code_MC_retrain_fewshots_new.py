@@ -11,12 +11,11 @@ import os
 from torch.nn import functional as F
 import matplotlib.pyplot as plt
 from torch import nn
-import torch.utils.checkpoint  # for gradient checkpointing
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
-# Set small_model flag as desired:
-small_model = True  # When False, use large model config
+# Set small_model flag as desired (set to False for large model)
+small_model = False
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
@@ -85,7 +84,7 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 6460
-    # Use a small or large model configuration based on the flag.
+    # Use a small or large configuration
     n_layer: int = 12 if small_model else 36  # number of layers
     n_head: int = 12 if small_model else 20  # number of heads
     n_embd: int = 768 if small_model else 1280  # embedding dimension
@@ -113,7 +112,7 @@ class BilinearSimilarity(nn.Module):
 
 
 # -----------------------------
-# GPT Model Definition with Checkpointing in encode()
+# GPT Model Definition (No Gradient Checkpointing)
 # -----------------------------
 class GPT(nn.Module):
     def __init__(self, config):
@@ -130,8 +129,7 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Weight tying.
-        self.transformer.wte.weight = self.lm_head.weight
+        self.transformer.wte.weight = self.lm_head.weight  # weight tying
         self.similarity_head = BilinearSimilarity(config.n_embd)
         self.apply(self._init_weights)
 
@@ -164,14 +162,15 @@ class GPT(nn.Module):
         logits = self.lm_head(x)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)),
+                                   targets.view(-1))
         return logits, loss
 
     def encode(self, idx, channel_idx=None):
         """
         Returns the final transformer representations (after ln_f) for a given sequence.
-        Uses gradient checkpointing on each block to reduce memory usage.
         Shape: [B, T, D]
+        (No gradient checkpointing is applied here.)
         """
         B, T = idx.size()
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
@@ -184,9 +183,8 @@ class GPT(nn.Module):
             x = tok_emb + pos_emb + cha_emb_scaled
         else:
             x = tok_emb + pos_emb
-        # Use checkpointing for each transformer block:
         for block in self.transformer.h:
-            x = torch.utils.checkpoint.checkpoint(block, x)
+            x = block(x)
         x = self.transformer.ln_f(x)
         return x
 
@@ -210,7 +208,10 @@ class GPT(nn.Module):
         ]
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and ('cuda' in device)
-        optimizer = torch.optim.AdamW(optim_groups, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        optimizer = torch.optim.AdamW(optim_groups,
+                                      betas=(0.9, 0.95),
+                                      eps=1e-8,
+                                      fused=use_fused)
         return optimizer
 
 
@@ -220,7 +221,7 @@ class GPT(nn.Module):
 def load_shards(shard_paths):
     shards = []
     for path in shard_paths:
-        shard = torch.load(path, map_location="cpu")  # expected to contain {'tokens': ..., 'channels': ...}
+        shard = torch.load(path, map_location="cpu")  # Expected keys: 'tokens', 'channels'
         tokens = shard['tokens'].cpu()
         channels = shard['channels'].cpu()
         shards.append({
@@ -241,65 +242,74 @@ def candidate_non_overlapping(c, candidate_len, intervals):
 
 
 # -----------------------------
-# Differentiable Candidate Similarity Computation for Training (with AMP)
+# Vectorized Candidate Similarity Computation
 # -----------------------------
-def compute_candidate_similarities(model, prompt_tokens, prompt_channels,
-                                   candidate_tokens_list, candidate_channels_list,
-                                   shot_len, device="cuda"):
+def compute_candidate_similarities_vectorized(model, prompt_tokens, prompt_channels,
+                                              candidate_tokens_list, candidate_channels_list,
+                                              shot_len, device="cuda"):
     """
     Given a prompt (concatenated shots) and a list of candidate sequences,
-    compute a similarity score for each candidate.
-
-    Processes the prompt into shots, encodes them (with AMP if available),
-    and then encodes each candidate. Similarity scores are computed using the
-    learned similarity head and aggregated (mean over shots).
+    compute similarity scores for all candidates in a vectorized manner.
     Returns a tensor of shape [num_candidates] with similarity scores.
     """
     few_shot_n = prompt_tokens.size(0) // shot_len
+    # Reshape prompt tokens and channels: shape [few_shot_n, shot_len]
     prompt_tokens_shots = prompt_tokens.view(few_shot_n, shot_len)
     prompt_channels_shots = prompt_channels.view(few_shot_n, shot_len)
 
     shot_embeddings = []
     for i in range(few_shot_n):
-        shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)
-        shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)
-        # Use autocast for mixed precision.
-        with torch.cuda.amp.autocast():
-            rep = model.encode(shot_tok, shot_cha)
-            pooled = rep.mean(dim=1)
+        shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
+        shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
+        rep = model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
+        pooled = rep.mean(dim=1)  # [1, D]
         shot_embeddings.append(pooled)
-    shot_embeddings = torch.cat(shot_embeddings, dim=0)
+    shot_embeddings = torch.cat(shot_embeddings, dim=0)  # [few_shot_n, D]
     shot_embeddings = F.normalize(shot_embeddings, p=2, dim=-1)
 
-    candidate_scores = []
-    for cand_tok, cand_cha in zip(candidate_tokens_list, candidate_channels_list):
-        cand_tok = cand_tok.unsqueeze(0).to(device)
-        cand_cha = cand_cha.unsqueeze(0).to(device)
-        with torch.cuda.amp.autocast():
-            cand_rep = model.encode(cand_tok, cand_cha)
-            cand_pool = cand_rep.mean(dim=1)
-        cand_pool = F.normalize(cand_pool, p=2, dim=-1)
-        sims = model.similarity_head(shot_embeddings, cand_pool.expand(shot_embeddings.size(0), -1))
-        candidate_score = sims.mean()  # aggregate scores (mean)
-        candidate_scores.append(candidate_score)
-    candidate_scores = torch.stack(candidate_scores)
+    # Stack candidate tensors into a batch.
+    candidate_tokens_batch = torch.stack(candidate_tokens_list, dim=0).to(device)  # [num_candidates, seg_len]
+    candidate_channels_batch = torch.stack(candidate_channels_list, dim=0).to(device)  # [num_candidates, seg_len]
+
+    cand_rep = model.encode(candidate_tokens_batch, candidate_channels_batch)  # [num_candidates, seg_len, D]
+    cand_pool = cand_rep.mean(dim=1)  # [num_candidates, D]
+    cand_pool = F.normalize(cand_pool, p=2, dim=-1)
+
+    # Compute similarity matrix between each shot and each candidate.
+    sims = torch.matmul(shot_embeddings, cand_pool.transpose(0, 1))  # [few_shot_n, num_candidates]
+    # Aggregate similarity across shots (using mean).
+    candidate_scores = sims.mean(dim=0)  # [num_candidates]
     return candidate_scores
 
 
 # -----------------------------
-# Training Function with AMP and Checkpointing
+# Margin Loss Function
+# -----------------------------
+def compute_margin_loss(candidate_scores, margin=0.2):
+    """
+    Computes a margin loss given candidate_scores (tensor of shape [num_candidates]),
+    where candidate_scores[0] is the positive (correct) candidate and the rest are negatives.
+    The loss is:
+        loss = mean( relu( margin + s_neg - s_pos ) )
+    """
+    s_pos = candidate_scores[0]  # Positive candidate score (scalar)
+    s_negs = candidate_scores[1:]  # Negative candidate scores (vector)
+    losses = F.relu(margin + s_negs - s_pos)
+    return losses.mean()
+
+
+# -----------------------------
+# Training Function (No AMP, No Checkpointing)
 # -----------------------------
 def train_on_shards(model, shard_paths, optimizer, device="cuda",
-                    segment_size=512, shot_len=128, prompt_stride=256, num_epochs=3):
+                    segment_size=512, shot_len=128, prompt_stride=256, num_epochs=5):
     """
-    Train the model on prompt shots using both correct and wrong candidates.
-    Uses mixed precision training (AMP) and processes one block at a time.
-    Prints running training loss and accuracy.
+    Fine-tune the pretrained model on prompt shots with positive and negative candidates.
+    Uses a margin loss over candidate similarity scores.
     """
     model.train()
     shards = load_shards(shard_paths)
     total_training_steps = 0
-    scaler = torch.cuda.amp.GradScaler()  # for AMP
 
     for epoch in range(num_epochs):
         print(f"\n=== Training Epoch {epoch + 1}/{num_epochs} ===")
@@ -334,9 +344,9 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                 correct_tokens = tokens_i[correct_offset: correct_offset + segment_size]
                 correct_chans = chans_i[correct_offset: correct_offset + segment_size]
 
+                # Candidate 0 is correct; then sample negatives from other shards.
                 candidate_tokens_list = [correct_tokens]
                 candidate_channels_list = [correct_chans]
-
                 for j, other_shard in enumerate(shards):
                     if j == i:
                         continue
@@ -352,17 +362,16 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
                     candidate_channels_list.append(wrong_chans)
 
                 optimizer.zero_grad()
-                with torch.cuda.amp.autocast():
-                    sims = compute_candidate_similarities(model, prompt_tokens, prompt_chans,
-                                                          candidate_tokens_list, candidate_channels_list,
-                                                          shot_len, device=device)
-                    logits = sims.unsqueeze(0)  # shape: [1, num_candidates]
-                    target = torch.tensor([0], device=device)  # correct candidate is index 0
-                    loss = F.cross_entropy(logits, target)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                # Vectorized candidate similarity computation.
+                sims = compute_candidate_similarities_vectorized(model,
+                                                                 prompt_tokens, prompt_chans,
+                                                                 candidate_tokens_list, candidate_channels_list,
+                                                                 shot_len, device=device)
+                loss = compute_margin_loss(sims, margin=0.2)
+                loss.backward()
+                optimizer.step()
 
+                # For training accuracy, check whether the highest similarity is for candidate 0.
                 pred = torch.argmax(sims).item()
                 correct = 1 if pred == 0 else 0
 
@@ -384,10 +393,14 @@ def train_on_shards(model, shard_paths, optimizer, device="cuda",
 
 
 # -----------------------------
-# Evaluation Function (with running accuracy printed)
+# Evaluation Function
 # -----------------------------
 def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
                                         segment_size=512, prompt_stride=256, shot_len=128):
+    """
+    Evaluates the fine-tuned model in a multi-class forced-choice setting.
+    Prints running accuracy and a confusion matrix.
+    """
     shards = load_shards(shard_paths)
     num_shards = len(shards)
     confusion_matrix = np.zeros((num_shards, num_shards), dtype=int)
@@ -448,9 +461,10 @@ def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
             candidate_tokens_list = [cand['tokens'] for cand in candidate_info]
             candidate_channels_list = [cand['channels'] for cand in candidate_info]
             with torch.no_grad():
-                sims = compute_candidate_similarities(model, prompt_tokens, prompt_chans,
-                                                      candidate_tokens_list, candidate_channels_list,
-                                                      shot_len, device=device)
+                sims = compute_candidate_similarities_vectorized(model,
+                                                                 prompt_tokens, prompt_chans,
+                                                                 candidate_tokens_list, candidate_channels_list,
+                                                                 shot_len, device=device)
             pred = torch.argmax(sims).item()
             chosen = candidate_info[pred]
             predicted_shard = chosen['source_shard']
@@ -477,51 +491,48 @@ def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
 
 
 # -----------------------------
-# Main Script: Training then Evaluation
+# Main Script: Loading Pretrained, Training, and Evaluation
 # -----------------------------
 d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
-# Optionally, load a pretrained checkpoint here if desired.
-checkpoint = torch.load('log/model_15000.pt', map_location=device)
-fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
-model.load_state_dict(fixed_sd, strict=False)
+# Optionally load your pretrained model to leverage unsupervised training:
+pretrained_path = 'log/model_34500.pt'
+if os.path.exists(pretrained_path):
+    checkpoint = torch.load(pretrained_path, map_location=device)
+    fixed_sd = {k.replace("_orig_mod.", ""): v for k, v in checkpoint['model'].items()}
+    model.load_state_dict(fixed_sd, strict=False)
+    print("Pretrained model loaded.")
 
-optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d)
+# Use DataParallel if multiple GPUs are available.
+if torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs for training.")
+    model = nn.DataParallel(model)
+model.to(device)
 
-shard_paths = [
+optimizer = model.module.configure_optimizer(weight_decay=0.1, learning_rate=1e-3, device=d) if isinstance(model,
+                                                                                                           nn.DataParallel) else model.configure_optimizer(
+    weight_decay=0.1, learning_rate=1e-3, device=d)
+
+# Define shard paths for training and evaluation.
+shard_paths_train = [
     "output_EMOTIV/shards/shard_train_0.pt",
     "output_EMOTIV/shards/shard_train_1.pt",
     "output_EMOTIV/shards/shard_train_2.pt"
 ]
 
-print("\n=== Starting Training ===")
-train_on_shards(model, shard_paths, optimizer, device=d,
-                segment_size=512, shot_len=128, prompt_stride=256, num_epochs=5)
+print("\n=== Starting Fine-Tuning ===")
+train_on_shards(model, shard_paths_train, optimizer, device=d,
+                segment_size=512, shot_len=128, prompt_stride=256, num_epochs=3)
 
-print("\n=== Evaluating the Trained Model ===")
-eval_acc = evaluate_multiclass_with_similarity(model, shard_paths, device=d,
-                                               segment_size=512, prompt_stride=256, shot_len=128)
-print(f"Final Evaluation Accuracy: {eval_acc * 100:.2f}%")
-# Define the new shard paths for evaluation.
-
-shard_paths = [
+print("\n=== Evaluating the Fine-Tuned Model ===")
+eval_shard_paths = [
     "output_MEMA/shards/shard_train_0.pt",
     "output_MEMA/shards/shard_train_1.pt",
     "output_MEMA/shards/shard_train_2.pt"
 ]
-# Make sure the model is in evaluation mode.
-model.eval()
+eval_acc = evaluate_multiclass_with_similarity(model, eval_shard_paths, device=d,
+                                               segment_size=512, prompt_stride=256, shot_len=128)
+print(f"Final Evaluation Accuracy: {eval_acc * 100:.2f}%")
 
-# Call the evaluation function.
-eval_acc = evaluate_multiclass_with_similarity(
-    model=model,
-    shard_paths=shard_paths,
-    device=device,
-    segment_size=512,    # candidate completion length (in tokens)
-    prompt_stride=256,   # stride for candidate sampling
-    shot_len=128         # length of each prompt shot
-)
-
-print(f"Final Evaluation Accuracy: {eval_acc*100:.2f}%")
