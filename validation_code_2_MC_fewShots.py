@@ -456,7 +456,7 @@ fixed_sd = {}
 for k, v in orig_sd.items():
     new_key = k.replace("_orig_mod.", "")
     fixed_sd[new_key] = v
-model.load_state_dict(fixed_sd, strict=True)
+model.load_state_dict(fixed_sd, strict=False)
 # If needed, update model configuration:
 # model.config(checkpoint['config'])
 model.eval()
