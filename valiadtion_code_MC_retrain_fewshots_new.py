@@ -507,7 +507,7 @@ def evaluate_multiclass_with_similarity(model, shard_paths, device="cuda",
 # -----------------------------
 # Main Script: Training then Evaluation
 # -----------------------------
-d = 'cuda'
+d = 'cpu'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 
