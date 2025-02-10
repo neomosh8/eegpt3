@@ -260,35 +260,54 @@ def compute_similarity_loss_with_channels(
         model,
         prompt_tokens, prompt_channels,
         candidate_tokens, candidate_channels,
+        shot_len,  # length of each shot (e.g. 128 tokens)
         device="cuda"
 ):
     """
-    Computes a similarity-based loss between a prompt and a candidate.
-    The process is:
-      1. Encode the prompt and candidate separately.
-      2. Mean-pool the representations over the token dimension.
-      3. Compute a similarity score using the model’s learned similarity head.
-      4. Define the loss as: loss = - similarity_score
-         (i.e. a higher similarity yields a lower loss).
+    Computes a similarity-based loss between a prompt and a candidate,
+    taking into account that the prompt is formed by concatenating multiple shots.
+
+    Process:
+      1. Reshape the prompt into individual shots.
+      2. For each shot, encode and mean-pool to obtain a shot-level embedding.
+      3. Encode and mean-pool the candidate.
+      4. Compute the similarity score between each shot and the candidate using the learned similarity head.
+      5. Aggregate the shot-level similarities (here using max pooling).
+      6. Define loss = 1 - aggregated_similarity (so high similarity gives a low loss).
     """
-    # Move tokens/channels to device and add batch dimension.
-    prompt_tokens = prompt_tokens.unsqueeze(0).to(device)  # [1, L_prompt]
-    prompt_channels = prompt_channels.unsqueeze(0).to(device)
+    # Determine number of shots (assumes prompt_tokens is a 1D tensor of length few_shot_n * shot_len).
+    few_shot_n = prompt_tokens.size(0) // shot_len
+
+    # Reshape prompt tokens and channels to have shape [few_shot_n, shot_len]
+    prompt_tokens_shots = prompt_tokens.view(few_shot_n, shot_len)
+    prompt_channels_shots = prompt_channels.view(few_shot_n, shot_len)
+
+    shot_embeddings = []
+    for i in range(few_shot_n):
+        # Process each shot separately.
+        shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
+        shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
+        rep = model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
+        pooled = rep.mean(dim=1)  # [1, D]
+        shot_embeddings.append(pooled)
+    # Stack to get a tensor of shape [few_shot_n, D]
+    shot_embeddings = torch.cat(shot_embeddings, dim=0)
+    shot_embeddings = F.normalize(shot_embeddings, p=2, dim=-1)
+
+    # Process candidate.
     candidate_tokens = candidate_tokens.unsqueeze(0).to(device)  # [1, L_candidate]
-    candidate_channels = candidate_channels.unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        prompt_rep = model.encode(prompt_tokens, prompt_channels)  # [1, L_prompt, D]
-        candidate_rep = model.encode(candidate_tokens, candidate_channels)  # [1, L_candidate, D]
-
-    # Mean-pool over tokens.
-    prompt_pool = prompt_rep.mean(dim=1)  # [1, D]
+    candidate_channels = candidate_channels.unsqueeze(0).to(device)  # [1, L_candidate]
+    candidate_rep = model.encode(candidate_tokens, candidate_channels)  # [1, L_candidate, D]
     candidate_pool = candidate_rep.mean(dim=1)  # [1, D]
+    candidate_pool = F.normalize(candidate_pool, p=2, dim=-1)
 
-    # Compute similarity using the learned head.
-    similarity_score = model.similarity_head(prompt_pool, candidate_pool)  # [1]
-    # Loss is defined so that higher similarity means lower loss.
-    loss = - similarity_score
+    # Compute similarity for each shot.
+    # Expand candidate_pool so that it can be compared to each shot.
+    similarities = model.similarity_head(shot_embeddings,
+                                         candidate_pool.expand(shot_embeddings.size(0), -1))  # [few_shot_n]
+    # Aggregate similarities. Here, we take the maximum similarity.
+    aggregated_similarity = similarities.max()
+    loss = 1 - aggregated_similarity  # Higher similarity gives a lower loss.
     return loss.item()
 
 
@@ -297,14 +316,15 @@ def evaluate_multiclass_with_similarity(
         shard_paths,  # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
         device="cuda",
         segment_size=512,  # candidate completion length (in tokens)
-        prompt_stride=256
+        prompt_stride=256,
+        shot_len=128  # length of each shot used in the prompt
 ):
     """
     For each shard in shard_paths, this function:
-      - Samples a few-shot prompt (composed of several shots) from the shard.
+      - Samples a few-shot prompt (formed from multiple shots) from the shard.
       - Selects a correct candidate (from the same shard) that does not overlap the prompt.
       - Samples one candidate from every other shard.
-      - Computes the similarity-based loss (i.e. negative similarity) for each candidate.
+      - Computes the similarity-based loss (with multi-shot aggregation) for each candidate.
       - Chooses the candidate with the lowest loss (i.e. highest similarity) as the model's prediction.
     It builds a confusion matrix of true prompt shards versus predicted candidate shards.
     """
@@ -339,7 +359,6 @@ def evaluate_multiclass_with_similarity(
             print(f"\n[Shard {i}] Processing block {block_index} at pos={pos} ...")
             # Few-shot prompt parameters.
             few_shot_n = 4  # number of shots
-            shot_len = 128  # length of each shot
             total_prompt_len = few_shot_n * shot_len
 
             # Determine valid shot start positions (e.g., multiples of 256).
@@ -407,6 +426,7 @@ def evaluate_multiclass_with_similarity(
                     model,
                     prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
+                    shot_len=shot_len,
                     device=device
                 )
                 candidate_losses.append(loss)
@@ -456,9 +476,10 @@ fixed_sd = {}
 for k, v in orig_sd.items():
     new_key = k.replace("_orig_mod.", "")
     fixed_sd[new_key] = v
+
+# Because the checkpoint was saved before the similarity head was added,
+# load with strict=False so the new parameter is left as initialized.
 model.load_state_dict(fixed_sd, strict=False)
-# If needed, update model configuration:
-# model.config(checkpoint['config'])
 model.eval()
 
 # Example: Evaluate over 10 epochs using three shards.
@@ -469,12 +490,13 @@ for epoch in range(epochs):
     acc = evaluate_multiclass_with_similarity(
         model=model,
         shard_paths=[
-            "output_EMOTIV/shards/shard_train_0.pt",
-            "output_EMOTIV/shards/shard_train_1.pt",
-            "output_EMOTIV/shards/shard_train_2.pt"
+            "output_MEMA/shards/shard_train_0.pt",
+            "output_MEMA/shards/shard_train_1.pt",
+            "output_MEMA/shards/shard_train_2.pt"
         ],
         device=d,
-        segment_size=512
+        segment_size=512,
+        shot_len=128
     )
     accs.append(acc)
 mean = np.mean(accs)
