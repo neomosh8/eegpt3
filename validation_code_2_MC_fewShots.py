@@ -177,9 +177,69 @@ class GPT(nn.Module):
         )
         return optimizer
 
+    def encode(self, idx, channel_idx=None):
+        """
+        Compute the final transformer representation (after ln_f) for the given tokens.
+        Returns a tensor of shape [B, T, D].
+        """
+        B, T = idx.size()
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        tok_emb = self.transformer.wte(idx)
+        pos_emb = self.transformer.wpe(pos)
+        if channel_idx is not None:
+            cha_emb_small = self.wce(channel_idx)
+            cha_emb_large = self.channel_proj(cha_emb_small)
+            cha_emb_scaled = self.channel_scale * cha_emb_large
+            x = tok_emb + pos_emb + cha_emb_scaled
+        else:
+            x = tok_emb + pos_emb
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        return x
+
 device = 'cpu'
 
 # === Helper function for computing completion loss (unchanged) ===
+
+def compute_similarity_loss_with_channels(
+        model,
+        prompt_tokens, prompt_channels,
+        candidate_tokens, candidate_channels,
+        device="cuda"
+):
+    """
+    Computes a similarity loss between the prompt and candidate completions.
+    The loss is defined as 1 - cosine_similarity, so a lower loss means higher similarity.
+    """
+    # Add batch dimension and move to device.
+    prompt_tokens = prompt_tokens.unsqueeze(0).to(device)  # shape: [1, L_prompt]
+    prompt_channels = prompt_channels.unsqueeze(0).to(device)
+    candidate_tokens = candidate_tokens.unsqueeze(0).to(device)  # shape: [1, L_candidate]
+    candidate_channels = candidate_channels.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        # Get transformer representations.
+        prompt_rep = model.encode(prompt_tokens, prompt_channels)  # shape: [1, L_prompt, D]
+        candidate_rep = model.encode(candidate_tokens, candidate_channels)  # shape: [1, L_candidate, D]
+
+    # Pool the representations. (Here we simply take the mean over the token dimension.)
+    prompt_pool = prompt_rep.mean(dim=1)  # shape: [1, D]
+    candidate_pool = candidate_rep.mean(dim=1)  # shape: [1, D]
+
+    # Normalize the pooled representations.
+    prompt_pool = F.normalize(prompt_pool, p=2, dim=-1)
+    candidate_pool = F.normalize(candidate_pool, p=2, dim=-1)
+
+    # Compute cosine similarity.
+    cosine_sim = (prompt_pool * candidate_pool).sum(dim=-1)  # shape: [1]
+
+    # Define a loss so that a higher similarity gives a lower loss.
+    # (Cosine similarity is in [-1, 1], but if your representations are “good” it should be closer to 1.)
+    loss = 1 - cosine_sim
+    return loss.item()
+
+
 def compute_completion_loss_with_channels(
         model,
         prompt_tokens, prompt_channels,
@@ -332,7 +392,7 @@ def evaluate_multiclass_with_channels(
             # Evaluate each candidate using the helper function.
             candidate_losses = []
             for candidate in candidate_info:
-                loss = compute_completion_loss_with_channels(
+                loss = compute_similarity_loss_with_channels(
                     model,
                     prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
