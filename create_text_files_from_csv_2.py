@@ -289,7 +289,7 @@ folders = list_s3_folders()
 csv_files = []
 i = 1
 # folders = ["ds004504", "ds004448", "ds004447", "ds004446", "ds004408"]
-folders = [ "ds004447"]
+folders = [ "ds004504"]
 for folder in folders:
     print(f"{i}/{len(folders)}")
     print(f"looking into folder: {folder}")
