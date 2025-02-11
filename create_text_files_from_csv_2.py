@@ -327,8 +327,10 @@ def generate_quantized_files_local(
             f_chans.write(" ".join(["B"] * len(q_ids)) + " ")
 
     # Validate round-trip reconstruction (using coefficients from the last window as a check).
-    if coeffs_lengths:
-        total_coeffs = sum(coeffs_lengths[0])
+    # Instead of a simple "if coeffs_lengths:" check (which is ambiguous for arrays),
+    # we convert coeffs_lengths to a NumPy array and check its size.
+    if coeffs_lengths is not None and np.array(coeffs_lengths).size > 0:
+        total_coeffs = np.sum(coeffs_lengths[0])
         print("Validation info:", total_coeffs)
     else:
         total_coeffs = 0
