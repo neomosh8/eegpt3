@@ -38,20 +38,17 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 def average_eeg_channels(df, channels_to_drop):
     """
-    Given a DataFrame and a list of channels to drop,
-    identify the remaining channels and then compute two averaged channels:
-      - left average: mean of channels with odd-numbered suffixes
-      - right average: mean of channels with even-numbered suffixes
-
-    Returns:
-        left_data, right_data
+    Given a DataFrame and a list of channels to drop, identify the remaining channels,
+    then compute two overall averaged channels (left and right) based on the ending digit:
+      - Channels ending with an odd digit are considered left
+      - Channels ending with an even digit are considered right
     """
     filtered_columns = [col for col in df.columns if col not in channels_to_drop]
 
     left_channels = []
     right_channels = []
     for ch in filtered_columns:
-        # Skip channels ending in 'z' or that do not end in a digit
+        # Skip channels that end with 'z' or that do not end in a digit.
         if ch.endswith('z'):
             continue
         if not ch[-1].isdigit():
@@ -67,6 +64,82 @@ def average_eeg_channels(df, channels_to_drop):
     return left_data, right_data
 
 
+def create_regional_bipolar_channels(df, channels_to_drop):
+    """
+    Group channels into three regions based on the starting designator (case insensitive):
+      - Frontal (channels starting with 'F')
+      - Parietal-Occipital (channels starting with 'P' or 'O')
+      - Motor-Temporal (channels starting with 'C' or 'T')
+
+    For each group, further split channels into left/right based on the ending digit (odd: left, even: right),
+    average each hemisphere's channels, and then compute the bipolar signal (left average - right average).
+
+    Returns a dictionary with keys:
+      'frontal', 'parietal_occipital', 'motor_temporal'
+    and values equal to the computed bipolar signal (as a 1D numpy array).
+    """
+    # Remove channels that are instructed to drop
+    valid_channels = [col for col in df.columns if col not in channels_to_drop]
+
+    frontal = []
+    parietal_occipital = []
+    motor_temporal = []
+    for ch in valid_channels:
+        # Only consider channels that end with a digit
+        if not ch[-1].isdigit():
+            continue
+        first_letter = ch[0].upper()
+        if first_letter == "F":
+            frontal.append(ch)
+        elif first_letter in ["P", "O"]:
+            parietal_occipital.append(ch)
+        elif first_letter in ["C", "T"]:
+            motor_temporal.append(ch)
+
+    def split_left_right(channel_list):
+        left = []
+        right = []
+        for ch in channel_list:
+            try:
+                last_digit = int(ch[-1])
+            except ValueError:
+                continue
+            if last_digit % 2 == 0:
+                right.append(ch)
+            else:
+                left.append(ch)
+        return left, right
+
+    f_left, f_right = split_left_right(frontal)
+    po_left, po_right = split_left_right(parietal_occipital)
+    ct_left, ct_right = split_left_right(motor_temporal)
+
+    def average_signals(channel_list):
+        if channel_list:
+            return df[channel_list].mean(axis=1).values
+        else:
+            return np.zeros(len(df))
+
+    # Average the channels for each hemisphere in each region.
+    frontal_left_avg = average_signals(f_left)
+    frontal_right_avg = average_signals(f_right)
+    po_left_avg = average_signals(po_left)
+    po_right_avg = average_signals(po_right)
+    ct_left_avg = average_signals(ct_left)
+    ct_right_avg = average_signals(ct_right)
+
+    # Compute bipolar signals as left minus right.
+    frontal_bipolar = frontal_left_avg - frontal_right_avg
+    po_bipolar = po_left_avg - po_right_avg
+    ct_bipolar = ct_left_avg - ct_right_avg
+
+    return {
+        "frontal": frontal_bipolar,
+        "parietal_occipital": po_bipolar,
+        "motor_temporal": ct_bipolar
+    }
+
+
 def generate_quantized_files_local(
         csv_file: str,
         output_folder: str,
@@ -77,14 +150,21 @@ def generate_quantized_files_local(
     """
     Process a single CSV file:
       1. Load the CSV and drop channels as per GPT instructions.
-      2. Compute the left and right averaged channels.
-      3. Create a single bipolar channel (left minus right).
-      4. Plot the raw channels and the bipolar channel.
-      5. Preprocess the bipolar channel.
-      6. Plot the preprocessed bipolar channel.
-      7. Process the preprocessed data in windows, perform wavelet decomposition,
-         quantize the coefficients, and write tokens to file.
-      8. Validate the round-trip reconstruction.
+      2. Compute the overall left/right averages and then the overall bipolar channel.
+      3. Compute three additional regional bipolar channels:
+           - Frontal (from channels starting with 'F')
+           - Parietal-Occipital (from channels starting with 'P' or 'O')
+           - Motor-Temporal (from channels starting with 'C' or 'T')
+      4. Plot the raw signals:
+           - All channels before preprocessing.
+           - The overall bipolar channel.
+           - The three regional bipolar channels (combined in one figure).
+      5. Preprocess the overall bipolar channel (resample, filter, etc.) and plot it.
+      6. (Optionally) Preprocess the regional bipolar channels and plot them.
+      7. Slide through the preprocessed overall bipolar signal in windows, perform wavelet decomposition,
+         quantize the coefficients, interleave tokens (here using a fixed channel tag "B"),
+         and write the results to output text files.
+      8. Validate round-trip reconstruction.
     """
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
     output_coeffs_file = os.path.join(output_folder, f"{base_name}_quantized_coeffs.txt")
@@ -93,7 +173,7 @@ def generate_quantized_files_local(
     with open(output_coeffs_file, "w") as f_coeffs, open(output_channels_file, "w") as f_chans:
         df = pd.read_csv(csv_file)
 
-        # Get GPT instructions to determine channels to drop
+        # Obtain GPT instructions to know which channels to drop.
         all_columns = list(df.columns)
         instructions = call_gpt_for_instructions(
             channel_names=all_columns,
@@ -121,15 +201,15 @@ def generate_quantized_files_local(
         plt.close()
         # --- END PLOT 1 ---
 
-        # Compute left/right averages
+        # === Overall Bipolar Channel ===
+        # Compute overall left/right averages from all channels (after dropping)
         left_data, right_data = average_eeg_channels(df, channels_to_drop)
-        # Create a bipolar channel (e.g., left minus right)
         bipolar_data = left_data - right_data
 
-        # --- PLOT 2: Bipolar Channel (Raw) ---
+        # --- PLOT 2: Overall Bipolar Channel (Raw) ---
         plt.figure(figsize=(15, 5))
-        plt.plot(bipolar_data, label="Bipolar Channel (Left - Right)", color='purple')
-        plt.title(f"Bipolar Channel (Raw) - {base_name}")
+        plt.plot(bipolar_data, label="Overall Bipolar Channel (Left - Right)", color='purple')
+        plt.title(f"Overall Bipolar Channel (Raw) - {base_name}")
         plt.xlabel("Sample Index")
         plt.ylabel("Amplitude")
         plt.legend()
@@ -139,16 +219,42 @@ def generate_quantized_files_local(
         plt.close()
         # --- END PLOT 2 ---
 
-        # Determine original sampling rate and preprocess the bipolar channel.
+        # === Regional Bipolar Channels ===
+        # Create regional bipolar channels based on channel name designators.
+        regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
+        # Plot the three regional bipolar channels in one figure.
+        plt.figure(figsize=(15, 10))
+        plt.subplot(3, 1, 1)
+        plt.plot(regional_bipolar["frontal"], label="Frontal Bipolar", color='blue')
+        plt.title(f"Frontal Bipolar Channel - {base_name}")
+        plt.legend()
+
+        plt.subplot(3, 1, 2)
+        plt.plot(regional_bipolar["parietal_occipital"], label="Parietal-Occipital Bipolar", color='green')
+        plt.title(f"Parietal-Occipital Bipolar Channel - {base_name}")
+        plt.legend()
+
+        plt.subplot(3, 1, 3)
+        plt.plot(regional_bipolar["motor_temporal"], label="Motor-Temporal Bipolar", color='red')
+        plt.title(f"Motor-Temporal Bipolar Channel - {base_name}")
+        plt.legend()
+        plt.tight_layout()
+        regional_plot_file = os.path.join(output_folder, f"{base_name}_regional_bipolar_channels.png")
+        plt.savefig(regional_plot_file)
+        plt.close()
+        # --- END Regional Bipolar Plot ---
+
+        # === Preprocessing ===
+        # Determine the original sampling rate (using a custom utility)
         original_sps = calculate_sps(csv_file)
-        # Reshape the bipolar channel as a 2D array with one channel.
+        # Preprocess the overall bipolar channel.
         data_2d = bipolar_data[np.newaxis, :]
         preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
 
-        # --- PLOT 3: Preprocessed Bipolar Channel ---
+        # --- PLOT 3: Preprocessed Overall Bipolar Channel ---
         plt.figure(figsize=(15, 5))
-        plt.plot(preprocessed_data[0, :], label="Preprocessed Bipolar Channel", color='purple')
-        plt.title(f"Preprocessed Bipolar Channel - {base_name}")
+        plt.plot(preprocessed_data[0, :], label="Preprocessed Overall Bipolar Channel", color='purple')
+        plt.title(f"Preprocessed Overall Bipolar Channel - {base_name}")
         plt.xlabel("Sample Index")
         plt.ylabel("Amplitude")
         plt.legend()
@@ -158,7 +264,36 @@ def generate_quantized_files_local(
         plt.close()
         # --- END PLOT 3 ---
 
-        # Process the preprocessed data in non-overlapping windows.
+        # (Optional) Preprocess regional bipolar channels and plot them.
+        regional_preprocessed = {}
+        for key, signal_array in regional_bipolar.items():
+            signal_2d = signal_array[np.newaxis, :]
+            preprocessed_signal, _ = preprocess_data(signal_2d, original_sps)
+            regional_preprocessed[key] = preprocessed_signal[0, :]
+
+        plt.figure(figsize=(15, 10))
+        plt.subplot(3, 1, 1)
+        plt.plot(regional_preprocessed["frontal"], label="Frontal Bipolar Preprocessed", color='blue')
+        plt.title(f"Preprocessed Frontal Bipolar Channel - {base_name}")
+        plt.legend()
+
+        plt.subplot(3, 1, 2)
+        plt.plot(regional_preprocessed["parietal_occipital"], label="Parietal-Occipital Bipolar Preprocessed",
+                 color='green')
+        plt.title(f"Preprocessed Parietal-Occipital Bipolar Channel - {base_name}")
+        plt.legend()
+
+        plt.subplot(3, 1, 3)
+        plt.plot(regional_preprocessed["motor_temporal"], label="Motor-Temporal Bipolar Preprocessed", color='red')
+        plt.title(f"Preprocessed Motor-Temporal Bipolar Channel - {base_name}")
+        plt.legend()
+        plt.tight_layout()
+        regional_prep_plot_file = os.path.join(output_folder, f"{base_name}_regional_preprocessed_bipolar_channels.png")
+        plt.savefig(regional_prep_plot_file)
+        plt.close()
+        # --- END Regional Preprocessed Plot ---
+
+        # === Wavelet Decomposition & Quantization on Overall Bipolar Signal ===
         n_window_samples = int(window_length_sec * new_sps)
         num_channels, total_samples = preprocessed_data.shape
 
@@ -166,15 +301,13 @@ def generate_quantized_files_local(
             print(f"Skipping {csv_file} due to invalid window size or insufficient samples.")
             return
 
-        # Loop over the data window-by-window.
+        # Process the preprocessed overall bipolar data in non-overlapping windows.
         for window_start in range(0, total_samples - n_window_samples + 1, n_window_samples):
             window_end = window_start + n_window_samples
-
-            # For the single bipolar channel:
             channel_data = preprocessed_data[0, window_start:window_end]
             channel_data_2d = channel_data[np.newaxis, :]
 
-            # Wavelet Decompose the window.
+            # Wavelet decompose the window.
             (decomposed_channels,
              coeffs_lengths,
              num_samples,
@@ -185,15 +318,15 @@ def generate_quantized_files_local(
                 normalization=True
             )
 
-            # Flatten the coefficients and quantize each one.
+            # Flatten coefficients and quantize.
             coeffs_flat = decomposed_channels.flatten()
             q_ids = [str(quantize_number(c)) for c in coeffs_flat]
 
-            # Write the quantized tokens; use "B" to denote the bipolar channel.
+            # Write the quantized tokens; here we use "B" to denote the overall bipolar channel.
             f_coeffs.write(" ".join(q_ids) + " ")
             f_chans.write(" ".join(["B"] * len(q_ids)) + " ")
 
-    # Validate the round-trip reconstruction (using the coefficients from the last window).
+    # Validate round-trip reconstruction (using coefficients from the last window as a check).
     if coeffs_lengths:
         total_coeffs = sum(coeffs_lengths[0])
         print("Validation info:", total_coeffs)
