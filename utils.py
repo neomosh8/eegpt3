@@ -438,10 +438,10 @@ def preprocess_data(data, original_sps):
 
     # Filter (Band-pass)
     filtered_data = filter_band_pass_windows(resampled_data, new_sps)
-    # avg_referenced_data = filtered_data - np.mean(filtered_data, axis=0, keepdims=True)
+    avg_referenced_data = filtered_data - np.mean(filtered_data, axis=0, keepdims=True)
 
-    # return avg_referenced_data, new_sps
-    return filtered_data, new_sps
+    return avg_referenced_data, new_sps
+    # return filtered_data, new_sps
 
 # --------------------------------------------------------------------------------
 # Calculate sampling rate from CSV
