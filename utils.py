@@ -417,11 +417,13 @@ def filter_band_pass_windows(ndarray, sps):
     :param sps: Sampling rate.
     :return: 2D numpy array with bandpass filtered data.
     """
-    # Example bandpass between 0.1 - 48 Hz
-    f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
+    # # Example bandpass between 0.1 - 48 Hz
+    # f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
+    # filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
+    # return filtered_data
+    f_b, f_a = signal.butter(N=5, Wn=48, btype='low', fs=sps)
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     return filtered_data
-
 
 def preprocess_data(data, original_sps):
     """
