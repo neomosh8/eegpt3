@@ -408,11 +408,14 @@ def write_final_report(results):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    folders = list_s3_folders()
+    # folders = list_s3_folders()
     csv_files = []
     i = 1
-    # Example: processing folder "ds004504"
-    folders = ["ds002338","ds003061"]
+    # folders_to_delete = ["ds002338", "ds002336"]
+    # new_folders = [folder for folder in folders if folder not in folders_to_delete]
+    # folders = new_folders  # If you want to update the original 'folders' variable
+
+    folders = ["ds001785"]
     for folder in folders:
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
         files = list_csv_files_in_folder(folder)
@@ -423,12 +426,12 @@ if __name__ == "__main__":
     # Choose one of the following processing methods:
 
     # Option 1: Process all CSV files in parallel.
-    results = parallel_process_csv_files(csv_files)
+    # results = parallel_process_csv_files(csv_files)
 
     # Option 2: For testing, process a single CSV file from S3 locally.
     # Uncomment the following lines to test with a single file.
-    # result = process_csv_file_s3(csv_files[0])
-    # results = [result]
+    result = process_csv_file_s3(csv_files[0])
+    results = [result]
 
     # Write final report with overall statistics.
     write_final_report(results)
