@@ -30,7 +30,7 @@ from utils import (
     call_gpt_for_instructions,
     preprocess_data,
     calculate_sps,
-    validate_round_trip,  # not used now
+    validate_round_trip,  # no longer used
     list_s3_folders,
     list_csv_files_in_folder
 )
@@ -150,11 +150,11 @@ def generate_quantized_files_local(csv_file: str,
       1. Drop channels as per GPT instructions.
       2. Plot all raw channels and the (reference) overall bipolar channel.
       3. Create three regional bipolar channels (frontal, motor–temporal, parietal–occipital).
-      4. Preprocess each regional bipolar signal and plot them.
-      5. For each regional channel, slide over the preprocessed signal in non-overlapping windows,
-         perform wavelet decomposition and quantization, and accumulate the quantized tokens.
-      6. At the end, check that the three token sequences have the same length and then write
-         each sequence to a separate text file.
+      4. Preprocess each regional bipolar signal (storing the same new sampling rate) and plot them.
+      5. For each window (taken jointly across all three regions) perform wavelet decomposition
+         with joint normalization. Then, extract quantized tokens per channel.
+      6. Check that the token sequences for all three channels have the same length and
+         write each sequence to a separate text file.
     """
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
 
@@ -216,13 +216,16 @@ def generate_quantized_files_local(csv_file: str,
     plt.savefig(regional_plot_file)
     plt.close()
 
-    # --- Preprocess the signals ---
+    # --- Preprocess the Regional Signals ---
     original_sps = calculate_sps(csv_file)
     regional_preprocessed = {}
+    new_sps_val = None
     for key, signal_array in regional_bipolar.items():
         signal_2d = signal_array[np.newaxis, :]
-        preprocessed_signal, _ = preprocess_data(signal_2d, original_sps)
+        preprocessed_signal, new_sps = preprocess_data(signal_2d, original_sps)
         regional_preprocessed[key] = preprocessed_signal[0, :]
+        if new_sps_val is None:
+            new_sps_val = new_sps
 
     plt.figure(figsize=(15, 10))
     plt.subplot(3, 1, 1)
@@ -242,29 +245,45 @@ def generate_quantized_files_local(csv_file: str,
     plt.savefig(regional_prep_plot_file)
     plt.close()
 
-    # --- Wavelet Decomposition & Quantization for Each Regional Channel ---
-    n_window_samples = int(
-        window_length_sec * _)  # _ holds new_sps from preprocess_data; you can also recompute if needed
-    # We'll accumulate tokens for each region in a dictionary.
+    # --- Joint Wavelet Decomposition & Quantization ---
+    # Assume all three regional signals have the same length; take the minimum length.
+    min_length = min(len(regional_preprocessed["frontal"]),
+                     len(regional_preprocessed["motor_temporal"]),
+                     len(regional_preprocessed["parietal_occipital"]))
+    # Compute the number of samples per window using the new sampling rate.
+    n_window_samples = int(window_length_sec * new_sps_val)
+    num_windows = min_length // n_window_samples
+
+    # Prepare a dictionary to accumulate tokens for each region.
     tokens_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
-    for region, preproc_signal in regional_preprocessed.items():
-        total_samples_region = preproc_signal.shape[0]
-        # Process in non-overlapping windows.
-        for window_start in range(0, total_samples_region - n_window_samples + 1, n_window_samples):
-            window_end = window_start + n_window_samples
-            window_data = preproc_signal[window_start:window_end]
-            window_data_2d = window_data[np.newaxis, :]
-            (decomposed_channels,
-             coeffs_lengths,
-             num_samples,
-             normalized_data) = wavelet_decompose_window(
-                window_data_2d,
-                wavelet=wvlet,
-                level=level,
-                normalization=True
-            )
-            coeffs_flat = decomposed_channels.flatten()
-            q_ids = [str(quantize_number(c)) for c in coeffs_flat]
+
+    # Process windows jointly across all three channels.
+    for i in range(num_windows):
+        window_start = i * n_window_samples
+        window_end = window_start + n_window_samples
+        # Build a joint window with shape (3, n_window_samples)
+        window_data = np.vstack([
+            regional_preprocessed["frontal"][window_start:window_end],
+            regional_preprocessed["motor_temporal"][window_start:window_end],
+            regional_preprocessed["parietal_occipital"][window_start:window_end]
+        ])
+        # Call the wavelet decomposition function once for the joint window.
+        (decomposed_channels,
+         coeffs_lengths,
+         num_samples,
+         normalized_data) = wavelet_decompose_window(
+            window_data,
+            wavelet=wvlet,
+            level=level,
+            normalization=True
+        )
+        # decomposed_channels is a 2D array with one row per channel.
+        # For each channel (row), flatten, quantize, and append the tokens.
+        regions = ["frontal", "motor_temporal", "parietal_occipital"]
+        for idx, region in enumerate(regions):
+            # Extract coefficients for this channel.
+            coeffs_for_channel = decomposed_channels[idx].flatten()
+            q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
             tokens_dict[region].extend(q_ids)
 
     # --- Check that all token sequences have the same length ---
@@ -295,12 +314,9 @@ def process_csv_file_s3(csv_key: str,
     s3.download_file(bucket, csv_key, local_csv)
     generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
     base = os.path.splitext(csv_name)[0]
-    coeffs_files = [
-        os.path.join(local_dir, f"{base}_quantized_coeffs_frontal.txt"),
-        os.path.join(local_dir, f"{base}_quantized_coeffs_motor_temporal.txt"),
-        os.path.join(local_dir, f"{base}_quantized_coeffs_parietal_occipital.txt")
-    ]
-    for fpath in coeffs_files:
+    # Upload the three generated token files.
+    for region in ["frontal", "motor_temporal", "parietal_occipital"]:
+        fpath = os.path.join(local_dir, f"{base}_quantized_coeffs_{region}.txt")
         s3.upload_file(fpath, bucket, f"{output_prefix}/{os.path.basename(fpath)}")
         os.remove(fpath)
     os.remove(local_csv)
@@ -325,6 +341,7 @@ def parallel_process_csv_files(csv_files):
 folders = list_s3_folders()
 csv_files = []
 i = 1
+# Example: processing folder "ds004504"
 folders = ["ds004504"]
 for folder in folders:
     print(f"{i}/{len(folders)}: looking into folder: {folder}")
