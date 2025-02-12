@@ -415,9 +415,9 @@ if __name__ == "__main__":
     # folders = list_s3_folders()
     csv_files = []
     i = 1
-    folders = ["ds003474"]
+    folders = ["ds003478"]
 
-    folders_to_delete = ["ds002338", "ds002336","ds001849","ds001971","ds002718","ds002814","ds003380"]
+    folders_to_delete = ["ds002338", "ds002336","ds001849","ds001971","ds002718","ds002814","ds003380","ds003474"]
 
     new_folders = [folder for folder in folders if folder not in folders_to_delete]
 
