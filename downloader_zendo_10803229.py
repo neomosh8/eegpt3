@@ -261,7 +261,7 @@ if __name__ == "__main__":
 
             # Process the preprocessed data (windowing, wavelet decomposition, quantization) and save.
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
-                             wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
+                             wavelet='db2', level=4, window_len_sec=1.18, plot_windows=True)
             print(f"Finished processing subject: {subj}")
 
     print("Done!")

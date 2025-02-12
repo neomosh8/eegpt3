@@ -65,7 +65,7 @@ def load_mat_experiment_data(mat_file_path):
     return eeg_data
 
 
-def process_segment(data, sps, wavelet='db2', level=4, window_len_sec=1.8, plot_windows=False, plot_random_n=1):
+def process_segment(data, sps, wavelet='db2', level=4, window_len_sec=1.18, plot_windows=False, plot_random_n=1):
     """
     Processes a two-channel EEG segment by splitting it into non-overlapping windows,
     performing wavelet decomposition and quantization on each window.
