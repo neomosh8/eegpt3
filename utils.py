@@ -441,7 +441,7 @@ def preprocess_data(data, original_sps):
     filtered_data = filter_band_pass_windows(data, original_sps)
 
     # Then, resample the filtered data to the new rate (e.g., 100 Hz)
-    new_rate = 100
+    new_rate = 250
     resampled_data = resample_windows(filtered_data, original_sps, new_rate=new_rate)
 
     return resampled_data, new_rate
