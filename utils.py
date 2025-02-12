@@ -419,7 +419,7 @@ def filter_band_pass_windows(ndarray, sps):
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
-    notch_freqs = [50]  # Frequencies to notch out (in Hz)
+    notch_freqs = [50, 60]  # Frequencies to notch out (in Hz)
 
     # Apply each notch filter in series
     for f0 in notch_freqs:
@@ -427,22 +427,25 @@ def filter_band_pass_windows(ndarray, sps):
         filtered_data = signal.filtfilt(b_notch, a_notch, filtered_data, axis=1)
     return filtered_data
 
+
 def preprocess_data(data, original_sps):
     """
-    Preprocess the data by resampling and filtering.
+    Preprocess the data by first applying a bandpass filter at the original sampling rate
+    and then resampling to a new sampling rate.
+
     :param data: 2D numpy array (channels x samples).
     :param original_sps: Original sampling rate.
-    :return: Preprocessed 2D numpy array, and the new sampling rate (after resampling).
+    :return: Preprocessed 2D numpy array (channels x new_samples), and the new sampling rate.
     """
-    # Resample the data to 128 Hz (example)
-    resampled_data = resample_windows(data, original_sps, new_rate=100)
-    new_sps = 100
+    # First, filter the data with the original sampling rate
+    filtered_data = filter_band_pass_windows(data, original_sps)
 
-    # Filter (Band-pass)
-    filtered_data = filter_band_pass_windows(resampled_data, new_sps)
+    # Then, resample the filtered data to the new rate (e.g., 100 Hz)
+    new_rate = 100
+    resampled_data = resample_windows(filtered_data, original_sps, new_rate=new_rate)
 
-    # return avg_referenced_data, new_sps
-    return filtered_data, new_sps
+    return resampled_data, new_rate
+
 
 # --------------------------------------------------------------------------------
 # Calculate sampling rate from CSV
