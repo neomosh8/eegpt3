@@ -258,10 +258,11 @@ def evaluate_multiclass_with_channels(
         while pos + segment_size <= len_i:
             block_index += 1
             print(f"\n[Shard {i}] Processing block {block_index} at pos={pos} ...")
-            # --- Modified prompt sampling: pick 4 random 128-token chunks and concatenate them ---
+            # --- Modified prompt sampling: pick 4 random 128-token chunks whose start indices are multiples of 256 ---
             chunk_size = 128
             num_chunks = 4
-            if len_i < chunk_size:
+            valid_offsets = list(range(0, len_i - chunk_size + 1, 256))
+            if not valid_offsets:
                 print(f"Not enough tokens in shard {i} for a prompt. Skipping...")
                 break
 
@@ -269,7 +270,7 @@ def evaluate_multiclass_with_channels(
             prompt_tokens_list = []
             prompt_chans_list = []
             for _ in range(num_chunks):
-                offset = random.randint(0, len_i - chunk_size)
+                offset = random.choice(valid_offsets)
                 prompt_offsets.append(offset)
                 prompt_tokens_list.append(tokens_i[offset : offset + chunk_size])
                 prompt_chans_list.append(chans_i[offset : offset + chunk_size])
@@ -369,7 +370,7 @@ def evaluate_multiclass_with_channels(
     return accuracy
 
 # === Main script ===
-d='cuda'
+d = 'cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 if small_model:
