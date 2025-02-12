@@ -294,6 +294,8 @@ def generate_quantized_files_local(csv_file: str,
         )
         # For each channel (row), flatten, quantize, and append the tokens.
         regions = ["frontal", "motor_temporal", "parietal_occipital"]
+        print(f"Window {i + 1}/{num_windows} - {region}: {len(q_ids)} tokens")
+
         for idx, region in enumerate(regions):
             coeffs_for_channel = decomposed_channels[idx].flatten()
             q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
