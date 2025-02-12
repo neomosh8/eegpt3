@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Wavelet parameters
 wvlet = 'db2'
 level = 4
-epoch_len = 1.18
+epoch_len = 1.96
 
 # --------------------------------------------------------------------------------
 # Import your custom wavelet/quantization utils (or define them here if needed)
