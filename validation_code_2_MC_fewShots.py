@@ -13,16 +13,12 @@ import matplotlib.pyplot as plt
 from torch import nn
 
 from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-
 small_model = False
 tokenizer = Tokenizer()
 tokenizer.load_merges("neo_tokenizer/merges.json")
 tokenizer.load_vocab("neo_tokenizer/vocab.json")
 
 
-# -----------------------------
-# Model Components
-# -----------------------------
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -49,13 +45,12 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(y)
         return y
 
-
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu    = nn.GELU(approximate='tanh')
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
@@ -63,7 +58,6 @@ class MLP(nn.Module):
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
-
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -78,14 +72,13 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-
 @dataclass
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 6460
     if small_model:
         n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
+        n_head: int = 12   # number of heads
         n_embd: int = int(768)  # embedding dimension
     else:
         n_layer: int = 36
@@ -96,46 +89,6 @@ class GPTConfig:
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
 
-
-# -----------------------------
-# Learned Similarity Head
-# -----------------------------
-# Option 1: Learned bilinear similarity (used below)
-class BilinearSimilarity(nn.Module):
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.W = nn.Parameter(torch.Tensor(embed_dim, embed_dim))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # Initialize with Xavier uniform initialization.
-        nn.init.xavier_uniform_(self.W)
-
-    def forward(self, u, v):
-        # u and v are assumed to be [B, D] vectors.
-        # Compute similarity: score = u^T * W * v.
-        return torch.sum((u @ self.W) * v, dim=-1)
-
-
-# Option 2: MLP-based similarity (uncomment to use)
-# class MLPSimilarity(nn.Module):
-#     def __init__(self, embed_dim, hidden_dim=None):
-#         super().__init__()
-#         if hidden_dim is None:
-#             hidden_dim = embed_dim
-#         self.mlp = nn.Sequential(
-#             nn.Linear(embed_dim * 2, hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(hidden_dim, 1)
-#         )
-#     def forward(self, u, v):
-#         x = torch.cat([u, v], dim=-1)
-#         return self.mlp(x).squeeze(-1)
-
-
-# -----------------------------
-# GPT Model Definition
-# -----------------------------
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -152,10 +105,6 @@ class GPT(nn.Module):
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
-        # Add the learned similarity head.
-        self.similarity_head = BilinearSimilarity(config.n_embd)
-        # To use an MLP-based similarity head instead, comment out the above line and uncomment the next:
-        # self.similarity_head = MLPSimilarity(config.n_embd)
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -193,27 +142,6 @@ class GPT(nn.Module):
             )
         return logits, loss
 
-    def encode(self, idx, channel_idx=None):
-        """
-        Returns the final transformer representations (after ln_f) for a given sequence.
-        Shape: [B, T, D]
-        """
-        B, T = idx.size()
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        tok_emb = self.transformer.wte(idx)
-        pos_emb = self.transformer.wpe(pos)
-        if channel_idx is not None:
-            cha_emb_small = self.wce(channel_idx)
-            cha_emb_large = self.channel_proj(cha_emb_small)
-            cha_emb_scaled = self.channel_scale * cha_emb_large
-            x = tok_emb + pos_emb + cha_emb_scaled
-        else:
-            x = tok_emb + pos_emb
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
-        return x
-
     def configure_optimizer(self, weight_decay, learning_rate, device):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
@@ -249,89 +177,61 @@ class GPT(nn.Module):
         )
         return optimizer
 
-
 device = 'cpu'
 
-
-# -----------------------------
-# Similarity-based Loss & Evaluation
-# -----------------------------
-def compute_similarity_loss_with_channels(
+# === Helper function for computing completion loss (unchanged) ===
+def compute_completion_loss_with_channels(
         model,
         prompt_tokens, prompt_channels,
-        candidate_tokens, candidate_channels,
-        shot_len,  # length of each shot (e.g. 128 tokens)
+        completion_tokens, completion_channels,
         device="cuda"
 ):
-    """
-    Computes a similarity-based loss between a prompt and a candidate,
-    taking into account that the prompt is formed by concatenating multiple shots.
+    # 1) Concatenate prompt + completion for tokens and channels
+    full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
+    full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
+    total_len = full_tokens.size(1)
+    prompt_len = prompt_tokens.size(0)
+    completion_len = completion_tokens.size(0)
+    mask_vals = [0] * prompt_len + [1] * completion_len
+    mask = torch.tensor(mask_vals, device=device).unsqueeze(0)
+    with torch.no_grad():
+        logits, _ = model(idx=full_tokens, channel_idx=full_channels)
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_tokens = full_tokens[:, 1:].contiguous()
+    shift_mask = mask[:, 1:].contiguous()
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_tokens = shift_tokens.view(-1)
+    flat_mask = shift_mask.view(-1)
+    ce_per_token = F.cross_entropy(flat_logits, flat_tokens, reduction='none')
+    ce_completion = ce_per_token * flat_mask
+    sum_loss = ce_completion.sum()
+    num_completion_tokens = flat_mask.sum()
+    avg_loss = sum_loss / (num_completion_tokens + 1e-9)
+    return avg_loss.item()
 
-    Process:
-      1. Reshape the prompt into individual shots.
-      2. For each shot, encode and mean-pool to obtain a shot-level embedding.
-      3. Encode and mean-pool the candidate.
-      4. Compute the similarity score between each shot and the candidate using the learned similarity head.
-      5. Aggregate the shot-level similarities (here using max pooling).
-      6. Define loss = 1 - aggregated_similarity (so high similarity gives a low loss).
-    """
-    # Determine number of shots (assumes prompt_tokens is a 1D tensor of length few_shot_n * shot_len).
-    few_shot_n = prompt_tokens.size(0) // shot_len
-
-    # Reshape prompt tokens and channels to have shape [few_shot_n, shot_len]
-    prompt_tokens_shots = prompt_tokens.view(few_shot_n, shot_len)
-    prompt_channels_shots = prompt_channels.view(few_shot_n, shot_len)
-
-    shot_embeddings = []
-    for i in range(few_shot_n):
-        # Process each shot separately.
-        shot_tok = prompt_tokens_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
-        shot_cha = prompt_channels_shots[i].unsqueeze(0).to(device)  # [1, shot_len]
-        rep = model.encode(shot_tok, shot_cha)  # [1, shot_len, D]
-        pooled = rep.mean(dim=1)  # [1, D]
-        shot_embeddings.append(pooled)
-    # Stack to get a tensor of shape [few_shot_n, D]
-    shot_embeddings = torch.cat(shot_embeddings, dim=0)
-    shot_embeddings = F.normalize(shot_embeddings, p=2, dim=-1)
-
-    # Process candidate.
-    candidate_tokens = candidate_tokens.unsqueeze(0).to(device)  # [1, L_candidate]
-    candidate_channels = candidate_channels.unsqueeze(0).to(device)  # [1, L_candidate]
-    candidate_rep = model.encode(candidate_tokens, candidate_channels)  # [1, L_candidate, D]
-    candidate_pool = candidate_rep.mean(dim=1)  # [1, D]
-    candidate_pool = F.normalize(candidate_pool, p=2, dim=-1)
-
-    # Compute similarity for each shot.
-    # Expand candidate_pool so that it can be compared to each shot.
-    similarities = model.similarity_head(shot_embeddings,
-                                         candidate_pool.expand(shot_embeddings.size(0), -1))  # [few_shot_n]
-    # Aggregate similarities. Here, we take the maximum similarity.
-    aggregated_similarity = similarities.max()
-    loss = 1 - aggregated_similarity  # Higher similarity gives a lower loss.
-    return loss.item()
-
-
-def evaluate_multiclass_with_similarity(
-        model,  # the trained model
-        shard_paths,  # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
+# === New multi-class force choice evaluation function with confusion matrix ===
+def evaluate_multiclass_with_channels(
+        model,           # the trained model
+        shard_paths,     # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", "shard_train_2.pt"])
         device="cuda",
-        segment_size=512,  # candidate completion length (in tokens)
-        prompt_stride=256,
-        shot_len=128  # length of each shot used in the prompt
+        segment_size=512,  # candidate (completion) segment size remains 512 tokens
+        prompt_stride=256
 ):
     """
-    For each shard in shard_paths, this function:
-      - Samples a few-shot prompt (formed from multiple shots) from the shard.
-      - Selects a correct candidate (from the same shard) that does not overlap the prompt.
-      - Samples one candidate from every other shard.
-      - Computes the similarity-based loss (with multi-shot aggregation) for each candidate.
-      - Chooses the candidate with the lowest loss (i.e. highest similarity) as the model's prediction.
-    It builds a confusion matrix of true prompt shards versus predicted candidate shards.
+    For each shard in shard_paths, we perform an evaluation block where:
+      - We sample a prompt from the shard.
+      - We choose a correct continuation (from the same shard) that does not overlap any of the prompt chunks.
+      - For every other shard, we sample one candidate continuation.
+      - We compute the average cross-entropy loss for each candidate given the prompt.
+      - The candidate with the lowest loss is considered the model's prediction.
+    We record the ground truth (the prompt's shard) and the predicted candidate's shard
+    in order to build a confusion matrix.
+    Returns overall accuracy and prints the confusion matrix.
     """
-    # Load shards.
+    # Load all shards into memory.
     shards = []
     for path in shard_paths:
-        shard = torch.load(path, map_location="cpu")  # expected to contain {'tokens': ..., 'channels': ...}
+        shard = torch.load(path, weights_only=False)  # expected to contain {'tokens': ..., 'channels': ...}
         tokens = shard['tokens'].cpu()
         channels = shard['channels'].cpu()
         shards.append({
@@ -341,77 +241,84 @@ def evaluate_multiclass_with_similarity(
             'path': path
         })
     num_shards = len(shards)
+    # Initialize confusion matrix: rows = true (prompt) shard, columns = predicted candidate shard.
     confusion_matrix = np.zeros((num_shards, num_shards), dtype=int)
 
     total_evals = 0
     correct_count = 0
 
-    # Iterate over shards (each serves as the prompt source).
+    # For each shard, use it as the source of the prompt and the correct candidate.
     for i, shard in enumerate(shards):
         tokens_i = shard['tokens']
         chans_i = shard['channels']
         len_i = shard['length']
         block_index = 0
         pos = 0
-        # Process blocks until there are no more tokens.
-        while pos + 2 * segment_size <= len_i:
+        # Process blocks until we run out of tokens
+        while pos + segment_size <= len_i:
             block_index += 1
             print(f"\n[Shard {i}] Processing block {block_index} at pos={pos} ...")
-            # Few-shot prompt parameters.
-            few_shot_n = 4  # number of shots
-            total_prompt_len = few_shot_n * shot_len
-
-            # Determine valid shot start positions (e.g., multiples of 256).
-            possible_shot_starts = list(range(0, len_i - shot_len + 1, 256))
-            if len(possible_shot_starts) < few_shot_n:
-                print(f"Not enough tokens in shard {i} for a few-shot prompt. Skipping...")
+            # --- Modified prompt sampling: pick 4 random 128-token chunks and concatenate them ---
+            chunk_size = 128
+            num_chunks = 4
+            if len_i < chunk_size:
+                print(f"Not enough tokens in shard {i} for a prompt. Skipping...")
                 break
-            chosen_shot_starts = random.sample(possible_shot_starts, few_shot_n)
-            chosen_shot_starts.sort()
-            prompt_tokens = torch.cat([tokens_i[start: start + shot_len] for start in chosen_shot_starts], dim=0)
-            prompt_chans = torch.cat([chans_i[start: start + shot_len] for start in chosen_shot_starts], dim=0)
-            prompt_intervals = [(start, start + shot_len) for start in chosen_shot_starts]
 
-            # Ensure candidate does not overlap with any prompt shot.
-            def candidate_non_overlapping(c, candidate_len, intervals):
-                candidate_end = c + candidate_len
-                for (s, e) in intervals:
-                    if c < e and candidate_end > s:
-                        return False
-                return True
+            prompt_offsets = []
+            prompt_tokens_list = []
+            prompt_chans_list = []
+            for _ in range(num_chunks):
+                offset = random.randint(0, len_i - chunk_size)
+                prompt_offsets.append(offset)
+                prompt_tokens_list.append(tokens_i[offset : offset + chunk_size])
+                prompt_chans_list.append(chans_i[offset : offset + chunk_size])
+            prompt_tokens = torch.cat(prompt_tokens_list, dim=0)
+            prompt_chans = torch.cat(prompt_chans_list, dim=0)
+            # ------------------------------------------------------------------------------------
 
-            # Choose a correct candidate from the same shard.
-            all_candidates = list(range(0, len_i - segment_size + 1, prompt_stride))
-            correct_offset_candidates = [c for c in all_candidates if
-                                         candidate_non_overlapping(c, segment_size, prompt_intervals)]
+            # Now choose a correct candidate continuation: a contiguous 512-token chunk that does not overlap any prompt chunk.
+            candidate_segment_size = segment_size  # 512 tokens for candidate completion
+            all_candidates = list(range(0, len_i - candidate_segment_size + 1, prompt_stride))
+
+            def overlaps(candidate_offset):
+                for po in prompt_offsets:
+                    # Check if candidate chunk [candidate_offset, candidate_offset+512] overlaps with a prompt chunk [po, po+chunk_size]
+                    if not (candidate_offset + candidate_segment_size <= po or candidate_offset >= po + chunk_size):
+                        return True
+                return False
+
+            correct_offset_candidates = [c for c in all_candidates if not overlaps(c)]
             if not correct_offset_candidates:
-                print(f"No valid candidate offsets in shard {i} for the few-shot prompt. Skipping block...")
-                pos += 2 * segment_size
+                print(f"No valid correct offsets in shard {i} for the chosen prompt chunks. Retrying...")
+                pos += segment_size  # advance position to avoid an infinite loop
                 continue
             correct_offset = random.choice(correct_offset_candidates)
-            correct_tokens = tokens_i[correct_offset: correct_offset + segment_size]
-            correct_chans = chans_i[correct_offset: correct_offset + segment_size]
+            correct_tokens = tokens_i[correct_offset : correct_offset + candidate_segment_size]
+            correct_chans  = chans_i[correct_offset : correct_offset + candidate_segment_size]
 
+            # Build the list of candidate completions:
+            # First candidate: correct (from the same shard)
             candidate_info = []
             candidate_info.append({
                 'tokens': correct_tokens,
                 'channels': correct_chans,
                 'label': 'correct',
-                'source_shard': i
+                'source_shard': i  # correct candidate is from the same shard as the prompt
             })
-            # For every other shard, sample one candidate.
+            # For every other shard, sample one candidate continuation.
             for j, other_shard in enumerate(shards):
                 if j == i:
                     continue
                 len_j = other_shard['length']
                 tokens_j = other_shard['tokens']
-                chans_j = other_shard['channels']
-                if len_j < segment_size:
+                chans_j  = other_shard['channels']
+                if len_j < candidate_segment_size:
                     print(f"Shard {j} is too short. Skipping candidate from this shard.")
                     continue
-                wrong_offset = random.randint(0, len_j - segment_size)
-                wrong_tokens = tokens_j[wrong_offset: wrong_offset + segment_size]
-                wrong_chans = chans_j[wrong_offset: wrong_offset + segment_size]
+                wrong_offset = random.randint(0, len_j - candidate_segment_size)
+                wrong_tokens = tokens_j[wrong_offset : wrong_offset + candidate_segment_size]
+                wrong_chans  = chans_j[wrong_offset : wrong_offset + candidate_segment_size]
                 candidate_info.append({
                     'tokens': wrong_tokens,
                     'channels': wrong_chans,
@@ -419,42 +326,40 @@ def evaluate_multiclass_with_similarity(
                     'source_shard': j
                 })
 
-            # Evaluate candidates using the similarity-based function.
+            # Evaluate each candidate using the helper function.
             candidate_losses = []
             for candidate in candidate_info:
-                loss = compute_similarity_loss_with_channels(
+                loss = compute_completion_loss_with_channels(
                     model,
                     prompt_tokens, prompt_chans,
                     candidate['tokens'], candidate['channels'],
-                    shot_len=shot_len,
                     device=device
                 )
                 candidate_losses.append(loss)
+            # Find the candidate with the lowest loss.
             min_loss_index = np.argmin(candidate_losses)
             chosen = candidate_info[min_loss_index]
             predicted_shard = chosen['source_shard']
-            true_shard = i
+            true_shard = i  # The prompt always comes from shard i
             confusion_matrix[true_shard, predicted_shard] += 1
 
             if chosen['label'] == 'correct':
                 correct_count += 1
             total_evals += 1
 
-            print(f"[Shard {i}] Block {block_index} similarity losses: {candidate_losses}")
-            print(
-                f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
+            print(f"[Shard {i}] Block {block_index} losses: {candidate_losses}")
+            print(f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
             print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
-            running_accuracy = correct_count / total_evals if total_evals > 0 else 0.0
-            print(f"Running accuracy so far: {running_accuracy*100:.2f}% ({correct_count}/{total_evals})")
-
-            pos += 2 * segment_size
+            pos += segment_size  # advance the block position
 
     if total_evals == 0:
         print("No evaluations were performed (possibly not enough tokens in the shards).")
         return 0.0
 
     accuracy = correct_count / total_evals
-    print(f"\n[Multi-class Similarity Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
+    print(f"\n[Multi-class Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
+
+    # Print the confusion matrix.
     print("\nConfusion Matrix (rows: true prompt shard, columns: predicted candidate shard):")
     header = "      " + " ".join([f"Shd{j}" for j in range(num_shards)])
     print(header)
@@ -463,34 +368,29 @@ def evaluate_multiclass_with_similarity(
         print(f"Shd{i} : {row_counts}")
     return accuracy
 
-
-# -----------------------------
-# Main Script
-# -----------------------------
-d = 'cuda'
+# === Main script ===
+d='cuda'
 device = torch.device(d)
 model = GPT(GPTConfig).to(device)
 if small_model:
-    checkpoint = torch.load('log/model_15000.pt', map_location=device)
+    checkpoint = torch.load('log/model_15000.pt', map_location=device, weights_only=False)
 else:
-    checkpoint = torch.load('log/model_30000.pt', map_location=device)
+    checkpoint = torch.load('log/model_30000.pt', map_location=device, weights_only=False)
 orig_sd = checkpoint['model']
 fixed_sd = {}
 for k, v in orig_sd.items():
     new_key = k.replace("_orig_mod.", "")
     fixed_sd[new_key] = v
-
-# Because the checkpoint was saved before the similarity head was added,
-# load with strict=False so the new parameter is left as initialized.
-model.load_state_dict(fixed_sd, strict=False)
+model.load_state_dict(fixed_sd, strict=True)
+model.config(checkpoint['config'])
 model.eval()
 
 # Example: Evaluate over 10 epochs using three shards.
 accs = []
 epochs = 10
 for epoch in range(epochs):
-    print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
-    acc = evaluate_multiclass_with_similarity(
+    print(f"\n=== Epoch {epoch+1}/{epochs} ===")
+    acc = evaluate_multiclass_with_channels(
         model=model,
         shard_paths=[
             "output_MEMA/shards/shard_train_0.pt",
@@ -498,8 +398,7 @@ for epoch in range(epochs):
             "output_MEMA/shards/shard_train_2.pt"
         ],
         device=d,
-        segment_size=512,
-        shot_len=128
+        segment_size=512  # candidate continuation remains 512 tokens
     )
     accs.append(acc)
 mean = np.mean(accs)
