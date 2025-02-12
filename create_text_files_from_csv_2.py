@@ -172,33 +172,33 @@ def generate_quantized_files_local(csv_file: str,
     channels_to_drop = instructions.get("channels_to_drop", [])
     print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
 
-    # --- Plot all raw channels ---
-    plt.figure(figsize=(15, 10))
-    filtered_columns = [col for col in all_columns if col not in channels_to_drop]
-    for col in filtered_columns:
-        plt.plot(df[col], label=col)
-    plt.title(f"All Channels (Raw) - {base_name}")
-    plt.xlabel("Sample Index")
-    plt.ylabel("Amplitude")
-    plt.legend(fontsize='small', loc='upper right')
-    plt.tight_layout()
-    raw_plot_file = os.path.join(output_folder, f"{base_name}_all_channels_before_preprocess.png")
-    plt.savefig(raw_plot_file)
-    plt.close()
+    # # --- Plot all raw channels ---
+    # plt.figure(figsize=(15, 10))
+    # filtered_columns = [col for col in all_columns if col not in channels_to_drop]
+    # for col in filtered_columns:
+    #     plt.plot(df[col], label=col)
+    # plt.title(f"All Channels (Raw) - {base_name}")
+    # plt.xlabel("Sample Index")
+    # plt.ylabel("Amplitude")
+    # plt.legend(fontsize='small', loc='upper right')
+    # plt.tight_layout()
+    # raw_plot_file = os.path.join(output_folder, f"{base_name}_all_channels_before_preprocess.png")
+    # plt.savefig(raw_plot_file)
+    # plt.close()
 
-    # --- (Optional) Create an overall bipolar channel for reference ---
-    left_data, right_data = average_eeg_channels(df, channels_to_drop)
-    overall_bipolar = left_data - right_data
-    plt.figure(figsize=(15, 5))
-    plt.plot(overall_bipolar, label="Overall Bipolar (Left-Right)", color='purple')
-    plt.title(f"Overall Bipolar Channel (Raw) - {base_name}")
-    plt.xlabel("Sample Index")
-    plt.ylabel("Amplitude")
-    plt.legend()
-    plt.tight_layout()
-    overall_plot_file = os.path.join(output_folder, f"{base_name}_overall_bipolar_channel.png")
-    plt.savefig(overall_plot_file)
-    plt.close()
+    # # --- (Optional) Create an overall bipolar channel for reference ---
+    # left_data, right_data = average_eeg_channels(df, channels_to_drop)
+    # overall_bipolar = left_data - right_data
+    # plt.figure(figsize=(15, 5))
+    # plt.plot(overall_bipolar, label="Overall Bipolar (Left-Right)", color='purple')
+    # plt.title(f"Overall Bipolar Channel (Raw) - {base_name}")
+    # plt.xlabel("Sample Index")
+    # plt.ylabel("Amplitude")
+    # plt.legend()
+    # plt.tight_layout()
+    # overall_plot_file = os.path.join(output_folder, f"{base_name}_overall_bipolar_channel.png")
+    # plt.savefig(overall_plot_file)
+    # plt.close()
 
     # --- Create Regional Bipolar Channels ---
     regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
@@ -411,7 +411,7 @@ if __name__ == "__main__":
     csv_files = []
     i = 1
     # Example: processing folder "ds004504"
-    folders = ["ds004504","ds002338","ds003061"]
+    folders = ["ds002338","ds003061"]
     for folder in folders:
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
         files = list_csv_files_in_folder(folder)

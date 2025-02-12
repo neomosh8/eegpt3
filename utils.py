@@ -69,13 +69,7 @@ def wavelet_decompose_window(window, wavelet='db2', level=4, normalization=True)
             std = 1  # Prevent division by zero
         window_normalized = (window - mean) / std
     else:
-        # Magnitude-based scaling for the entire dataset
-        mean_val, oom = calculate_stats(window)
-        # Example logic: if order of magnitude is >= -4, multiply by 10^6 (adjust to your preference)
-        if oom >= -4:
-            window_normalized = window * (1000000)
-        else:
-            window_normalized = window.copy()  # Keep original values
+        window_normalized = window.copy()  # Keep original values
 
     # ---- PLOT HISTOGRAM: amplitude distribution before wavelet decomposition ----
     # You can call the plotting function here to see how your data looks
