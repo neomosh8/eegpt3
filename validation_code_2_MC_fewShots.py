@@ -186,45 +186,28 @@ def compute_completion_loss_with_channels(
         completion_tokens, completion_channels,
         device="cuda"
 ):
-    # Concatenate prompt + candidate tokens and channels
+    # 1) Concatenate prompt + completion for tokens and channels
     full_tokens = torch.cat([prompt_tokens, completion_tokens], dim=0).unsqueeze(0).to(device)
     full_channels = torch.cat([prompt_channels, completion_channels], dim=0).unsqueeze(0).to(device)
-
+    total_len = full_tokens.size(1)
     prompt_len = prompt_tokens.size(0)
     completion_len = completion_tokens.size(0)
-
-    # Use only the first 256 candidate tokens for loss
-    valid_candidate_loss_length = 256
-    mask_vals = (
-            [0] * prompt_len +
-            [1] * min(valid_candidate_loss_length, completion_len) +
-            [0] * max(0, (completion_len - valid_candidate_loss_length))
-    )
+    mask_vals = [0] * prompt_len + [1] * completion_len
     mask = torch.tensor(mask_vals, device=device).unsqueeze(0)
-
-    # Forward pass (no gradients needed)
     with torch.no_grad():
         logits, _ = model(idx=full_tokens, channel_idx=full_channels)
-
-    # Shift logits and tokens for next-token prediction
     shift_logits = logits[:, :-1, :].contiguous()
     shift_tokens = full_tokens[:, 1:].contiguous()
     shift_mask = mask[:, 1:].contiguous()
-
-    # Flatten and compute per-token cross entropy loss
     flat_logits = shift_logits.view(-1, shift_logits.size(-1))
     flat_tokens = shift_tokens.view(-1)
     flat_mask = shift_mask.view(-1)
     ce_per_token = F.cross_entropy(flat_logits, flat_tokens, reduction='none')
-
-    # Only count the candidate tokens we care about
     ce_completion = ce_per_token * flat_mask
     sum_loss = ce_completion.sum()
     num_completion_tokens = flat_mask.sum()
     avg_loss = sum_loss / (num_completion_tokens + 1e-9)
-
     return avg_loss.item()
-
 
 # === New multi-class force choice evaluation function with confusion matrix ===
 def evaluate_multiclass_with_channels(
