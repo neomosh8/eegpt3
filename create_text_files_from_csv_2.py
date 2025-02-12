@@ -165,7 +165,7 @@ def generate_quantized_files_local(csv_file: str,
     all_columns = list(df.columns)
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
     if instructions.get("action") == "skip":
-        print(f"Skipping dataset '{base_name}' as instructed by GPT. names were:{all_columns}")
+        print(f"Skipping dataset '{base_name}' as instructed by GPT.")
         return base_name, 0, True  # (base_name, tokens=0, skipped)
 
     channels_to_drop = instructions.get("channels_to_drop", [])
@@ -184,7 +184,7 @@ def generate_quantized_files_local(csv_file: str,
     # raw_plot_file = os.path.join(output_folder, f"{base_name}_all_channels_before_preprocess.png")
     # plt.savefig(raw_plot_file)
     # plt.close()
-
+    #
     # # --- (Optional) Create an overall bipolar channel for reference ---
     # left_data, right_data = average_eeg_channels(df, channels_to_drop)
     # overall_bipolar = left_data - right_data
@@ -221,7 +221,6 @@ def generate_quantized_files_local(csv_file: str,
 
     # --- Preprocess the Regional Signals ---
     original_sps = calculate_sps(csv_file)
-    print(original_sps)
     regional_preprocessed = {}
     new_sps_val = None
     for key, signal_array in regional_bipolar.items():
@@ -302,11 +301,11 @@ def generate_quantized_files_local(csv_file: str,
             q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
             tokens_dict[region].extend(q_ids)
             # --- Debug Print: Number of tokens for this window and region ---
-            print(f"Window {i+1}/{num_windows} - {region}: {len(q_ids)} tokens")
+            print(f"Window {i + 1}/{num_windows} - {region}: {len(q_ids)} tokens")
 
     # --- Check that all token sequences have the same length ---
     lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-    # print("Total token counts per region for", base_name, ":", lengths)
+    print("Total token counts per region for", base_name, ":", lengths)
     if len(set(lengths.values())) != 1:
         print("Warning: The token sequences for the three regions are not the same length.")
     else:
@@ -330,7 +329,7 @@ def process_csv_file_s3(csv_key: str,
     """
     Downloads the CSV file from S3, processes it locally, and (if not skipped)
     uploads the resulting token files back to S3.
-    Returns a tuple: (base_name, total_tokens, skipped)
+    Returns a tuple: (folder, base_name, total_tokens, skipped)
     """
     s3 = boto3.client("s3")
     if not os.path.exists(local_dir):
@@ -339,6 +338,8 @@ def process_csv_file_s3(csv_key: str,
     local_csv = os.path.join(local_dir, csv_name)
     s3.download_file(bucket, csv_key, local_csv)
 
+    # Extract folder name from the S3 key.
+    folder = os.path.dirname(csv_key)  # e.g., "ds004504"
     # Process the CSV file and capture the results.
     result = generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
     base_name, token_count, skipped = result
@@ -350,13 +351,13 @@ def process_csv_file_s3(csv_key: str,
             s3.upload_file(fpath, bucket, f"{output_prefix}/{os.path.basename(fpath)}")
             os.remove(fpath)
     os.remove(local_csv)
-    return base_name, token_count, skipped
+    return folder, base_name, token_count, skipped
 
 
 def parallel_process_csv_files(csv_files):
     """
     Processes CSV files in parallel.
-    Returns a list of tuples (base_name, token_count, skipped) for all files.
+    Returns a list of tuples (folder, base_name, total_tokens, skipped) for all files.
     """
     results = []
     max_workers = max(multiprocessing.cpu_count() // 3, 1)
@@ -369,7 +370,9 @@ def parallel_process_csv_files(csv_files):
             try:
                 res = future.result()
                 results.append(res)
-                print(f"[{idx}/{total}] Done: {csvfile} -> {res[0]}, tokens: {res[1]}, skipped: {res[2]}")
+                folder, base, token_count, skipped = res
+                print(
+                    f"[{idx}/{total}] Done: {csvfile} -> Folder: {folder}, DB: {base}, tokens: {token_count}, skipped: {skipped}")
             except Exception as e:
                 print(f"Error processing {csvfile}: {e}")
     return results
@@ -379,24 +382,25 @@ def write_final_report(results):
     """
     Writes a final report (final_report.txt) to the current working directory,
     listing skipped databases and total token counts.
+    The report now includes the folder name for each database.
     """
     total_files = len(results)
-    total_tokens = sum(token_count for (_, token_count, _) in results)
-    skipped_dbs = [base for (base, _, skipped) in results if skipped]
+    total_tokens = sum(token_count for (_, _, token_count, _) in results)
+    skipped_dbs = [(folder, base) for (folder, base, _, skipped) in results if skipped]
     report_lines = []
     report_lines.append("Final Report:")
     report_lines.append(f"Total files processed: {total_files}")
     report_lines.append(f"Total tokens (all files, all channels): {total_tokens}")
     if skipped_dbs:
         report_lines.append("Skipped databases:")
-        for db in skipped_dbs:
-            report_lines.append(f"  - {db}")
+        for folder, db in skipped_dbs:
+            report_lines.append(f"  - Folder: {folder}, Database: {db}")
     else:
         report_lines.append("No databases were skipped.")
     report_lines.append("")
     report_lines.append("Details per database:")
-    for base, token_count, skipped in results:
-        report_lines.append(f"  - {base}: {token_count} tokens, skipped: {skipped}")
+    for folder, base, token_count, skipped in results:
+        report_lines.append(f"  - Folder: {folder}, Database: {base}: {token_count} tokens, skipped: {skipped}")
 
     report_text = "\n".join(report_lines)
     report_file = os.path.join(os.getcwd(), "final_report.txt")
@@ -410,10 +414,7 @@ if __name__ == "__main__":
     # folders = list_s3_folders()
     csv_files = []
     i = 1
-    # folders_to_delete = ["ds002338", "ds002336"]
-    # new_folders = [folder for folder in folders if folder not in folders_to_delete]
-    # folders = new_folders  # If you want to update the original 'folders' variable
-
+    # Example: processing folder "ds004504"
     folders = ["ds001787"]
     for folder in folders:
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
@@ -432,5 +433,5 @@ if __name__ == "__main__":
     result = process_csv_file_s3(csv_files[0])
     results = [result]
 
-    # Write final report with overall statistics.
+    # Write final report with overall statistics including folder names.
     write_final_report(results)
