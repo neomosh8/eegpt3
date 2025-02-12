@@ -151,9 +151,10 @@ def generate_quantized_files_local(csv_file: str,
       2. Plot all raw channels and the (reference) overall bipolar channel.
       3. Create three regional bipolar channels (frontal, motor–temporal, parietal–occipital).
       4. Preprocess each regional bipolar signal (storing the same new sampling rate) and plot them.
-      5. For each window (taken jointly across all three regions) perform wavelet decomposition
-         with joint normalization. Then, extract quantized tokens per channel.
-      6. Check that the token sequences for all three channels have the same length and
+      5. Perform a joint (global) normalization across all channels.
+      6. For each window (taken jointly across all three regions) perform wavelet decomposition
+         (with normalization turned off) then extract quantized tokens per channel.
+      7. Check that the token sequences for all three channels have the same length and
          write each sequence to a separate text file.
     """
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
@@ -227,6 +228,18 @@ def generate_quantized_files_local(csv_file: str,
         if new_sps_val is None:
             new_sps_val = new_sps
 
+    # --- Joint Global Normalization ---
+    # Concatenate all three channels to compute a global mean and standard deviation.
+    all_data = np.concatenate([
+        regional_preprocessed["frontal"],
+        regional_preprocessed["motor_temporal"],
+        regional_preprocessed["parietal_occipital"]
+    ])
+    global_mean = np.mean(all_data)
+    global_std = np.std(all_data)
+    for key in regional_preprocessed:
+        regional_preprocessed[key] = (regional_preprocessed[key] - global_mean) / global_std
+
     plt.figure(figsize=(15, 10))
     plt.subplot(3, 1, 1)
     plt.plot(regional_preprocessed["frontal"], label="Frontal Preprocessed", color='blue')
@@ -247,9 +260,11 @@ def generate_quantized_files_local(csv_file: str,
 
     # --- Joint Wavelet Decomposition & Quantization ---
     # Assume all three regional signals have the same length; take the minimum length.
-    min_length = min(len(regional_preprocessed["frontal"]),
-                     len(regional_preprocessed["motor_temporal"]),
-                     len(regional_preprocessed["parietal_occipital"]))
+    min_length = min(
+        len(regional_preprocessed["frontal"]),
+        len(regional_preprocessed["motor_temporal"]),
+        len(regional_preprocessed["parietal_occipital"])
+    )
     # Compute the number of samples per window using the new sampling rate.
     n_window_samples = int(window_length_sec * new_sps_val)
     num_windows = min_length // n_window_samples
@@ -267,7 +282,7 @@ def generate_quantized_files_local(csv_file: str,
             regional_preprocessed["motor_temporal"][window_start:window_end],
             regional_preprocessed["parietal_occipital"][window_start:window_end]
         ])
-        # Call the wavelet decomposition function once for the joint window.
+        # Call the wavelet decomposition function with normalization turned off.
         (decomposed_channels,
          coeffs_lengths,
          num_samples,
@@ -275,13 +290,11 @@ def generate_quantized_files_local(csv_file: str,
             window_data,
             wavelet=wvlet,
             level=level,
-            normalization=True
+            normalization=False  # Disable internal normalization since data is already normalized globally
         )
-        # decomposed_channels is a 2D array with one row per channel.
         # For each channel (row), flatten, quantize, and append the tokens.
         regions = ["frontal", "motor_temporal", "parietal_occipital"]
         for idx, region in enumerate(regions):
-            # Extract coefficients for this channel.
             coeffs_for_channel = decomposed_channels[idx].flatten()
             q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
             tokens_dict[region].extend(q_ids)
