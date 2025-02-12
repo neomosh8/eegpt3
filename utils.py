@@ -333,7 +333,7 @@ def call_gpt_for_instructions(channel_names, dataset_id):
 You are an assistant that helps in processing EEG datasets.
 Based on the following channel names, specify which channels to drop.
 If there are channels that are auxiliary channels or information (like timestamp, temp, EOG, ECG, GSR, Trigger, EMG, eye signals, etc.), those channels should be dropped.
-
+If channel names are not conventional (eg E1, E2 , A28, B24, etc) , you need to skip databse with     "action": "skip" 
 
 Provide the response in the following JSON format:
 

@@ -357,7 +357,7 @@ def parallel_process_csv_files(csv_files):
 csv_files = []
 i = 1
 # Example: processing folder "ds004504"
-folders = ["ds002338"]
+folders = ["ds003061"]
 for folder in folders:
     print(f"{i}/{len(folders)}: looking into folder: {folder}")
     files = list_csv_files_in_folder(folder)
