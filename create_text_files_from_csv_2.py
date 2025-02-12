@@ -306,7 +306,7 @@ def generate_quantized_files_local(csv_file: str,
 
     # --- Check that all token sequences have the same length ---
     lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-    print("Total token counts per region for", base_name, ":", lengths)
+    # print("Total token counts per region for", base_name, ":", lengths)
     if len(set(lengths.values())) != 1:
         print("Warning: The token sequences for the three regions are not the same length.")
     else:
