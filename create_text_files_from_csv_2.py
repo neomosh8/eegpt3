@@ -273,6 +273,7 @@ def generate_quantized_files_local(csv_file: str,
     tokens_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
 
     # Process windows jointly across all three channels.
+    regions = ["frontal", "motor_temporal", "parietal_occipital"]
     for i in range(num_windows):
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
@@ -290,20 +291,19 @@ def generate_quantized_files_local(csv_file: str,
             window_data,
             wavelet=wvlet,
             level=level,
-            normalization=False  # Disable internal normalization since data is already normalized globally
+            normalization=False  # Data is already normalized globally
         )
         # For each channel (row), flatten, quantize, and append the tokens.
-        regions = ["frontal", "motor_temporal", "parietal_occipital"]
-        print(f"Window {i + 1}/{num_windows} - {region}: {len(q_ids)} tokens")
-
         for idx, region in enumerate(regions):
             coeffs_for_channel = decomposed_channels[idx].flatten()
             q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
             tokens_dict[region].extend(q_ids)
+            # --- Debug Print: Number of tokens for this window and region ---
+            print(f"Window {i+1}/{num_windows} - {region}: {len(q_ids)} tokens")
 
     # --- Check that all token sequences have the same length ---
     lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-    print("Token counts per region:", lengths)
+    print("Total token counts per region:", lengths)
     if len(set(lengths.values())) != 1:
         print("Warning: The token sequences for the three regions are not the same length.")
     else:
