@@ -156,6 +156,8 @@ def generate_quantized_files_local(csv_file: str,
          (with normalization turned off) then extract quantized tokens per channel.
       7. Check that the token sequences for all three channels have the same length and
          write each sequence to a separate text file.
+      8. Return a tuple: (base_name, total_tokens, skipped)
+         where total_tokens is the sum of tokens for all channels in this file.
     """
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
 
@@ -165,37 +167,38 @@ def generate_quantized_files_local(csv_file: str,
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
     if instructions.get("action") == "skip":
         print(f"Skipping dataset '{base_name}' as instructed by GPT.")
-        return
+        return base_name, 0, True  # (base_name, tokens=0, skipped)
+
     channels_to_drop = instructions.get("channels_to_drop", [])
-    print(f"Dropping channels: {channels_to_drop}")
+    print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
 
     # --- Plot all raw channels ---
-    # plt.figure(figsize=(15, 10))
-    # filtered_columns = [col for col in all_columns if col not in channels_to_drop]
-    # for col in filtered_columns:
-    #     plt.plot(df[col], label=col)
-    # plt.title(f"All Channels (Raw) - {base_name}")
-    # plt.xlabel("Sample Index")
-    # plt.ylabel("Amplitude")
-    # plt.legend(fontsize='small', loc='upper right')
-    # plt.tight_layout()
-    # raw_plot_file = os.path.join(output_folder, f"{base_name}_all_channels_before_preprocess.png")
-    # plt.savefig(raw_plot_file)
-    # plt.close()
+    plt.figure(figsize=(15, 10))
+    filtered_columns = [col for col in all_columns if col not in channels_to_drop]
+    for col in filtered_columns:
+        plt.plot(df[col], label=col)
+    plt.title(f"All Channels (Raw) - {base_name}")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Amplitude")
+    plt.legend(fontsize='small', loc='upper right')
+    plt.tight_layout()
+    raw_plot_file = os.path.join(output_folder, f"{base_name}_all_channels_before_preprocess.png")
+    plt.savefig(raw_plot_file)
+    plt.close()
 
-    # # --- (Optional) Create an overall bipolar channel for reference ---
-    # left_data, right_data = average_eeg_channels(df, channels_to_drop)
-    # overall_bipolar = left_data - right_data
-    # plt.figure(figsize=(15, 5))
-    # plt.plot(overall_bipolar, label="Overall Bipolar (Left-Right)", color='purple')
-    # plt.title(f"Overall Bipolar Channel (Raw) - {base_name}")
-    # plt.xlabel("Sample Index")
-    # plt.ylabel("Amplitude")
-    # plt.legend()
-    # plt.tight_layout()
-    # overall_plot_file = os.path.join(output_folder, f"{base_name}_overall_bipolar_channel.png")
-    # plt.savefig(overall_plot_file)
-    # plt.close()
+    # --- (Optional) Create an overall bipolar channel for reference ---
+    left_data, right_data = average_eeg_channels(df, channels_to_drop)
+    overall_bipolar = left_data - right_data
+    plt.figure(figsize=(15, 5))
+    plt.plot(overall_bipolar, label="Overall Bipolar (Left-Right)", color='purple')
+    plt.title(f"Overall Bipolar Channel (Raw) - {base_name}")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Amplitude")
+    plt.legend()
+    plt.tight_layout()
+    overall_plot_file = os.path.join(output_folder, f"{base_name}_overall_bipolar_channel.png")
+    plt.savefig(overall_plot_file)
+    plt.close()
 
     # --- Create Regional Bipolar Channels ---
     regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
@@ -271,9 +274,9 @@ def generate_quantized_files_local(csv_file: str,
 
     # Prepare a dictionary to accumulate tokens for each region.
     tokens_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
+    regions = ["frontal", "motor_temporal", "parietal_occipital"]
 
     # Process windows jointly across all three channels.
-    regions = ["frontal", "motor_temporal", "parietal_occipital"]
     for i in range(num_windows):
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
@@ -303,7 +306,7 @@ def generate_quantized_files_local(csv_file: str,
 
     # --- Check that all token sequences have the same length ---
     lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-    print("Total token counts per region:", lengths)
+    print("Total token counts per region for", base_name, ":", lengths)
     if len(set(lengths.values())) != 1:
         print("Warning: The token sequences for the three regions are not the same length.")
     else:
@@ -316,29 +319,47 @@ def generate_quantized_files_local(csv_file: str,
             f_out.write(" ".join(tokens))
     print(f"Done generating quantized files for {csv_file}.")
 
+    total_tokens = sum(len(tokens) for tokens in tokens_dict.values())
+    return base_name, total_tokens, False  # (database name, token count, skipped flag)
+
 
 def process_csv_file_s3(csv_key: str,
                         bucket: str = "dataframes--use1-az6--x-s3",
                         local_dir: str = "/tmp",
                         output_prefix: str = "output"):
+    """
+    Downloads the CSV file from S3, processes it locally, and (if not skipped)
+    uploads the resulting token files back to S3.
+    Returns a tuple: (base_name, total_tokens, skipped)
+    """
     s3 = boto3.client("s3")
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
     csv_name = os.path.basename(csv_key)
     local_csv = os.path.join(local_dir, csv_name)
     s3.download_file(bucket, csv_key, local_csv)
-    generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
-    base = os.path.splitext(csv_name)[0]
-    # Upload the three generated token files.
-    for region in ["frontal", "motor_temporal", "parietal_occipital"]:
-        fpath = os.path.join(local_dir, f"{base}_quantized_coeffs_{region}.txt")
-        s3.upload_file(fpath, bucket, f"{output_prefix}/{os.path.basename(fpath)}")
-        os.remove(fpath)
+
+    # Process the CSV file and capture the results.
+    result = generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
+    base_name, token_count, skipped = result
+
+    # If the file was processed (not skipped), upload the token files.
+    if not skipped:
+        for region in ["frontal", "motor_temporal", "parietal_occipital"]:
+            fpath = os.path.join(local_dir, f"{base_name}_quantized_coeffs_{region}.txt")
+            s3.upload_file(fpath, bucket, f"{output_prefix}/{os.path.basename(fpath)}")
+            os.remove(fpath)
     os.remove(local_csv)
+    return base_name, token_count, skipped
 
 
 def parallel_process_csv_files(csv_files):
-    max_workers = multiprocessing.cpu_count() // 3
+    """
+    Processes CSV files in parallel.
+    Returns a list of tuples (base_name, token_count, skipped) for all files.
+    """
+    results = []
+    max_workers = max(multiprocessing.cpu_count() // 3, 1)
     total = len(csv_files)
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_csv_file_s3, f): i for i, f in enumerate(csv_files, start=1)}
@@ -346,25 +367,67 @@ def parallel_process_csv_files(csv_files):
             idx = futures[future]
             csvfile = csv_files[idx - 1]
             try:
-                future.result()
-                print(f"[{idx}/{total}] Done: {csvfile}")
+                res = future.result()
+                results.append(res)
+                print(f"[{idx}/{total}] Done: {csvfile} -> {res[0]}, tokens: {res[1]}, skipped: {res[2]}")
             except Exception as e:
                 print(f"Error processing {csvfile}: {e}")
+    return results
+
+
+def write_final_report(results):
+    """
+    Writes a final report (final_report.txt) to the current working directory,
+    listing skipped databases and total token counts.
+    """
+    total_files = len(results)
+    total_tokens = sum(token_count for (_, token_count, _) in results)
+    skipped_dbs = [base for (base, _, skipped) in results if skipped]
+    report_lines = []
+    report_lines.append("Final Report:")
+    report_lines.append(f"Total files processed: {total_files}")
+    report_lines.append(f"Total tokens (all files, all channels): {total_tokens}")
+    if skipped_dbs:
+        report_lines.append("Skipped databases:")
+        for db in skipped_dbs:
+            report_lines.append(f"  - {db}")
+    else:
+        report_lines.append("No databases were skipped.")
+    report_lines.append("")
+    report_lines.append("Details per database:")
+    for base, token_count, skipped in results:
+        report_lines.append(f"  - {base}: {token_count} tokens, skipped: {skipped}")
+
+    report_text = "\n".join(report_lines)
+    report_file = os.path.join(os.getcwd(), "final_report.txt")
+    with open(report_file, "w") as f:
+        f.write(report_text)
+    print(f"Final report written to {report_file}")
 
 
 # --- MAIN EXECUTION ---
-# folders = list_s3_folders()
-csv_files = []
-i = 1
-# Example: processing folder "ds004504"
-folders = ["ds003061"]
-for folder in folders:
-    print(f"{i}/{len(folders)}: looking into folder: {folder}")
-    files = list_csv_files_in_folder(folder)
-    csv_files.extend(files)
-    i += 1
-print(f"Done listing. Total files: {len(csv_files)}")
-# Uncomment to process all CSV files in parallel:
-# parallel_process_csv_files(csv_files)
-# For testing, process a single CSV file from S3 locally:
-process_csv_file_s3(csv_files[0])
+if __name__ == "__main__":
+    folders = list_s3_folders()
+    csv_files = []
+    i = 1
+    # Example: processing folder "ds004504"
+    folders = ["ds004504","ds002338","ds003061"]
+    for folder in folders:
+        print(f"{i}/{len(folders)}: Looking into folder: {folder}")
+        files = list_csv_files_in_folder(folder)
+        csv_files.extend(files)
+        i += 1
+    print(f"Done listing. Total files: {len(csv_files)}")
+
+    # Choose one of the following processing methods:
+
+    # Option 1: Process all CSV files in parallel.
+    results = parallel_process_csv_files(csv_files)
+
+    # Option 2: For testing, process a single CSV file from S3 locally.
+    # Uncomment the following lines to test with a single file.
+    # result = process_csv_file_s3(csv_files[0])
+    # results = [result]
+
+    # Write final report with overall statistics.
+    write_final_report(results)
