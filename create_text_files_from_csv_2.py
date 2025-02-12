@@ -340,6 +340,7 @@ def process_csv_file_s3(csv_key: str,
 
     # Extract folder name from the S3 key.
     folder = os.path.dirname(csv_key)  # e.g., "ds004504"
+
     # Process the CSV file and capture the results.
     result = generate_quantized_files_local(csv_file=local_csv, output_folder=local_dir)
     base_name, token_count, skipped = result
