@@ -415,8 +415,16 @@ if __name__ == "__main__":
     # folders = list_s3_folders()
     csv_files = []
     i = 1
+    folders = ["ds001971"]
+
+    folders_to_delete = ["ds002338", "ds002336","ds001849",]
+
+    new_folders = [folder for folder in folders if folder not in folders_to_delete]
+
+    folders = new_folders  # If you want to update the original 'folders' variable
     # Example: processing folder "ds004504"
-    folders = ["ds001849"]
+
+
     for folder in folders:
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
         files = list_csv_files_in_folder(folder)
