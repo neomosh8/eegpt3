@@ -415,7 +415,7 @@ if __name__ == "__main__":
     # folders = list_s3_folders()
     csv_files = []
     i = 1
-    folders = ["ds003195"]
+    folders = ["ds003380"]
 
     folders_to_delete = ["ds002338", "ds002336","ds001849","ds001971","ds002718","ds002814"]
 
