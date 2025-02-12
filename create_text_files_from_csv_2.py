@@ -222,6 +222,7 @@ def generate_quantized_files_local(csv_file: str,
 
     # --- Preprocess the Regional Signals ---
     original_sps = calculate_sps(csv_file)
+    print(original_sps)
     regional_preprocessed = {}
     new_sps_val = None
     for key, signal_array in regional_bipolar.items():
