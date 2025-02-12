@@ -120,7 +120,7 @@ def plot_window(window_data, sps, window_index=None):
 
 
 def process_and_save(data, sps, coeffs_path, chans_path,
-                     wavelet='db2', level=4, window_len_sec=1.8,
+                     wavelet='db2', level=4, window_len_sec=1.18,
                      plot_windows=False, plot_random_n=1):
     """
     Segments a two-channel EEG signal into non-overlapping windows,
@@ -226,7 +226,7 @@ def process_vhdr_file(vhdr_path):
     chans_path = os.path.join(OUTPUT_BASE, f"{subject_id}_combined_channels.txt")
 
     process_and_save(prep_data, new_fs, coeffs_path, chans_path,
-                     wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
+                     wavelet='db2', level=4, window_len_sec=1.18, plot_windows=True)
     print(f"Finished processing subject: {subject_id}")
 
 

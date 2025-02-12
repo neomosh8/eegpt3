@@ -388,7 +388,7 @@ if __name__ == "__main__":
             chans_path = os.path.join(output_base, f"{subject_id}_combined_channels.txt")
 
             process_and_save(prep_data, new_fs, coeffs_path, chans_path,
-                             wavelet='db2', level=4, window_len_sec=1.8, plot_windows=True)
+                             wavelet='db2', level=4, window_len_sec=1.18, plot_windows=True)
             print(f"Finished processing subject: {subject_id}")
 
     print("Done!")

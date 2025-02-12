@@ -208,7 +208,7 @@ if __name__ == "__main__":
         # Since each epoch is 1 second, we use a window length of 1 second.
         wavelet_name = 'db2'
         level = 4
-        window_len_sec = 1.8
+        window_len_sec = 1.18
 
         # Define output paths (one set of files per class label)
         coeffs_path = f"output_MEMA/class_{lab}_coeffs.txt"
