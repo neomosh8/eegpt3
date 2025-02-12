@@ -112,8 +112,8 @@ def VAL_preprocess(
 
 # Example usage:
 VAL_preprocess(
-    source_dir="output_EMOTIV/",
-    target_data_dir="output_EMOTIV/shards",
+    source_dir="output_MEMA/",
+    target_data_dir="output_MEMA/shards",
     shard_prefix="shard",
     limit_files=200000  # or None to process all files
 )
