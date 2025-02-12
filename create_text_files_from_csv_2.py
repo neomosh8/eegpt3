@@ -414,7 +414,7 @@ if __name__ == "__main__":
     # new_folders = [folder for folder in folders if folder not in folders_to_delete]
     # folders = new_folders  # If you want to update the original 'folders' variable
 
-    folders = ["ds001785"]
+    folders = ["ds001787"]
     for folder in folders:
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
         files = list_csv_files_in_folder(folder)
