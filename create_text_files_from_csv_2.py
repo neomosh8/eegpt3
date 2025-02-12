@@ -165,7 +165,7 @@ def generate_quantized_files_local(csv_file: str,
     all_columns = list(df.columns)
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
     if instructions.get("action") == "skip":
-        print(f"Skipping dataset '{base_name}' as instructed by GPT.")
+        print(f"Skipping dataset '{base_name}' as instructed by GPT. names were:{all_columns}")
         return base_name, 0, True  # (base_name, tokens=0, skipped)
 
     channels_to_drop = instructions.get("channels_to_drop", [])
