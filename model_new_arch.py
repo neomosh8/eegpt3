@@ -355,7 +355,8 @@ if master_process:
 #########################
 # Training Loop (No Epochs)
 #########################
-print("Starting training...")
+if master_process:
+    print("Starting training...")
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
@@ -404,9 +405,10 @@ for step in range(max_steps):
     dt = t1 - t0  # time difference in seconds
     tokens_processed = B * T * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed / dt
-
+    current_lrs = [pg['lr'] for pg in optimizer.param_groups]
+    formatted_lrs = ", ".join(f"{lr:.4e}" for lr in current_lrs)
     if master_process:
-        print(f"Step {step:5d} | Loss: {loss_accum.item():.6f} | LR: {lr:.4e} | "
+        print(f"Step {step:5d} | Loss: {loss_accum.item():.6f} | LR: {formatted_lrs} | "
               f"Grad Norm: {grad_norm:.4f} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
             f.write(f"{step} {loss_accum.item():.6f}\n")
