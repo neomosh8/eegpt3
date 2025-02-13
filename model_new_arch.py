@@ -258,7 +258,7 @@ class DataLoaderLiteAllInMemory:
         if self.T % GPTConfig().num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[:1000]
+        self.shard_files = sorted(glob.glob(pattern))[:10000]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -463,7 +463,7 @@ for step in range(max_steps):
     t0 = time.time()
     model.train()
     scaler = torch.amp.GradScaler(device='cuda')
-    loss_plotter = LossPlotter(plot_interval=500, window=50)
+    loss_plotter = LossPlotter(plot_interval=50, window=50)
 
     loss, grad_norm = train_step_TESLA(
         model=model,
