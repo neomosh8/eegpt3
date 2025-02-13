@@ -7,20 +7,21 @@ import concurrent.futures
 from pathlib import Path
 from typing import List
 
-from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
+# Use the new tokenizer.
+from Tokenizer_new_arch import StreamingPassBasedWordLevelBPETokenizer
 
 # Global tokenizer instance for each worker.
 _GLOBAL_TOKENIZER = None
 def _get_tokenizer():
     global _GLOBAL_TOKENIZER
     if _GLOBAL_TOKENIZER is None:
-        tok = Tokenizer()
-        tok.load_merges("neo_tokenizer/merges.json")
-        tok.load_vocab("neo_tokenizer/vocab.json")
+        tok = StreamingPassBasedWordLevelBPETokenizer()
+        # Load the pretrained tokenizer model (merges and vocab) from a single JSON file.
+        tok.load("neo_tokenizer/tokenizer_model.json")
         _GLOBAL_TOKENIZER = tok
     return _GLOBAL_TOKENIZER
 
-# Define the regions (which now represent channels)
+# Define the regions (channels)
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 def _process_single_group(args):
@@ -28,10 +29,10 @@ def _process_single_group(args):
     Process one group of files (one base name) corresponding to all regions.
     For each region file:
       - Download the file,
-      - Tokenize its contents.
-    Then, trim all region token sequences to the same length and concatenate them
-    (in the order given by REGIONS). This produces a shard whose length is divisible
-    by the number of regions (channels), which is required by the new model.
+      - Prepend the token '|trial|' and a space,
+      - Tokenize its contents using the new tokenizer.
+    Then, trim all region token sequences to the same length and concatenate them.
+    This produces a shard whose total token length is divisible by the number of regions.
     """
     (base_name, files, shard_prefix, local_data_dir, bucket_name,
      split_name, group_index, total_groups) = args
@@ -55,10 +56,10 @@ def _process_single_group(args):
         print(f"  - Downloading file for region {region}: {key}")
         s3.download_file(bucket_name, key, local_path)
         with open(local_path, 'r', encoding='utf-8') as f:
-            text = f.read().strip()
-        raw_tokens = text.split()
-        # (Optionally, insert a marker token if desired)
-        encoded, pos = tokenizer.encode_with_alignment(raw_tokens, as_ids=True)
+            # Prepend the token '|trial|' plus a space to the file content.
+            text = '|trial| ' + f.read().strip()
+        # Use the new tokenizer's encode method (no alignment here).
+        encoded = tokenizer.encode(text)
         tokens_tensor = torch.tensor(encoded, dtype=torch.long)
         region_tokens.append(tokens_tensor)
         try:
@@ -66,7 +67,7 @@ def _process_single_group(args):
         except OSError as e:
             print(f"  - Error removing {local_path}: {e}")
 
-    # Ensure all regions have the same length; trim if necessary.
+    # Ensure all regions have the same token length; trim if necessary.
     lengths = [t.size(0) for t in region_tokens]
     min_length = min(lengths)
     if any(l != min_length for l in lengths):
@@ -93,11 +94,17 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
                                shard_prefix: str = "shard", limit_files: int = None,
                                val_ratio: float = 0.1):
     """
-    - Lists all *_quantized_coeffs_*.txt files in S3 under the given prefix.
-    - Groups files by base name (i.e. common part before '_quantized_coeffs_').
-    - Each valid group must contain files for all regions.
-    - Splits the groups into train and validation splits based on val_ratio.
-    - Processes each group in parallel and saves shards.
+    This function performs the following steps:
+      - Lists all *_quantized_coeffs_*.txt files in S3 under the specified prefix.
+      - Groups files by their base name (common part before '_quantized_coeffs_'),
+        so that each group represents one subject/instance.
+      - Filters groups so that only those with files for all defined regions (channels) are retained.
+      - Splits the groups into training and validation splits based on val_ratio.
+      - Processes each group in parallel:
+          For each group, it downloads the corresponding files from S3, prepends the token '|trial|'
+          to the contents of each file, tokenizes the text using the new StreamingPassBasedWordLevelBPETokenizer,
+          trims the token sequences to the same length, concatenates them (in the defined order of regions),
+          and saves the result as a shard.
     """
     os.makedirs(local_data_dir, exist_ok=True)
     s3 = boto3.client('s3')
@@ -124,7 +131,7 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
         base_name = parts[0]
         groups.setdefault(base_name, []).append(key)
 
-    # Keep only groups that have exactly the expected number of regions.
+    # Retain only groups that have exactly the expected number of regions.
     valid_groups = {base: files for base, files in groups.items() if len(files) == len(REGIONS)}
     print(f"Found {len(valid_groups)} valid groups (each with {len(REGIONS)} regions).")
     if not valid_groups:
