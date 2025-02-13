@@ -298,7 +298,7 @@ class DataLoaderLiteAllInMemory:
 # Training hyperparameters
 B = 4              # micro-batch size (sequences per mini-batch)
 T = 1032           # sequence length (tokens per sequence)
-desired_B_eff = 500000  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 50000  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
@@ -374,7 +374,7 @@ for step in range(max_steps):
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
 
         # Use autocast (using bfloat16 in this example)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_type, dtype=torch.float16):
             logits, loss = model(x, y)
 
         # Scale loss to average over accumulation steps.
