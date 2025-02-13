@@ -340,9 +340,9 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_l
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=3e-4,
+    max_lr=base_lr,
     total_steps=max_steps,              # total number of training steps
-    pct_start=0.3,   # fraction of steps for warmup
+    pct_start=0.15,   # fraction of steps for warmup
     anneal_strategy='cos',                # cosine annealing for decay
     cycle_momentum=False                  # typically False for AdamW
 )
