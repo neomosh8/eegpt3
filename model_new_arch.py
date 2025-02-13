@@ -461,7 +461,7 @@ if master_process:
 for step in range(max_steps):
     t0 = time.time()
     model.train()
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler(device='cuda')
 
     loss, grad_norm = train_step_TESLA(
         model=model,
@@ -509,7 +509,7 @@ for step in range(max_steps):
 
             current_val_loss = val_loss_accum
             if master_process:
-                print(f"Step {step} | val_loss {current_val_loss:.4f} ")
+                print(f"Step {step} | val_loss {current_val_loss.item():.4f} ")
 
 
 # Clean up DDP resources.
