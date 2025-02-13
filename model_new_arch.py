@@ -305,6 +305,18 @@ else:
     epoch_num = 20
     B = 8
     T = 1024
+train_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
+                                         num_processes=ddp_world_size,
+                                         local_data_dir="./local_shards",
+                                         shard_prefix="mydata",
+                                         split='train',
+                                         shuffle_shards=True)
+val_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
+                                       num_processes=ddp_world_size,
+                                       local_data_dir="./local_shards",
+                                       shard_prefix="mydata",
+                                       split='val',
+                                       shuffle_shards=False)
 
 # Define your desired effective batch size (in number of sequences)
 desired_B_eff = 500000  # e.g. you want 256 sequences per optimizer update
