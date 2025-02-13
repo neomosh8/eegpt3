@@ -355,51 +355,74 @@ if master_process:
 #########################
 # Training Loop (No Epochs)
 #########################
-if master_process:
-    print("Starting training...")
-for step in range(max_steps):
-    t0 = time.time()
-    last_step = (step == max_steps - 1)
 
-    model.train()
+
+def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp):
+    """
+    Performs a single training step with proper gradient accumulation in DDP mode.
+    """
     optimizer.zero_grad()
-    loss_accum = 0.0
+    loss_accum = torch.zeros(1, device=device)
 
-    # Gradient accumulation loop.
+    # Disable DDP sync initially
+    if ddp:
+        model.require_backward_grad_sync = False
+
+    # Accumulate gradients locally on each GPU
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
 
-        # In DDP, only sync gradients on the last micro-step.
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-
-        # Use autocast (using bfloat16 in this example)
         with torch.autocast(device_type=device_type, dtype=torch.float16):
             logits, loss = model(x, y)
 
-        # Scale loss to average over accumulation steps.
+        # Scale loss by accumulation steps
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
 
-        # --- Intermediate Logging ---
-        # Adjusted logging: print every 100 micro-steps.
-        # if master_process:
-        #     print(f"  Step {step:5d} | Micro-step {micro_step + 1}/{grad_accum_steps} | "
-        #           f"micro loss: {loss.item() * grad_accum_steps:.6f}", flush=True)
-
+    # Now sync gradients across all GPUs
     if ddp:
+        # Re-enable gradient sync
+        model.require_backward_grad_sync = True
+
+        # Average the accumulated gradients across GPUs
+        for param in model.parameters():
+            if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
+        # Average the loss
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
-    # Optionally clip gradients.
+    # Clip gradients
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
+    # Step optimizer and scheduler
     optimizer.step()
     scheduler.step()
 
+    return loss_accum.item(), grad_norm
+
+
+if master_process:
+    print("Starting training...")
+for step in range(max_steps):
+    t0 = time.time()
+    model.train()
+
+    loss, grad_norm = train_step(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        grad_accum_steps=grad_accum_steps,
+        device=device,
+        device_type=device_type,
+        ddp=ddp
+    )
+
     if device_type == "cuda":
-        torch.cuda.synchronize()  # Ensure GPU has finished work
+        torch.cuda.synchronize()
 
     t1 = time.time()
     dt = t1 - t0  # time difference in seconds
@@ -408,10 +431,10 @@ for step in range(max_steps):
     current_lrs = [pg['lr'] for pg in optimizer.param_groups]
     formatted_lrs = ", ".join(f"{lr:.4e}" for lr in current_lrs)
     if master_process:
-        print(f"Step {step:5d} | Loss: {loss_accum.item():.6f} | LR: {formatted_lrs} | "
+        print(f"Step {step:5d} | Loss: {loss:.6f} | LR: {formatted_lrs} | "
               f"Grad Norm: {grad_norm:.4f} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
-            f.write(f"{step} {loss_accum.item():.6f}\n")
+            f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
     # if step % 500 == 0 or last_step:
