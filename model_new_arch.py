@@ -316,7 +316,7 @@ val_loader = DataLoaderLiteAllInMemory(
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
 num_passes = 5
-tokens_per_optim = B * T * grad_accum_steps  # tokens processed per optimizer step
+tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
 steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
 max_steps = num_passes * steps_per_pass
 if master_process:
@@ -415,20 +415,20 @@ for step in range(max_steps):
             f.write(f"{step} {loss_accum.item():.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    if step % 500 == 0 or last_step:
-        model.eval()
-        val_loss_total = 0.0
-        val_steps = (val_loader.total_len - 1) // (B * T)
-        with torch.no_grad():
-            for _ in range(val_steps):
-                x_val, y_val = val_loader.next_batch()
-                x_val, y_val = x_val.to(device), y_val.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
-                    _, v_loss = model(x_val, y_val)
-                val_loss_total += v_loss.item()
-        avg_val_loss = val_loss_total / val_steps
-        if master_process:
-            print(f"--- Validation at step {step}: Loss {avg_val_loss:.6f}")
+    # if step % 500 == 0 or last_step:
+    #     model.eval()
+    #     val_loss_total = 0.0
+    #     val_steps = (val_loader.total_len - 1) // (B * T)
+    #     with torch.no_grad():
+    #         for _ in range(val_steps):
+    #             x_val, y_val = val_loader.next_batch()
+    #             x_val, y_val = x_val.to(device), y_val.to(device)
+    #             with torch.autocast(device_type=device_type, dtype=torch.float16):
+    #                 _, v_loss = model(x_val, y_val)
+    #             val_loss_total += v_loss.item()
+    #     avg_val_loss = val_loss_total / val_steps
+    #     if master_process:
+    #         print(f"--- Validation at step {step}: Loss {avg_val_loss:.6f}")
 
 # Clean up DDP resources.
 if ddp:
