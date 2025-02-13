@@ -291,94 +291,117 @@ class DataLoaderLiteAllInMemory:
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
 
+
 ###############################################################################
 # Training Loop (Epoch-Based)
 ###############################################################################
-if True:  # small_model flag
-    epoch_num = 50
-    B = 64
-    T = 1024
+
+# For the small model flag
+if True:  # small_model flag enabled
+    epoch_num = 5
+    B = 4  # micro-batch size (number of sequences per mini-batch)
+    T = 1032  # sequence length (tokens per sequence)
 else:
     epoch_num = 20
     B = 8
     T = 1024
 
-train_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
-                                         num_processes=ddp_world_size,
-                                         local_data_dir="./local_shards",
-                                         shard_prefix="mydata",
-                                         split='train',
-                                         shuffle_shards=True)
-val_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
-                                       num_processes=ddp_world_size,
-                                       local_data_dir="./local_shards",
-                                       shard_prefix="mydata",
-                                       split='val',
-                                       shuffle_shards=False)
+# Define your desired effective batch size (in number of sequences)
+desired_B_eff = 500000  # e.g. you want 256 sequences per optimizer update
 
-model = GPT(GPTConfig())
-model.to(device)
-model = torch.compile(model)
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-raw_model = model.module if ddp else model
+# Compute the number of gradient accumulation steps.
+# Each micro-step processes B sequences, so we need:
+grad_accum_steps = desired_B_eff // B
+if master_process:
+    print(f"Using grad_accum_steps: {grad_accum_steps}")
 
-optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-3, device=device)
+# Calculate the number of tokens processed per micro-step and per optimizer step.
+tokens_per_micro = B * T  # tokens per micro-batch
+tokens_per_optim = tokens_per_micro * grad_accum_steps  # tokens per optimizer update
 
-# Compute steps per epoch from training data length
-steps_per_epoch = (train_loader.total_len - 1) // (B * T)
+# Compute steps per epoch based on the total token count available in the training set.
+# (Subtracting 1 because targets are shifted by one token.)
+steps_per_epoch = (train_loader.total_len - 1) // tokens_per_optim
 if master_process:
     print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
 
-# Create the scheduler using epochs and steps_per_epoch
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer,
-    max_lr=[6e-3, 6e-3],
-    epochs=epoch_num,
-    steps_per_epoch=steps_per_epoch,
-    anneal_strategy='cos',
-    cycle_momentum=False
-)
-
+# (The scheduler was already created with epochs=epoch_num and steps_per_epoch=steps_per_epoch)
 
 for epoch in range(epoch_num):
-    print(f"\n--- Epoch {epoch+1}/{epoch_num} ---")
+    print(f"\n--- Epoch {epoch + 1}/{epoch_num} ---")
     train_loader.reset()
     model.train()
     epoch_loss = 0.0
-    for step in range(steps_per_epoch):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-        optimizer.zero_grad()
-        with torch.autocast(device_type=device_type, dtype=torch.float16):
-            logits, loss = model(idx=x, targets=y)
+    epoch_start_time = time.time()
 
-        loss.backward()
+    for step in range(steps_per_epoch):
+        step_start_time = time.time()
+        optimizer.zero_grad()
+        loss_accum = 0.0
+
+        # Perform grad accumulation over several micro-steps
+        for micro_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+
+            # For Distributed Data Parallel: only sync gradients on the final micro-step.
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+
+            with torch.autocast(device_type=device_type, dtype=torch.float16):
+                logits, loss = model(idx=x, targets=y)
+
+            # Scale loss to account for accumulation (we want an average)
+            loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
+            loss.backward()
+
+        if ddp:
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+        # Optionally clip gradients before stepping.
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # Optimizer and scheduler step.
         optimizer.step()
         scheduler.step()
-        epoch_loss += loss.item()
-        if (step + 1) % 50 == 0 and master_process:
-            print(f"Step {step+1}/{steps_per_epoch} - Loss: {loss.item():.4f}")
+
+        # Wait for GPU to finish work (if using CUDA)
+        if device_type == "cuda":
+            torch.cuda.synchronize()
+
+        step_time = time.time() - step_start_time
+        tokens_processed = tokens_per_optim * ddp_world_size
+        tokens_per_sec = tokens_processed / step_time
+
+        epoch_loss += loss_accum.item()
+        if master_process and ((step + 1) % 50 == 0 or step == steps_per_epoch - 1):
+            print(f"Epoch {epoch + 1:3d} | Step {step + 1:5d}/{steps_per_epoch} | "
+                  f"Loss: {loss_accum.item():.6f} | Grad Norm: {grad_norm:.4f} | "
+                  f"Step Time: {step_time * 1000:.2f} ms | Tokens/sec: {tokens_per_sec:.2f}")
+
     avg_epoch_loss = epoch_loss / steps_per_epoch
     if master_process:
-        print(f"Epoch {epoch+1} Average Training Loss: {avg_epoch_loss:.4f}")
+        print(f"Epoch {epoch + 1} Average Training Loss: {avg_epoch_loss:.6f}")
 
+    # Validation loop
     val_loader.reset()
     model.eval()
-    val_steps = (val_loader.total_len - 1) // (B * T)
     val_loss_total = 0.0
+    # Calculate validation steps (each batch is of size B x T)
+    val_steps = (val_loader.total_len - 1) // (B * T)
     with torch.no_grad():
         for _ in range(val_steps):
             x_val, y_val = val_loader.next_batch()
             x_val, y_val = x_val.to(device), y_val.to(device)
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.float16):
                 _, v_loss = model(idx=x_val, targets=y_val)
             val_loss_total += v_loss.item()
     avg_val_loss = val_loss_total / val_steps
     if master_process:
-        print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
+        print(f"Epoch {epoch + 1} Validation Loss: {avg_val_loss:.6f}")
         os.makedirs("log", exist_ok=True)
-        checkpoint_path = os.path.join("log", f"model_epoch_{epoch+1:03d}.pt")
+        checkpoint_path = os.path.join("log", f"model_epoch_{epoch + 1:03d}.pt")
         checkpoint = {
             'model': raw_model.state_dict(),
             'epoch': epoch + 1,
@@ -387,8 +410,8 @@ for epoch in range(epoch_num):
         }
         torch.save(checkpoint, checkpoint_path)
         upload_folder_to_s3(local_folder_path="./log",
-                              bucket_name="dataframes--use1-az6--x-s3",
-                              s3_prefix="training/log")
+                            bucket_name="dataframes--use1-az6--x-s3",
+                            s3_prefix="training/log")
 
 if ddp:
     destroy_process_group()
