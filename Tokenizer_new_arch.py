@@ -224,6 +224,54 @@ class StreamingPassBasedWordLevelBPETokenizer:
         # (Optionally, you may remove the working file here if it’s no longer needed.)
         # os.remove(self.working_file)
 
+    def extend_with_quantization_tokens(self, resolution=80):
+        """
+        Extend the tokenizer's vocabulary with all possible quantization tokens
+        produced by the quantize_number function. This ensures that tokens like
+        'D23', 'A42', etc., are included, avoiding any unknown tokens.
+
+        Parameters:
+          resolution: Total number of quantization levels (default 80).
+        """
+        # Define the ranges as in your quantize_number function.
+        ranges = [
+            {'id': 'A', 'start': -5, 'end': -3, 'proportion': 0.05},
+            {'id': 'B', 'start': -3, 'end': -2, 'proportion': 0.10},
+            {'id': 'C', 'start': -2, 'end': -1, 'proportion': 0.15},
+            {'id': 'D', 'start': -1, 'end': 1, 'proportion': 0.40},
+            {'id': 'E', 'start': 1, 'end': 2, 'proportion': 0.15},
+            {'id': 'F', 'start': 2, 'end': 3, 'proportion': 0.10},
+            {'id': 'G', 'start': 3, 'end': 5, 'proportion': 0.05},
+        ]
+
+        # Allocate tokens for each range.
+        for r in ranges:
+            r['tokens'] = int(round(r['proportion'] * resolution))
+
+        # Assign starting token indices cumulatively.
+        cumulative = 0
+        for r in ranges:
+            r['token_start'] = cumulative
+            cumulative += r['tokens']
+
+        # Generate all possible quantization tokens.
+        quant_tokens = []
+        for r in ranges:
+            for i in range(r['tokens']):
+                global_index = r['token_start'] + i
+                token = f"{r['id']}{global_index}"
+                quant_tokens.append(token)
+
+        # Add these tokens to the vocabulary if they're not already present.
+        added = 0
+        for token in quant_tokens:
+            if token not in self.token2id:
+                new_id = len(self.token2id)
+                self.token2id[token] = new_id
+                self.id2token[new_id] = token
+                added += 1
+        print(f"Extended vocabulary with {added} quantization tokens.")
+
     def encode(self, text):
         """
         Encode a text string (space-separated tokens) into a list of token IDs.
