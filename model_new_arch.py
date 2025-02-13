@@ -5,6 +5,7 @@ import random
 import time
 import inspect
 from dataclasses import dataclass
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -368,18 +369,18 @@ def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, devi
     if ddp:
         model.require_backward_grad_sync = False
 
-    # Accumulate gradients locally on each GPU
-    for micro_step in range(grad_accum_steps):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-
-        with torch.autocast(device_type=device_type, dtype=torch.float16):
-            logits, loss = model(x, y)
-
-        # Scale loss by accumulation steps
-        loss = loss / grad_accum_steps
-        loss_accum += loss.detach()
-        loss.backward()
+    # # Accumulate gradients locally on each GPU
+    # for micro_step in range(grad_accum_steps):
+    #     x, y = train_loader.next_batch()
+    #     x, y = x.to(device), y.to(device)
+    #
+    #     with torch.autocast(device_type=device_type, dtype=torch.float16):
+    #         logits, loss = model(x, y)
+    #
+    #     # Scale loss by accumulation steps
+    #     loss = loss / grad_accum_steps
+    #     loss_accum += loss.detach()
+    #     loss.backward()
 
     # Now sync gradients across all GPUs
     if ddp:
@@ -404,13 +405,63 @@ def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, devi
     return loss_accum.item(), grad_norm
 
 
+
+
+def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp, scaler):
+    """
+    Performs a single training step with gradient accumulation in DDP mode using AMP.
+
+    Args:
+        model: The model (optionally wrapped in DDP).
+        optimizer: Optimizer instance.
+        scheduler: Learning rate scheduler.
+        train_loader: Data loader providing training batches.
+        grad_accum_steps: Number of gradient accumulation steps.
+        device: Device (e.g. 'cuda:0').
+        device_type: 'cuda' or 'cpu'.
+        ddp: Boolean flag indicating if Distributed Data Parallel is used.
+        scaler: torch.cuda.amp.GradScaler instance.
+
+    Returns:
+        Tuple of (accumulated loss, gradient norm).
+    """
+    optimizer.zero_grad()
+    loss_accum = torch.zeros(1, device=device)
+
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+
+        # Use no_sync() on all micro-steps except the last one to reduce inter-GPU communication.
+        context = model.no_sync() if ddp and micro_step < grad_accum_steps - 1 else contextlib.nullcontext()
+        with context:
+            with torch.autocast(device_type=device_type, dtype=torch.float16):
+                logits, loss = model(x, y)
+            # Scale the loss by the accumulation steps to average gradients
+            loss = loss / grad_accum_steps
+            # Backward pass with AMP scaling
+            scaler.scale(loss).backward()
+        loss_accum += loss.detach()
+
+    # Unscale gradients before clipping
+    scaler.unscale_(optimizer)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+
+    # Take an optimizer step using the scaler and update it.
+    scaler.step(optimizer)
+    scaler.update()
+    scheduler.step()
+
+    return loss_accum.item(), grad_norm
+
+
 if master_process:
     print("Starting training...")
 for step in range(max_steps):
     t0 = time.time()
     model.train()
 
-    loss, grad_norm = train_step(
+    loss, grad_norm = train_step_TESLA(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
@@ -441,8 +492,8 @@ for step in range(max_steps):
         model.eval()
         val_loader.reset()
         with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = 100
+            val_loss_accum = torch.zeros(1, device=device)
+            val_loss_steps = 200
             for _ in range(val_loss_steps):
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
