@@ -47,7 +47,7 @@ def pick_random_sample(file_path, n, sample_chunk_size=1024 * 1024):
 if __name__ == "__main__":
     # Parameters:
     training_file = "coeffs_combined.txt"
-    num_merges = 3  # example value; adjust as needed
+    num_merges = 10000  # example value; adjust as needed
     num_passes = 3  # number of passes (if not provided, same as num_merges)
     chunk_size = 1024 * 1024 * 1024  # 1 GB chunk size
     # chunk_size = 1024 * 1024   # 1 GB chunk size
