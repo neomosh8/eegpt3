@@ -5,16 +5,20 @@ import random
 import time
 import inspect
 from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from matplotlib import pyplot as plt
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-from handle_tokenized import upload_folder_to_s3  # assumed available
 
-# DDP setup
+# assumed available; replace or remove if not using S3 logging
+from handle_tokenized import upload_folder_to_s3
+
+#########################
+# DDP Setup
+#########################
 ddp = int(os.environ.get('RANK', -1)) != -1
 if ddp:
     assert torch.cuda.is_available(), "CUDA is required for DDP"
@@ -34,19 +38,22 @@ else:
     print(f"using device: {device}")
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
+
+# Set manual seeds for reproducibility.
 torch.manual_seed(9259)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(9259)
 
-###############################################################################
-# Model components
-###############################################################################
+#########################
+# Model Components
+#########################
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # NANOGPT uses a special initialization flag.
         self.c_proj.NANOGPT_SCALE_INIT = 1
         self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
         self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
@@ -57,6 +64,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
+        # Reshape for multi-head attention.
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -112,15 +120,10 @@ class CrossChannelFusion(nn.Module):
 class GPTConfig:
     block_size: int = 1032
     vocab_size: int = 10799
-    # Small model flag (set to False for larger model)
-    if True:
-        n_layer: int = 12
-        n_head: int = 12
-        n_embd: int = 768
-    else:
-        n_layer: int = 48
-        n_head: int = 24
-        n_embd: int = 1536
+    # Small model configuration
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
     num_channels: int = 2
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -137,9 +140,10 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # Weight tying between token embedding and output projection.
         self.transformer.wte.weight = self.lm_head.weight
 
-        # Per-channel encoder (2 blocks per channel)
+        # Per-channel encoder: 2 blocks per channel.
         self.channel_encoder = nn.ModuleList([
             nn.Sequential(Block(config), Block(config))
             for _ in range(config.num_channels)
@@ -161,12 +165,12 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
-        # T must be divisible by num_channels.
+        # Ensure that T is divisible by the number of channels.
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
 
         tok_emb = self.transformer.wte(idx)  # [B, T, n_embd]
-        # Reshape tokens so that each contiguous block corresponds to one channel.
+        # Reshape tokens so each contiguous block corresponds to one channel.
         x = tok_emb.view(B, time_steps, self.config.num_channels, self.config.n_embd)
         channel_outs = []
         for c in range(self.config.num_channels):
@@ -175,7 +179,7 @@ class GPT(nn.Module):
             channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)  # [B, time_steps, num_channels, n_embd]
         x_fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
-        # Replicate the fused output to recover the original sequence length.
+        # Replicate fused output to recover original sequence length.
         x_fused_rep = x_fused.unsqueeze(2).repeat(1, 1, self.config.num_channels, 1)
         x_flat = x_fused_rep.view(B, T, self.config.n_embd)
 
@@ -195,13 +199,12 @@ class GPT(nn.Module):
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
         """
-        Configure the optimizer with separate groups for decayed and non-decayed parameters.
+        Configure the optimizer with separate parameter groups for decayed and non-decayed weights.
         """
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
         nodecay_params = []
 
-        # Group parameters: if the parameter has 2 or more dimensions, apply weight decay.
         for pn, p in param_dict.items():
             if p.dim() >= 2:
                 decay_params.append(p)
@@ -232,15 +235,13 @@ class GPT(nn.Module):
         )
         return optimizer
 
-
-###############################################################################
-# DataLoader (channels are no longer used)
-###############################################################################
+#########################
+# DataLoader (All-In-Memory)
+#########################
 class DataLoaderLiteAllInMemory:
     """
-    Loads all .pt shard files from a local directory into memory,
-    concatenates them, and provides batches.
-    (Now only the 'tokens' field is used.)
+    Loads all .pt shard files from a local directory, concatenates them, and provides batches.
+    Only the 'tokens' field is used.
     """
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
@@ -250,19 +251,19 @@ class DataLoaderLiteAllInMemory:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Use an instance of GPTConfig to get the number of channels
+        # Make sure T is divisible by the number of channels.
         if self.T % GPTConfig().num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
-            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix={shard_prefix}_{split}_")
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
         all_tokens = []
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, weights_only=False)
+            loaded = torch.load(shard_path, map_location="cpu")
             shard_tokens = loaded['tokens']
             all_tokens.append(shard_tokens)
         self.tokens = torch.cat(all_tokens, dim=0)
@@ -291,160 +292,149 @@ class DataLoaderLiteAllInMemory:
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
 
-
-###############################################################################
-# Training Loop (Epoch-Based)
-###############################################################################
-
-# For the small model flag
-if True:  # small_model flag enabled
-    epoch_num = 5
-    B = 4  # micro-batch size (number of sequences per mini-batch)
-    T = 1032  # sequence length (tokens per sequence)
-else:
-    epoch_num = 20
-    B = 8
-    T = 1024
-train_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
-                                         num_processes=ddp_world_size,
-                                         local_data_dir="./local_shards",
-                                         shard_prefix="mydata",
-                                         split='train',
-                                         shuffle_shards=True)
-val_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
-                                       num_processes=ddp_world_size,
-                                       local_data_dir="./local_shards",
-                                       shard_prefix="mydata",
-                                       split='val',
-                                       shuffle_shards=False)
-
-# Define your desired effective batch size (in number of sequences)
-desired_B_eff = 500  # e.g. you want 256 sequences per optimizer update
-
-# Compute the number of gradient accumulation steps.
-# Each micro-step processes B sequences, so we need:
-grad_accum_steps = desired_B_eff // B
+#########################
+# Training Setup & Loop (No Epochs)
+#########################
+# Training hyperparameters
+B = 4              # micro-batch size (sequences per mini-batch)
+T = 1032           # sequence length (tokens per sequence)
+desired_B_eff = 500000  # effective batch size (number of sequences per optimizer step)
+grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
 
-# Calculate the number of tokens processed per micro-step and per optimizer step.
-tokens_per_micro = B * T  # tokens per micro-batch
-tokens_per_optim = tokens_per_micro * grad_accum_steps  # tokens per optimizer update
+# Create dataloaders for training and validation.
+train_loader = DataLoaderLiteAllInMemory(
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
+)
+val_loader = DataLoaderLiteAllInMemory(
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=False
+)
 
-# Compute steps per epoch based on the total token count available in the training set.
-# (Subtracting 1 because targets are shifted by one token.)
-steps_per_epoch = (train_loader.total_len - 1) // tokens_per_optim
+# Calculate max_steps based on passes through all data.
+# For example, if you want to run 5 full passes over the training data:
+num_passes = 5
+tokens_per_optim = B * T * grad_accum_steps  # tokens processed per optimizer step
+steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
+max_steps = num_passes * steps_per_pass
 if master_process:
-    print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
+    print(f"Total tokens in training set: {train_loader.total_len}")
+    print(f"Steps per pass: {steps_per_pass}")
+    print(f"Running for {max_steps} optimization steps (i.e. {num_passes} passes over the data)")
 
+# Instantiate the model.
 model = GPT(GPTConfig())
 model.to(device)
+# Optionally compile the model for potential speedups.
 model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
 
-optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-3, device=device)
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer,
-    max_lr=[6e-3, 6e-3],
-    epochs=epoch_num,
-    steps_per_epoch=steps_per_epoch,
-    anneal_strategy='cos',
-    cycle_momentum=False
-)
+# Set up the optimizer.
+base_lr = 6e-3
+optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
-for epoch in range(epoch_num):
-    print(f"\n--- Epoch {epoch + 1}/{epoch_num} ---")
-    train_loader.reset()
+# Define a simple learning rate schedule.
+# This example linearly warms up for 1000 steps then decays linearly.
+def get_lr(step):
+    warmup_steps = 1000
+    if step < warmup_steps:
+        return base_lr * (step / warmup_steps)
+    else:
+        return base_lr * max(0.0, (max_steps - step) / (max_steps - warmup_steps))
+
+# Log file for training (will be appended at every optimizer step)
+log_file = "training.log"
+if master_process:
+    with open(log_file, "w") as f:
+        f.write("step train_loss\n")
+
+#########################
+# Training Loop (No Epochs)
+#########################
+print("Starting training...")
+for step in range(max_steps):
+    t0 = time.time()
+    last_step = (step == max_steps - 1)
+
     model.train()
-    epoch_loss = 0.0
-    epoch_start_time = time.time()
+    optimizer.zero_grad()
+    loss_accum = 0.0
 
-    for step in range(steps_per_epoch):
-        step_start_time = time.time()
-        optimizer.zero_grad()
-        loss_accum = 0.0
+    # Gradient accumulation loop.
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
 
-        # Perform grad accumulation over several micro-steps
-        for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
-            x, y = x.to(device), y.to(device)
-
-            # For Distributed Data Parallel: only sync gradients on the final micro-step.
-            if ddp:
-                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-
-            with torch.autocast(device_type=device_type, dtype=torch.float16):
-                logits, loss = model(idx=x, targets=y)
-
-            # Scale loss to account for accumulation (we want an average)
-            loss = loss / grad_accum_steps
-            loss_accum += loss.detach()
-            loss.backward()
-
-            # --- Intermediate Logging ---
-            # Print progress every 10% of the grad accumulation steps (or at the very first micro-step)
-            log_interval = max(1, grad_accum_steps // 10)
-            if master_process and ((micro_step + 1) % log_interval == 0 or micro_step == 0):
-                print(f"    Micro-step {micro_step + 1}/{grad_accum_steps} - Loss: {loss.item():.6f}")
-
+        # In DDP, only sync gradients on the last micro-step.
         if ddp:
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
 
-        # Optionally clip gradients before stepping.
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Use autocast (using bfloat16 in this example)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
 
-        # Optimizer and scheduler step.
-        optimizer.step()
-        scheduler.step()
+        # Scale loss to average over accumulation steps.
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
 
-        # Wait for GPU to finish work (if using CUDA)
-        if device_type == "cuda":
-            torch.cuda.synchronize()
+        # --- Intermediate Logging ---
+        # Print progress every 10% of the accumulation steps.
+        log_interval = max(1, grad_accum_steps // 10)
+        if master_process and ((micro_step + 1) % log_interval == 0 or micro_step == 0):
+            print(f"  Step {step:5d} | Micro-step {micro_step+1}/{grad_accum_steps} | "
+                  f"micro loss: {loss.item() * grad_accum_steps:.6f}")
 
-        step_time = time.time() - step_start_time
-        tokens_processed = tokens_per_optim * ddp_world_size
-        tokens_per_sec = tokens_processed / step_time
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
-        epoch_loss += loss_accum.item()
-        if master_process and ((step + 1) % 50 == 0 or step == steps_per_epoch - 1):
-            print(f"Epoch {epoch + 1:3d} | Step {step + 1:5d}/{steps_per_epoch} | "
-                  f"Loss: {loss_accum.item():.6f} | Grad Norm: {grad_norm:.4f} | "
-                  f"Step Time: {step_time * 1000:.2f} ms | Tokens/sec: {tokens_per_sec:.2f}")
+    # Optionally clip gradients.
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-    avg_epoch_loss = epoch_loss / steps_per_epoch
+    # Update learning rate.
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+    optimizer.step()
+    if device_type == "cuda":
+        torch.cuda.synchronize()  # Ensure GPU has finished work
+
+    t1 = time.time()
+    dt = t1 - t0  # time difference in seconds
+    tokens_processed = B * T * grad_accum_steps * ddp_world_size
+    tokens_per_sec = tokens_processed / dt
+
     if master_process:
-        print(f"Epoch {epoch + 1} Average Training Loss: {avg_epoch_loss:.6f}")
+        print(f"Step {step:5d} | Loss: {loss_accum.item():.6f} | LR: {lr:.4e} | "
+              f"Grad Norm: {grad_norm:.4f} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} {loss_accum.item():.6f}\n")
 
-    # Validation loop
-    val_loader.reset()
-    model.eval()
-    val_loss_total = 0.0
-    # Calculate validation steps (each batch is of size B x T)
-    val_steps = (val_loader.total_len - 1) // (B * T)
-    with torch.no_grad():
-        for _ in range(val_steps):
-            x_val, y_val = val_loader.next_batch()
-            x_val, y_val = x_val.to(device), y_val.to(device)
-            with torch.autocast(device_type=device_type, dtype=torch.float16):
-                _, v_loss = model(idx=x_val, targets=y_val)
-            val_loss_total += v_loss.item()
-    avg_val_loss = val_loss_total / val_steps
-    if master_process:
-        print(f"Epoch {epoch + 1} Validation Loss: {avg_val_loss:.6f}")
-        os.makedirs("log", exist_ok=True)
-        checkpoint_path = os.path.join("log", f"model_epoch_{epoch + 1:03d}.pt")
-        checkpoint = {
-            'model': raw_model.state_dict(),
-            'epoch': epoch + 1,
-            'val_loss': avg_val_loss,
-            'optimizer_state': optimizer.state_dict(),
-        }
-        torch.save(checkpoint, checkpoint_path)
-        upload_folder_to_s3(local_folder_path="./log",
-                            bucket_name="dataframes--use1-az6--x-s3",
-                            s3_prefix="training/log")
+    # (Optional) Every so often, run a quick validation pass.
+    if step % 500 == 0 or last_step:
+        model.eval()
+        val_loss_total = 0.0
+        val_steps = (val_loader.total_len - 1) // (B * T)
+        with torch.no_grad():
+            for _ in range(val_steps):
+                x_val, y_val = val_loader.next_batch()
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    _, v_loss = model(x_val, y_val)
+                val_loss_total += v_loss.item()
+        avg_val_loss = val_loss_total / val_steps
+        if master_process:
+            print(f"--- Validation at step {step}: Loss {avg_val_loss:.6f}")
 
+# Clean up DDP resources.
 if ddp:
     destroy_process_group()
+
+# (Optional) Upload log files to S3.
+if master_process:
+    upload_folder_to_s3(local_folder_path="./", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training/log")
