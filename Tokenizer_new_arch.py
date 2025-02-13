@@ -57,50 +57,77 @@ class StreamingPassBasedWordLevelBPETokenizer:
 
     def compute_pair_frequencies(self, file_path, chunk_size=1024 * 1024):
         """
-        Compute the frequency of each adjacent token pair from the file.
+        Compute the frequency of each adjacent token pair from the file,
+        with progress monitoring.
         Returns a dictionary mapping (token1, token2) to frequency.
         """
         pair_freq = defaultdict(int)
-        token_gen = self.stream_tokens(file_path, chunk_size)
-        try:
-            prev = next(token_gen)
-        except StopIteration:
-            return pair_freq  # file empty
-        for token in token_gen:
-            pair = (prev, token)
-            pair_freq[pair] += 1
-            prev = token
+        total_size = os.path.getsize(file_path)
+        with open(file_path, "r", encoding="utf-8") as f, tqdm(total=total_size, unit="B", unit_scale=True,
+                                                               desc="Counting pairs") as pbar:
+            leftover = ""
+            prev = None
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                # Update progress bar with the actual number of bytes read.
+                pbar.update(len(chunk.encode("utf-8")))
+                data = leftover + chunk
+                tokens = data.split(" ")
+                # If the chunk ends in the middle of a token, hold it for the next round.
+                if data and not data[-1].isspace():
+                    leftover = tokens.pop()
+                else:
+                    leftover = ""
+                for token in tokens:
+                    if token:  # Skip empty tokens.
+                        if prev is not None:
+                            pair = (prev, token)
+                            pair_freq[pair] += 1
+                        prev = token
+            # Process any remaining token.
+            if leftover and prev is not None:
+                pair = (prev, leftover)
+                pair_freq[pair] += 1
         return pair_freq
 
     def merge_file(self, input_file, output_file, best_pair, chunk_size=1024 * 1024):
         """
         Reads tokens from input_file, merges occurrences of best_pair,
         and writes the new token sequence (as one long line) to output_file.
+        Displays a progress bar during processing.
         """
-        with open(output_file, "w", encoding="utf-8") as fout:
-            token_gen = self.stream_tokens(input_file, chunk_size)
-            prev = None
+        total_size = os.path.getsize(input_file)
+        with open(input_file, "r", encoding="utf-8") as fin, \
+                open(output_file, "w", encoding="utf-8") as fout, \
+                tqdm(total=total_size, unit="B", unit_scale=True, desc="Merging tokens") as pbar:
+            leftover = ""
             merged_tokens = []
-            for token in token_gen:
-                if prev is None:
-                    prev = token
-                    continue
-                if (prev, token) == best_pair:
-                    # Merge the pair into one token.
-                    merged_tokens.append(prev + "_" + token)
-                    prev = None
+            while True:
+                chunk = fin.read(chunk_size)
+                if not chunk:
+                    break
+                pbar.update(len(chunk.encode("utf-8")))
+                data = leftover + chunk
+                tokens = data.split(" ")
+                if data and not data[-1].isspace():
+                    leftover = tokens.pop()
                 else:
-                    # Output the previous token and move on.
-                    merged_tokens.append(prev)
-                    prev = token
-                # Periodically write to file to avoid keeping too many tokens in memory.
-                if len(merged_tokens) >= 100000:
-                    fout.write(" ".join(merged_tokens) + " ")
-                    merged_tokens = []
-            # If there's a token left, append it.
-            if prev is not None:
-                merged_tokens.append(prev)
-            # Write any remaining tokens.
+                    leftover = ""
+                i = 0
+                while i < len(tokens):
+                    if i < len(tokens) - 1 and (tokens[i], tokens[i + 1]) == best_pair:
+                        merged_tokens.append(tokens[i] + "_" + tokens[i + 1])
+                        i += 2
+                    else:
+                        merged_tokens.append(tokens[i])
+                        i += 1
+                    if len(merged_tokens) >= 100000:
+                        fout.write(" ".join(merged_tokens) + " ")
+                        merged_tokens = []
+            if leftover:
+                merged_tokens.append(leftover)
             if merged_tokens:
                 fout.write(" ".join(merged_tokens))
 
