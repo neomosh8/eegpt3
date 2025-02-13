@@ -383,11 +383,10 @@ for step in range(max_steps):
         loss.backward()
 
         # --- Intermediate Logging ---
-        # Print progress every 10% of the accumulation steps.
-        log_interval = max(1, grad_accum_steps // 10)
-        if master_process and ((micro_step + 1) % log_interval == 0 or micro_step == 0):
-            print(f"  Step {step:5d} | Micro-step {micro_step+1}/{grad_accum_steps} | "
-                  f"micro loss: {loss.item() * grad_accum_steps:.6f}")
+        # Adjusted logging: print every 100 micro-steps.
+        if master_process:
+            print(f"  Step {step:5d} | Micro-step {micro_step + 1}/{grad_accum_steps} | "
+                  f"micro loss: {loss.item() * grad_accum_steps:.6f}", flush=True)
 
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
