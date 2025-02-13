@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # assumed available; replace or remove if not using S3 logging
 from handle_tokenized import upload_folder_to_s3
+from plotter import LossPlotter
 
 #########################
 # DDP Setup
@@ -462,6 +463,7 @@ for step in range(max_steps):
     t0 = time.time()
     model.train()
     scaler = torch.amp.GradScaler(device='cuda')
+    loss_plotter = LossPlotter(plot_interval=500, window=50)
 
     loss, grad_norm = train_step_TESLA(
         model=model,
@@ -474,7 +476,8 @@ for step in range(max_steps):
         ddp=ddp,
         scaler=scaler
     )
-
+    if master_process:
+        loss_plotter.update_train(loss)
     if device_type == "cuda":
         torch.cuda.synchronize()
 
@@ -510,7 +513,9 @@ for step in range(max_steps):
             current_val_loss = val_loss_accum
             if master_process:
                 print(f"Step {step} | val_loss {current_val_loss.item():.4f} ")
-
+                loss_plotter.update_val(current_val_loss.item())
+    if master_process:
+        loss_plotter.maybe_plot(step)
 
 # Clean up DDP resources.
 if ddp:
