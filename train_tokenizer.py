@@ -8,7 +8,7 @@ if __name__ == "__main__":
     training_file = "coeffs_combined.txt"
     num_merges = 10000      # maximum number of merge operations (example value)
     num_passes = 100      # maximum number of passes (if not specified, same as num_merges)
-    chunk_size = 1024 * 1024  # 1 MB chunks for streaming
+    chunk_size = 10240 * 10240  # 1 MB chunks for streaming
 
     # Instantiate the tokenizer.
     tokenizer = StreamingPassBasedWordLevelBPETokenizer()
