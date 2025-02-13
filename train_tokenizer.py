@@ -50,7 +50,7 @@ if __name__ == "__main__":
     num_merges = 3  # example value; adjust as needed
     num_passes = 3  # number of passes (if not provided, same as num_merges)
     chunk_size = 1024 * 1024 * 1024  # 1 GB chunk size
-    chunk_size = 1024 * 1024   # 1 GB chunk size
+    # chunk_size = 1024 * 1024   # 1 GB chunk size
 
     # Instantiate the tokenizer.
     tokenizer = StreamingPassBasedWordLevelBPETokenizer()
