@@ -46,5 +46,5 @@ class LossPlotter:
         plt.ylabel("Loss")
         plt.title(f"Loss Curves up to step {step}")
         plt.legend()
-        plt.savefig(f"{self.filename_prefix}_{step}.png")
+        plt.savefig(f"{self.filename_prefix}.png")
         plt.close()
