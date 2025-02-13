@@ -263,7 +263,7 @@ class DataLoaderLiteAllInMemory:
 
         all_tokens = []
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu")
+            loaded = torch.load(shard_path, map_location="cpu",weights_only=False)
             shard_tokens = loaded['tokens']
             all_tokens.append(shard_tokens)
         self.tokens = torch.cat(all_tokens, dim=0)
@@ -337,14 +337,14 @@ raw_model = model.module if ddp else model
 base_lr = 6e-3
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
-# Define a simple learning rate schedule.
-# This example linearly warms up for 1000 steps then decays linearly.
-def get_lr(step):
-    warmup_steps = 1000
-    if step < warmup_steps:
-        return base_lr * (step / warmup_steps)
-    else:
-        return base_lr * max(0.0, (max_steps - step) / (max_steps - warmup_steps))
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=3e-4,
+    total_steps=max_steps,              # total number of training steps
+    pct_start=200 / max_steps,   # fraction of steps for warmup
+    anneal_strategy='cos',                # cosine annealing for decay
+    cycle_momentum=False                  # typically False for AdamW
+)
 
 # Log file for training (will be appended at every optimizer step)
 log_file = "training.log"
@@ -394,12 +394,9 @@ for step in range(max_steps):
     # Optionally clip gradients.
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-    # Update learning rate.
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
     optimizer.step()
+    scheduler.step()
+
     if device_type == "cuda":
         torch.cuda.synchronize()  # Ensure GPU has finished work
 
@@ -435,5 +432,5 @@ if ddp:
     destroy_process_group()
 
 # (Optional) Upload log files to S3.
-if master_process:
-    upload_folder_to_s3(local_folder_path="./", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training/log")
+# if master_process:
+#     upload_folder_to_s3(local_folder_path="./", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training/log")
