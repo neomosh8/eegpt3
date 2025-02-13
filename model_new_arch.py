@@ -255,7 +255,7 @@ class DataLoaderLiteAllInMemory:
         if self.T % GPTConfig().num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[:200]
+        self.shard_files = sorted(glob.glob(pattern))[:1000]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -334,7 +334,7 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 6e-3
+base_lr = 6e-4
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
