@@ -1,6 +1,6 @@
 import os
 import random
-from StreamingPassBasedWordLevelBPETokenizer import StreamingPassBasedWordLevelBPETokenizer  # Adjust import as needed
+from Tokenizer_new_arch import StreamingPassBasedWordLevelBPETokenizer  # Adjust import as needed
 
 
 def pick_random_sample(file_path, n, sample_chunk_size=1024 * 1024):
