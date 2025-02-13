@@ -124,7 +124,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    num_channels: int = 2
+    num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
@@ -454,7 +454,8 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
 
             current_val_loss = val_loss_accum
-            print(f"Step {step} | val_loss {current_val_loss:.4f} ")
+            if master_process:
+                print(f"Step {step} | val_loss {current_val_loss:.4f} ")
 
 
 # Clean up DDP resources.
