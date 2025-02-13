@@ -337,7 +337,22 @@ steps_per_epoch = (train_loader.total_len - 1) // tokens_per_optim
 if master_process:
     print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
 
-# (The scheduler was already created with epochs=epoch_num and steps_per_epoch=steps_per_epoch)
+model = GPT(GPTConfig())
+model.to(device)
+model = torch.compile(model)
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module if ddp else model
+
+optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-3, device=device)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=[6e-3, 6e-3],
+    epochs=epoch_num,
+    steps_per_epoch=steps_per_epoch,
+    anneal_strategy='cos',
+    cycle_momentum=False
+)
 
 for epoch in range(epoch_num):
     print(f"\n--- Epoch {epoch + 1}/{epoch_num} ---")
