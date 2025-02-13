@@ -9,6 +9,7 @@ import contextlib
 
 import torch
 import torch.nn as nn
+from fontTools.unicodedata import script
 from torch.nn import functional as F
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
@@ -460,6 +461,7 @@ if master_process:
 for step in range(max_steps):
     t0 = time.time()
     model.train()
+    scaler = torch.cuda.amp.GradScaler()
 
     loss, grad_norm = train_step_TESLA(
         model=model,
@@ -469,7 +471,8 @@ for step in range(max_steps):
         grad_accum_steps=grad_accum_steps,
         device=device,
         device_type=device_type,
-        ddp=ddp
+        ddp=ddp,
+        scaler=scaler
     )
 
     if device_type == "cuda":
