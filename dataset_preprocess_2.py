@@ -17,7 +17,7 @@ def _get_tokenizer():
     if _GLOBAL_TOKENIZER is None:
         tok = StreamingPassBasedWordLevelBPETokenizer()
         # Load the pretrained tokenizer model (merges and vocab) from a single JSON file.
-        tok.load("neo_tokenizer/tokenizer_model.json")
+        tok.load("neotokenizer_2/tokenizer_model.json")
         _GLOBAL_TOKENIZER = tok
     return _GLOBAL_TOKENIZER
 
