@@ -11,8 +11,6 @@ from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
 
 # Global tokenizer instance for each worker.
 _GLOBAL_TOKENIZER = None
-
-
 def _get_tokenizer():
     global _GLOBAL_TOKENIZER
     if _GLOBAL_TOKENIZER is None:
@@ -22,22 +20,18 @@ def _get_tokenizer():
         _GLOBAL_TOKENIZER = tok
     return _GLOBAL_TOKENIZER
 
-
 # Define the regions (which now represent channels)
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
-
 
 def _process_single_group(args):
     """
     Process one group of files (one base name) corresponding to all regions.
     For each region file:
       - Download the file,
-      - Tokenize its contents,
-      - Store the resulting tokens.
-    Then, trim all region token sequences to the same length,
-    concatenate them (in the order given by REGIONS),
-    and create a channels tensor labeling tokens with region indices.
-    This produces a shard whose length is divisible by num_channels.
+      - Tokenize its contents.
+    Then, trim all region token sequences to the same length and concatenate them
+    (in the order given by REGIONS). This produces a shard whose length is divisible
+    by the number of regions (channels), which is required by the new model.
     """
     (base_name, files, shard_prefix, local_data_dir, bucket_name,
      split_name, group_index, total_groups) = args
@@ -81,24 +75,19 @@ def _process_single_group(args):
 
     # Concatenate tokens from all regions.
     final_tokens = torch.cat(region_tokens, dim=0)
-    # Build a channels tensor: first min_length tokens are channel 0, next min_length tokens channel 1, etc.
-    channel_list = [torch.full((min_length,), i, dtype=torch.long) for i in range(len(REGIONS))]
-    final_channels = torch.cat(channel_list, dim=0)
-
-    # Ensure the total length is divisible by the number of channels.
+    # Ensure the total length is divisible by the number of regions.
+    num_regions = len(REGIONS)
     total_length = final_tokens.size(0)
-    num_channels = len(REGIONS)
-    if total_length % num_channels != 0:
-        new_length = (total_length // num_channels) * num_channels
+    if total_length % num_regions != 0:
+        new_length = (total_length // num_regions) * num_regions
         final_tokens = final_tokens[:new_length]
-        final_channels = final_channels[:new_length]
 
     shard_id = group_index - 1
     shard_path = os.path.join(local_data_dir, f"{shard_prefix}_{split_name}_{shard_id}.pt")
-    torch.save({'tokens': final_tokens, 'channels': final_channels}, shard_path)
+    # Save only the tokens; the model will infer channel structure from token order.
+    torch.save({'tokens': final_tokens}, shard_path)
     print(f"  - Shard saved: {shard_path}")
     return shard_path
-
 
 def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir: str,
                                shard_prefix: str = "shard", limit_files: int = None,
@@ -106,7 +95,7 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
     """
     - Lists all *_quantized_coeffs_*.txt files in S3 under the given prefix.
     - Groups files by base name (i.e. common part before '_quantized_coeffs_').
-    - Each valid group must contain files for all regions (channels).
+    - Each valid group must contain files for all regions.
     - Splits the groups into train and validation splits based on val_ratio.
     - Processes each group in parallel and saves shards.
     """
@@ -171,7 +160,6 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
     process_split(train_groups, "train")
     process_split(val_groups, "val")
     print("Finished preprocessing.")
-
 
 if __name__ == "__main__":
     BUCKET_NAME = "dataframes--use1-az6--x-s3"

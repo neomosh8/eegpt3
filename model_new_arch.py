@@ -40,9 +40,8 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(9259)
 
 ###############################################################################
-# Model components (CausalSelfAttention, MLP, Block, CrossChannelFusion, GPT, GPTConfig)
+# Model components
 ###############################################################################
-
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -110,6 +109,23 @@ class CrossChannelFusion(nn.Module):
         fused = fused.mean(dim=0)        # [B*T, n_embd]
         return fused.view(B, T, E)       # [B, time_steps, n_embd]
 
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 6460
+    if False:  # small_model flag
+        n_layer: int = 12
+        n_head: int = 12
+        n_embd: int = 768
+    else:
+        n_layer: int = 48
+        n_head: int = 24
+        n_embd: int = 1536
+    num_channels: int = 2
+    mlp_dropout: float = 0.05
+    attn_dropout: float = 0.05
+    resid_dropout: float = 0.05
+
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -143,21 +159,24 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, channel_idx=None, targets=None):
+    # Note: removed the channel_idx argument.
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         # T must be divisible by num_channels.
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
 
         tok_emb = self.transformer.wte(idx)  # [B, T, n_embd]
+        # Reshape tokens so that each contiguous block corresponds to one channel.
         x = tok_emb.view(B, time_steps, self.config.num_channels, self.config.n_embd)
         channel_outs = []
         for c in range(self.config.num_channels):
-            x_c = x[:, :, c, :]              # [B, time_steps, n_embd]
+            x_c = x[:, :, c, :]  # [B, time_steps, n_embd]
             x_c = self.channel_encoder[c](x_c)
             channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)  # [B, time_steps, num_channels, n_embd]
         x_fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
+        # Replicate the fused output to recover the original sequence length.
         x_fused_rep = x_fused.unsqueeze(2).repeat(1, 1, self.config.num_channels, 1)
         x_flat = x_fused_rep.view(B, T, self.config.n_embd)
 
@@ -179,19 +198,14 @@ class GPT(nn.Module):
         """
         Configure the optimizer with separate groups for channel-related parameters.
         """
-        # Gather all trainable parameters with names
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-
         decay_params = []
         nodecay_params = []
         channel_params = []
-        # Use a lower LR for channel-related parameters
         channel_lr = learning_rate * 0.1
 
         for pn, p in param_dict.items():
-            # Group parameters belonging to channel modules
-            if ('wce' in pn or 'channel_proj' in pn or 'channel_scale' in pn or
-                    'channel_encoder' in pn or 'cross_channel_fusion' in pn):
+            if 'channel_encoder' in pn or 'cross_channel_fusion' in pn:
                 channel_params.append(p)
             elif p.dim() >= 2:
                 decay_params.append(p)
@@ -225,44 +239,25 @@ class GPT(nn.Module):
         )
         return optimizer
 
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 6460
-    if False:  # small_model flag (set to False)
-        n_layer: int = 12
-        n_head: int = 12
-        n_embd: int = 768
-    else:
-        n_layer: int = 48
-        n_head: int = 24
-        n_embd: int = 1536
-    num_channels: int = 2
-    mlp_dropout: float = 0.05
-    attn_dropout: float = 0.05
-    resid_dropout: float = 0.05
-
 ###############################################################################
-# DataLoader
+# DataLoader (channels are no longer used)
 ###############################################################################
 class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory into memory,
     concatenates them, and provides batches.
+    (Now only the 'tokens' field is used.)
     """
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
-                 num_channels: int = 1, local_data_dir: str = "./local_shards",
-                 shard_prefix: str = "mydata", split: str = "train",
-                 shuffle_shards: bool = False):
+                 local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
+                 split: str = "train", shuffle_shards: bool = False):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        self.num_channels = num_channels
 
-        if self.T % self.num_channels != 0:
+        if self.T % GPTConfig.num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
-
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
@@ -270,17 +265,12 @@ class DataLoaderLiteAllInMemory:
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
-        all_tokens, all_channels = [], []
+        all_tokens = []
         for shard_path in self.shard_files:
             loaded = torch.load(shard_path, weights_only=False)
             shard_tokens = loaded['tokens']
-            shard_channels = loaded['channels']
-            if len(shard_tokens) != len(shard_channels):
-                raise ValueError("tokens and channels length mismatch in shard!")
             all_tokens.append(shard_tokens)
-            all_channels.append(shard_channels)
         self.tokens = torch.cat(all_tokens, dim=0)
-        self.channels = torch.cat(all_channels, dim=0)
         self.current_position = self.B * self.T * self.process_rank
         self.total_len = len(self.tokens)
 
@@ -289,24 +279,19 @@ class DataLoaderLiteAllInMemory:
         needed = B * T + 1
         if self.current_position + needed <= self.total_len:
             buf_tokens = self.tokens[self.current_position: self.current_position + needed]
-            buf_channels = self.channels[self.current_position: self.current_position + needed]
             self.current_position += needed
         else:
             leftover = self.total_len - self.current_position
             wrap_amount = needed - leftover
             part1_toks = self.tokens[self.current_position:]
-            part1_chans = self.channels[self.current_position:]
-            part2_toks = self.tokens[:wrap_amount]
-            part2_chans = self.channels[:wrap_amount]
+            part2_toks = self.tokens[: wrap_amount]
             buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
-            buf_channels = torch.cat([part1_chans, part2_chans], dim=0)
             self.current_position = wrap_amount
         if len(buf_tokens) != needed:
             raise RuntimeError(f"Unexpected length. Expected {needed}, got {len(buf_tokens)}")
         x = buf_tokens[:-1].view(B, T)
         y = buf_tokens[1:].view(B, T)
-        c = buf_channels[:-1].view(B, T)
-        return x, c, y
+        return x, y
 
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
@@ -314,7 +299,6 @@ class DataLoaderLiteAllInMemory:
 ###############################################################################
 # Training Loop (Epoch-Based)
 ###############################################################################
-# Hyperparameters and setup
 if False:  # small_model flag
     epoch_num = 50
     B = 64
@@ -326,14 +310,12 @@ else:
 
 train_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
                                          num_processes=ddp_world_size,
-                                         num_channels=GPTConfig.num_channels,
                                          local_data_dir="./local_shards",
                                          shard_prefix="mydata",
                                          split='train',
                                          shuffle_shards=True)
 val_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
                                        num_processes=ddp_world_size,
-                                       num_channels=GPTConfig.num_channels,
                                        local_data_dir="./local_shards",
                                        shard_prefix="mydata",
                                        split='val',
@@ -346,33 +328,30 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
 
-# Configure optimizer and scheduler using the model's method
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-3, device=device)
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=[6e-3, 6e-3, 6e-4],  # main and channel LR
-    total_steps=None,  # not used; we step per batch below
+    max_lr=[6e-3, 6e-3, 6e-4],
+    total_steps=None,
     anneal_strategy='cos',
     cycle_momentum=False
 )
 
-# Determine steps per epoch automatically
 steps_per_epoch = (train_loader.total_len - 1) // (B * T)
 if master_process:
     print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
 
-# Main training loop (epoch-based)
 for epoch in range(epoch_num):
     print(f"\n--- Epoch {epoch+1}/{epoch_num} ---")
     train_loader.reset()
     model.train()
     epoch_loss = 0.0
     for step in range(steps_per_epoch):
-        x, c, y = train_loader.next_batch()
-        x, c, y = x.to(device), c.to(device), y.to(device)
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(idx=x, channel_idx=c, targets=y)
+            logits, loss = model(idx=x, targets=y)
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -383,22 +362,20 @@ for epoch in range(epoch_num):
     if master_process:
         print(f"Epoch {epoch+1} Average Training Loss: {avg_epoch_loss:.4f}")
 
-    # Validation phase
     val_loader.reset()
     model.eval()
     val_steps = (val_loader.total_len - 1) // (B * T)
     val_loss_total = 0.0
     with torch.no_grad():
         for _ in range(val_steps):
-            x_val, c_val, y_val = val_loader.next_batch()
-            x_val, c_val, y_val = x_val.to(device), c_val.to(device), y_val.to(device)
+            x_val, y_val = val_loader.next_batch()
+            x_val, y_val = x_val.to(device), y_val.to(device)
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                _, v_loss = model(x_val, c_val, y_val)
+                _, v_loss = model(idx=x_val, targets=y_val)
             val_loss_total += v_loss.item()
     avg_val_loss = val_loss_total / val_steps
     if master_process:
         print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
-        # Save a checkpoint at the end of each epoch
         os.makedirs("log", exist_ok=True)
         checkpoint_path = os.path.join("log", f"model_epoch_{epoch+1:03d}.pt")
         checkpoint = {
