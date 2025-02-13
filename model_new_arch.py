@@ -112,8 +112,9 @@ class CrossChannelFusion(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 6460
-    if False:  # small_model flag
+    vocab_size: int = 10798
+    # Small model flag (set to False for larger model)
+    if True:
         n_layer: int = 12
         n_head: int = 12
         n_embd: int = 768
@@ -159,7 +160,6 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    # Note: removed the channel_idx argument.
     def forward(self, idx, targets=None):
         B, T = idx.size()
         # T must be divisible by num_channels.
@@ -196,18 +196,15 @@ class GPT(nn.Module):
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
         """
-        Configure the optimizer with separate groups for channel-related parameters.
+        Configure the optimizer with separate groups for decayed and non-decayed parameters.
         """
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
         nodecay_params = []
-        channel_params = []
-        channel_lr = learning_rate * 0.1
 
+        # Group parameters: if the parameter has 2 or more dimensions, apply weight decay.
         for pn, p in param_dict.items():
-            if 'channel_encoder' in pn or 'cross_channel_fusion' in pn:
-                channel_params.append(p)
-            elif p.dim() >= 2:
+            if p.dim() >= 2:
                 decay_params.append(p)
             else:
                 nodecay_params.append(p)
@@ -215,12 +212,10 @@ class GPT(nn.Module):
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
             {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
-            {'params': channel_params, 'weight_decay': 0.0, 'lr': channel_lr},
         ]
 
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        num_channel_params = sum(p.numel() for p in channel_params)
 
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and ('cuda' in device)
@@ -228,7 +223,6 @@ class GPT(nn.Module):
         if master_process:
             print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
             print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
-            print(f"num channel parameter tensors: {len(channel_params)} with {num_channel_params:,} parameters")
             print(f"Using fused AdamW: {use_fused}")
 
         optimizer = torch.optim.AdamW(
@@ -238,6 +232,7 @@ class GPT(nn.Module):
             fused=use_fused
         )
         return optimizer
+
 
 ###############################################################################
 # DataLoader (channels are no longer used)
@@ -256,7 +251,8 @@ class DataLoaderLiteAllInMemory:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        if self.T % GPTConfig.num_channels != 0:
+        # Use an instance of GPTConfig to get the number of channels
+        if self.T % GPTConfig().num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
@@ -299,7 +295,7 @@ class DataLoaderLiteAllInMemory:
 ###############################################################################
 # Training Loop (Epoch-Based)
 ###############################################################################
-if False:  # small_model flag
+if True:  # small_model flag
     epoch_num = 50
     B = 64
     T = 1024
@@ -329,17 +325,22 @@ if ddp:
 raw_model = model.module if ddp else model
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=6e-3, device=device)
+
+# Compute steps per epoch from training data length
+steps_per_epoch = (train_loader.total_len - 1) // (B * T)
+if master_process:
+    print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
+
+# Create the scheduler using epochs and steps_per_epoch
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=[6e-3, 6e-3, 6e-4],
-    total_steps=None,
+    max_lr=6e-3,
+    epochs=epoch_num,
+    steps_per_epoch=steps_per_epoch,
     anneal_strategy='cos',
     cycle_momentum=False
 )
 
-steps_per_epoch = (train_loader.total_len - 1) // (B * T)
-if master_process:
-    print(f"Epochs: {epoch_num}, Steps per epoch: {steps_per_epoch}")
 
 for epoch in range(epoch_num):
     print(f"\n--- Epoch {epoch+1}/{epoch_num} ---")
