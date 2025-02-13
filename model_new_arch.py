@@ -111,7 +111,7 @@ class CrossChannelFusion(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 10798
+    vocab_size: int = 10799
     # Small model flag (set to False for larger model)
     if True:
         n_layer: int = 12
