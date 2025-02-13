@@ -13,7 +13,6 @@ import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from handle_tokenized import upload_folder_to_s3  # assumed available
-from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer  # assumed available
 
 # DDP setup
 ddp = int(os.environ.get('RANK', -1)) != -1
@@ -334,7 +333,7 @@ if master_process:
 # Create the scheduler using epochs and steps_per_epoch
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=6e-3,
+    max_lr=[6e-3, 6e-3],
     epochs=epoch_num,
     steps_per_epoch=steps_per_epoch,
     anneal_strategy='cos',
@@ -351,8 +350,9 @@ for epoch in range(epoch_num):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device_type, dtype=torch.float16):
             logits, loss = model(idx=x, targets=y)
+
         loss.backward()
         optimizer.step()
         scheduler.step()
