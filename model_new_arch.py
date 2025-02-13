@@ -319,7 +319,7 @@ val_loader = DataLoaderLiteAllInMemory(B=B, T=T, process_rank=ddp_rank,
                                        shuffle_shards=False)
 
 # Define your desired effective batch size (in number of sequences)
-desired_B_eff = 500000  # e.g. you want 256 sequences per optimizer update
+desired_B_eff = 500  # e.g. you want 256 sequences per optimizer update
 
 # Compute the number of gradient accumulation steps.
 # Each micro-step processes B sequences, so we need:
@@ -382,6 +382,12 @@ for epoch in range(epoch_num):
             loss = loss / grad_accum_steps
             loss_accum += loss.detach()
             loss.backward()
+
+            # --- Intermediate Logging ---
+            # Print progress every 10% of the grad accumulation steps (or at the very first micro-step)
+            log_interval = max(1, grad_accum_steps // 10)
+            if master_process and ((micro_step + 1) % log_interval == 0 or micro_step == 0):
+                print(f"    Micro-step {micro_step + 1}/{grad_accum_steps} - Loss: {loss.item():.6f}")
 
         if ddp:
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
