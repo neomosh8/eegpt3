@@ -395,7 +395,7 @@ def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, devi
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
     # Clip gradients
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
 
     # Step optimizer and scheduler
     optimizer.step()
@@ -437,20 +437,25 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    # if step % 500 == 0 or last_step:
-    #     model.eval()
-    #     val_loss_total = 0.0
-    #     val_steps = (val_loader.total_len - 1) // (B * T)
-    #     with torch.no_grad():
-    #         for _ in range(val_steps):
-    #             x_val, y_val = val_loader.next_batch()
-    #             x_val, y_val = x_val.to(device), y_val.to(device)
-    #             with torch.autocast(device_type=device_type, dtype=torch.float16):
-    #                 _, v_loss = model(x_val, y_val)
-    #             val_loss_total += v_loss.item()
-    #     avg_val_loss = val_loss_total / val_steps
-    #     if master_process:
-    #         print(f"--- Validation at step {step}: Loss {avg_val_loss:.6f}")
+    if step % 100 == 0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 100
+            for _ in range(val_loss_steps):
+                x_val, y_val = val_loader.next_batch()
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x_val, y_val)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+
+            current_val_loss = val_loss_accum
+            print(f"Step {step} | val_loss {current_val_loss:.4f} ")
+
 
 # Clean up DDP resources.
 if ddp:
