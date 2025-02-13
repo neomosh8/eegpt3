@@ -4,7 +4,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 
-class PassBasedWordLevelBPETokenizer:
+class BPETokenizer:
     def __init__(self):
         # List of learned merge operations (each is a tuple, e.g. ("D23", "A42"))
         self.merges = []
