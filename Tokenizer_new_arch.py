@@ -1,256 +1,180 @@
 import os
-import re
 import json
 from collections import defaultdict
 from tqdm import tqdm
 
 
-class BPETokenizer:
+class PassBasedWordLevelBPETokenizer:
     def __init__(self):
-        # List of merge operations (each is a tuple of two symbols)
+        # List of learned merge operations (each is a tuple, e.g. ("D23", "A42"))
         self.merges = []
-        # Dictionary mapping each merge pair to its rank (lower = earlier merge)
+        # Dictionary mapping merge pair to its rank (order in which it was learned)
         self.bpe_ranks = {}
-        # Final vocabulary mapping token -> id
+        # Vocabulary mapping final token -> id and its inverse.
         self.token2id = {}
         self.id2token = {}
-        # Set of “full‐word” tokens (i.e. words that during training were learned as one token)
-        self.full_words = set()
 
-    def train(self, file_path, num_merges=10000, chunk_size=10000):
+    def _apply_merges(self, tokens):
         """
-        Train the BPE tokenizer from a text file.
+        Given a list of tokens, apply all learned merges in order.
+        This method scans repeatedly until no merge applies.
+        """
+        # Make a copy to avoid modifying the input.
+        tokens = tokens[:]
+        changed = True
+        while changed:
+            changed = False
+            i = 0
+            new_tokens = []
+            while i < len(tokens):
+                # If there is a next token, check if the pair has been merged.
+                if i < len(tokens) - 1:
+                    pair = (tokens[i], tokens[i + 1])
+                    if pair in self.bpe_ranks:
+                        # Merge the pair (join with an underscore) and skip the next token.
+                        new_tokens.append(tokens[i] + "_" + tokens[i + 1])
+                        i += 2
+                        changed = True
+                        continue
+                # Otherwise, just keep the token.
+                new_tokens.append(tokens[i])
+                i += 1
+            tokens = new_tokens
+        return tokens
 
-        Parameters:
-          file_path: Path to the training text file.
-          num_merges: Maximum number of merge operations (or passes) to perform.
-          chunk_size: Number of bytes (approx.) to process per chunk.
+    def _read_and_apply_merges(self, file_path, chunk_size):
         """
-        # Build frequency dictionary of words from the file.
-        # (Assumes one or more space‐separated tokens per line.)
-        word_freqs = defaultdict(int)
+        Read the training file line by line (with a progress bar), split each line into tokens,
+        apply the current merges to the token list, and build a vocabulary dictionary mapping
+        token sequences (as tuples) to frequency.
+        """
+        vocab = defaultdict(int)
         total_size = os.path.getsize(file_path)
-        with open(file_path, "r", encoding="utf-8") as f, tqdm(total=total_size, unit='B', unit_scale=True,
-                                                               desc="Reading corpus") as pbar:
+        with open(file_path, "r", encoding="utf-8") as f, tqdm(
+            total=total_size, unit="B", unit_scale=True, desc="Reading corpus"
+        ) as pbar:
             for line in f:
                 encoded_line = line.encode("utf-8")
                 pbar.update(len(encoded_line))
                 line = line.strip()
                 if not line:
                     continue
-                for word in line.split():
-                    word_freqs[word] += 1
-
-        # Build the “initial” vocabulary:
-        # Each word is represented as a tuple of its characters, with a special end-of-word marker.
-        vocab = {}
-        for word, freq in word_freqs.items():
-            # For BPE training we represent each word as a tuple of characters, and add '</w>' to mark word end.
-            # (This marker helps us later to recover full words.)
-            vocab[tuple(word) + ("</w>",)] = freq
-
-        # Perform BPE merge operations.
-        for i in tqdm(range(num_merges), desc="Performing BPE merges"):
-            pairs = self._get_stats(vocab)
-            if not pairs:
-                break
-            # Select the most frequent adjacent pair.
-            best = max(pairs, key=pairs.get)
-            vocab = self._merge_vocab(best, vocab)
-            self.merges.append(best)
-
-        # Create the bpe_ranks dictionary.
-        self.bpe_ranks = {pair: i for i, pair in enumerate(self.merges)}
-
-        # Build the final vocabulary (set of subword tokens) and record full-word tokens.
-        # We “reconstruct” each training word with the learned merges.
-        token_set = set()
-        for word in word_freqs.keys():
-            # Apply BPE to the word
-            tokens = self._bpe(word)
-            # If the entire word was merged into a single token (i.e. no split), record it.
-            if len(tokens) == 1 and tokens[0].endswith("</w>"):
-                full_token = tokens[0].replace("</w>", "")
-                self.full_words.add(full_token)
-                token_set.add(full_token)
-            else:
-                for tok in tokens:
-                    # Remove the end-of-word marker for tokens that ended a word.
-                    if tok.endswith("</w>"):
-                        tok = tok[:-4]
-                    token_set.add(tok)
-        # We also add an explicit space token to mark word boundaries during encoding.
-        token_set.add(" ")
-        # And include an unknown token.
-        token_set.add("<unk>")
-
-        # Assign unique ids to each token.
-        self.token2id = {token: idx for idx, token in enumerate(sorted(token_set))}
-        self.id2token = {idx: token for token, idx in self.token2id.items()}
+                tokens = line.split()
+                # Apply all merges learned so far.
+                tokens = self._apply_merges(tokens)
+                vocab[tuple(tokens)] += 1
+        return vocab
 
     def _get_stats(self, vocab):
         """
-        Count frequency of all adjacent symbol pairs in the vocabulary.
-
-        Parameters:
-          vocab: A dict mapping word (tuple of symbols) to frequency.
-
-        Returns:
-          A dict mapping symbol pairs (tuples) to their aggregated frequency.
+        Given a vocabulary (mapping token sequence to frequency), count the frequency of each
+        adjacent token pair.
         """
         pairs = defaultdict(int)
-        for word, freq in vocab.items():
-            symbols = list(word)
-            for i in range(len(symbols) - 1):
-                pairs[(symbols[i], symbols[i + 1])] += freq
+        for token_seq, freq in vocab.items():
+            tokens = list(token_seq)
+            for i in range(len(tokens) - 1):
+                pairs[(tokens[i], tokens[i + 1])] += freq
         return pairs
 
-    def _merge_vocab(self, pair, vocab_in):
+    def train(self, file_path, num_merges=10000, num_passes=None, chunk_size=1024):
         """
-        Merge all occurrences of the given symbol pair in the vocabulary.
+        Train the tokenizer on a file where each line is a sequence of space–separated tokens.
+        The training works in passes: each pass reads the entire file, applies merges learned so far,
+        computes adjacent token pair frequencies, and (if possible) merges the most frequent pair.
 
         Parameters:
-          pair: A tuple of symbols (e.g. ('a', 'b')) to merge.
-          vocab_in: Current vocabulary (dict mapping tuple of symbols to frequency).
-
-        Returns:
-          A new vocabulary with the pair merged.
+          file_path: Path to the training text file.
+          num_merges: Maximum number of merge operations (across all passes).
+          num_passes: Maximum number of passes to perform. If None, num_passes = num_merges.
+          chunk_size: Number of bytes to update the progress bar (for file reading).
         """
-        vocab_out = {}
-        bigram = pair
-        for word, freq in vocab_in.items():
-            new_word = []
-            i = 0
-            word = list(word)
-            while i < len(word):
-                # If the pair is found, merge the two symbols.
-                if i < len(word) - 1 and (word[i], word[i + 1]) == bigram:
-                    new_word.append(word[i] + word[i + 1])
-                    i += 2
-                else:
-                    new_word.append(word[i])
-                    i += 1
-            vocab_out[tuple(new_word)] = freq
-        return vocab_out
+        if num_passes is None:
+            num_passes = num_merges
 
-    def _bpe(self, word):
-        """
-        Apply the learned BPE merges to segment a word.
+        learned_merges = []
+        current_merge_count = 0
 
-        Parameters:
-          word: A string (a single word).
+        # Each pass re-reads the file, applying merges learned so far.
+        for p in range(num_passes):
+            vocab = self._read_and_apply_merges(file_path, chunk_size)
+            pairs = self._get_stats(vocab)
+            if not pairs:
+                print("No more pairs to merge. Stopping at pass", p + 1)
+                break
+            # Select the most frequent adjacent token pair.
+            best_pair = max(pairs, key=pairs.get)
+            freq = pairs[best_pair]
+            if freq < 1:
+                # If the best pair does not appear, nothing to merge.
+                print("Best pair frequency is 0. Stopping.")
+                break
+            learned_merges.append(best_pair)
+            current_merge_count += 1
+            print(f"Pass {p + 1}: Merging {best_pair} with frequency {freq}")
+            if current_merge_count >= num_merges:
+                print("Reached maximum number of merges.")
+                break
 
-        Returns:
-          A list of subword tokens (some ending with '</w>' to mark word-end).
-        """
-        # Start with the list of characters plus the end-of-word marker.
-        word_symbols = list(word) + ["</w>"]
-        while True:
-            # Get list of adjacent pairs.
-            pairs = [(word_symbols[i], word_symbols[i + 1]) for i in range(len(word_symbols) - 1)]
-            # Find the pair that has been merged (if any) with the lowest rank.
-            candidate = None
-            min_rank = None
-            for pair in pairs:
-                if pair in self.bpe_ranks:
-                    rank = self.bpe_ranks[pair]
-                    if min_rank is None or rank < min_rank:
-                        min_rank = rank
-                        candidate = pair
-            if candidate is None:
-                break  # No more merges to apply.
-            # Merge the first occurrence of candidate in a left-to-right pass.
-            new_word = []
-            i = 0
-            while i < len(word_symbols):
-                if i < len(word_symbols) - 1 and (word_symbols[i], word_symbols[i + 1]) == candidate:
-                    new_word.append(word_symbols[i] + word_symbols[i + 1])
-                    i += 2
-                else:
-                    new_word.append(word_symbols[i])
-                    i += 1
-            word_symbols = new_word
-        return word_symbols
+        self.merges = learned_merges
+        self.bpe_ranks = {pair: idx for idx, pair in enumerate(self.merges)}
+
+        # Build final vocabulary by reading the file one last time with all merges applied.
+        final_vocab = self._read_and_apply_merges(file_path, chunk_size)
+        token_set = set()
+        for token_seq in final_vocab:
+            token_set.update(token_seq)
+        token_set.add("<unk>")  # Add an unknown token.
+        self.token2id = {token: idx for idx, token in enumerate(sorted(token_set))}
+        self.id2token = {idx: token for token, idx in self.token2id.items()}
+        print("Training complete. Final vocabulary size:", len(self.token2id))
 
     def encode(self, text):
         """
-        Encode a text string into a flat list of token ids.
-
-        The text is first split into words (by whitespace). For each word, if it was
-        seen in training as a full word, it is encoded as a single token; otherwise the
-        learned BPE rules are applied.
-
-        A special space token is inserted between words.
+        Encode a text string (space-separated tokens) into a list of token IDs.
+        The current merges are applied.
         """
-        token_ids = []
-        words = text.strip().split()
-        space_id = self.token2id.get(" ")
+        tokens = text.strip().split()
+        merged_tokens = self._apply_merges(tokens)
         unk_id = self.token2id.get("<unk>")
-        for i, word in enumerate(words):
-            if word in self.full_words:
-                token = word
-                token_ids.append(self.token2id.get(token, unk_id))
-            else:
-                # Apply BPE segmentation.
-                sub_tokens = self._bpe(word)
-                for sub in sub_tokens:
-                    if sub.endswith("</w>"):
-                        sub = sub[:-4]
-                    token_ids.append(self.token2id.get(sub, unk_id))
-            # Insert a space token between words (except after the last word)
-            if i < len(words) - 1:
-                token_ids.append(space_id)
+        token_ids = [self.token2id.get(tok, unk_id) for tok in merged_tokens]
         return token_ids
 
     def decode(self, token_ids):
         """
-        Decode a flat list of token ids back into a string.
-
-        This routine assumes that a space token was inserted between words during encoding.
-        It concatenates subword tokens (which were produced during BPE segmentation) and
-        then splits on the special space token.
+        Decode a list of token IDs back into a string.
+        Merged tokens (joined by '_') are split back into their original tokens.
         """
-        tokens = [self.id2token.get(tid, "") for tid in token_ids]
-        words = []
-        current_word = ""
+        tokens = [self.id2token.get(tid, "<unk>") for tid in token_ids]
+        output_tokens = []
         for tok in tokens:
-            if tok == " ":
-                # A space token indicates the end of a word.
-                if current_word:
-                    words.append(current_word)
-                    current_word = ""
+            # If the token contains an underscore, split it.
+            if "_" in tok:
+                output_tokens.extend(tok.split("_"))
             else:
-                current_word += tok
-        if current_word:
-            words.append(current_word)
-        return " ".join(words)
-
-    def load(self, file_path):
-        """
-        Load a saved BPE model from a JSON file.
-
-        The file is expected to contain:
-          - "merges": a list of pairs (each pair is a list of two strings)
-          - "token2id": the vocabulary mapping token to id
-          - "full_words": (optional) list of full-word tokens.
-        """
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self.merges = [tuple(pair) for pair in data["merges"]]
-        self.bpe_ranks = {pair: i for i, pair in enumerate(self.merges)}
-        self.token2id = data["token2id"]
-        # Note: keys of token2id are strings; ensure id2token maps integer ids to tokens.
-        self.id2token = {int(idx): tok for tok, idx in self.token2id.items()}
-        self.full_words = set(data.get("full_words", []))
+                output_tokens.append(tok)
+        return " ".join(output_tokens)
 
     def save(self, file_path):
         """
-        Save the current BPE model to a JSON file.
+        Save the BPE model to a JSON file.
         """
         data = {
             "merges": [list(pair) for pair in self.merges],
             "token2id": self.token2id,
-            "full_words": list(self.full_words)
         }
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        print("Model saved to", file_path)
+
+    def load(self, file_path):
+        """
+        Load a BPE model from a JSON file.
+        """
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.merges = [tuple(pair) for pair in data["merges"]]
+        self.bpe_ranks = {pair: idx for idx, pair in enumerate(self.merges)}
+        self.token2id = data["token2id"]
+        self.id2token = {int(idx): token for token, idx in self.token2id.items()}
+        print("Model loaded from", file_path)
