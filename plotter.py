@@ -36,15 +36,23 @@ class LossPlotter:
     def plot(self, step):
         """Generate and save the plot to a file."""
         plt.figure(figsize=(10, 5))
-        plt.plot(self.train_losses, label="Train Loss")
+        # Train Loss: light blue and 30% transparent
+        plt.plot(self.train_losses, label="Train Loss", color="lightblue", alpha=0.3)
+
         if self.val_losses:
-            # To align validation loss with training steps, we plot against evenly spaced indices
+            # Align validation loss with training steps
             val_steps = np.linspace(0, len(self.train_losses), len(self.val_losses))
-            plt.plot(val_steps, self.val_losses, label="Val Loss")
-        plt.plot(self.moving_avg, label="Moving Avg Train Loss")
+            # Val Loss: dark blue and thick
+            plt.plot(val_steps, self.val_losses, label="Val Loss", color="darkblue", linewidth=1)
+
+        # Moving Average: thick and black
+        plt.plot(self.moving_avg, label="Moving Avg Train Loss", color="black", linewidth=3)
+
         plt.xlabel("Step")
         plt.ylabel("Loss")
         plt.title(f"Loss Curves up to step {step}")
         plt.legend()
+        plt.grid(True)
         plt.savefig(f"{self.filename_prefix}.png")
         plt.close()
+
