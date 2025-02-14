@@ -51,7 +51,7 @@ class LossPlotter:
         plt.title(f"Loss Curves up to step {step}", color="white")
 
         # Plot train loss in #011638
-        plt.plot(self.train_losses, label="Train Loss", color="#20A4F3")
+        plt.plot(self.train_losses, label="Train Loss", color="#0D21A1")
 
         # Plot validation loss in #EEC643 (if available) with a thick line
         if self.val_losses:
@@ -59,8 +59,7 @@ class LossPlotter:
             plt.plot(val_steps, self.val_losses, label="Val Loss", color="#EEC643", linewidth=1)
 
         # Plot moving average in #0D21A1 with a thick line
-        plt.plot(self.moving_avg, label="Moving Avg Train Loss", color="#0D21A1", linewidth=3)
-
+        plt.plot(self.moving_avg, label="Moving Avg Train Loss", color="#20A4F3", linewidth=3)
         # Create legend with custom styling: text in white, Helvetica, and matching background
         leg = plt.legend()
         for text in leg.get_texts():
