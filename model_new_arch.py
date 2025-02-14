@@ -461,10 +461,11 @@ if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=50, window=50)
 
+scaler = torch.amp.GradScaler(device='cuda')
+
 for step in range(max_steps):
     t0 = time.time()
     model.train()
-    scaler = torch.amp.GradScaler(device='cuda')
 
     loss, grad_norm = train_step_TESLA(
         model=model,
