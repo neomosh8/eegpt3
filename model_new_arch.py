@@ -313,7 +313,7 @@ train_loader = DataLoaderLiteAllInMemory(
 )
 val_loader = DataLoaderLiteAllInMemory(
     B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
-    local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=False
+    local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
 )
 
 # Calculate max_steps based on passes through all data.
@@ -457,9 +457,13 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
     return loss_accum.item(), grad_norm
 
 
+val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
+            B * T * ddp_world_size)  # Ceiling division
 if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=50, window=50)
+    print(f"validation steps: {val_steps_needed}")
+
 
 scaler = torch.amp.GradScaler(device='cuda')
 
@@ -501,7 +505,7 @@ for step in range(max_steps):
         val_loader.reset()
         with torch.no_grad():
             val_loss_accum = torch.zeros(1, device=device)
-            val_loss_steps = 200
+            val_loss_steps = val_steps_needed
             for _ in range(val_loss_steps):
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
