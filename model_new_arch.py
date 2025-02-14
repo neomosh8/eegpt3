@@ -287,7 +287,7 @@ class DataLoaderLiteAllInMemory:
 
         # Locate shard files.
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[:1000]
+        self.shard_files = sorted(glob.glob(pattern))[:50]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
