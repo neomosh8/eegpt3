@@ -257,7 +257,7 @@ class DataLoaderLiteAllInMemory:
 
     If a shard is missing one or more required channels, the loader will fill in the missing
     channels by duplicating tokens from one of the available channels (selected randomly if more
-    than one is available). After loading, it prints how many shards were fixed.
+    than one is available). After loading, it prints how many shards had this problem.
     """
 
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
@@ -310,6 +310,14 @@ class DataLoaderLiteAllInMemory:
         self.shard_ptrs = [0 for _ in self.shards]
         # Global shard index for round-robin sampling.
         self.shard_index = 0
+
+    @property
+    def total_len(self):
+        """
+        Returns the total number of tokens available across all shards (using channel 0).
+        This property is used by the training code to compute steps_per_pass.
+        """
+        return sum(shard[REGIONS[0]].size(0) for shard in self.shards)
 
     def next_batch(self):
         """
@@ -368,7 +376,6 @@ class DataLoaderLiteAllInMemory:
         """Resets all shard pointers and the global shard index."""
         self.shard_ptrs = [0 for _ in self.shards]
         self.shard_index = 0
-
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
