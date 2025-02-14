@@ -333,7 +333,6 @@ class DataLoaderLiteAllInMemory:
         channel_ids = []
         for i in range(self.num_channels):
             channel_ids.extend([i] * T)
-        self.channel_vector = torch.tensor(channel_ids, dtype=torch.long)
     @property
     def total_len(self):
         """
@@ -394,10 +393,8 @@ class DataLoaderLiteAllInMemory:
         batch_x = torch.stack(xs, dim=0)  # [B, num_channels * T]
         batch_y = torch.stack(ys, dim=0)
 
-        # Replicate the channel vector for each sample in the batch.
-        batch_c = self.channel_vector.unsqueeze(0).expand(self.B, -1)  # [B, num_channels * T]
 
-        return batch_x, batch_c, batch_y
+        return batch_x, batch_y
 
     def reset(self):
         """Reset the per-shard pointers and the round-robin index (useful for restarting an epoch)."""
