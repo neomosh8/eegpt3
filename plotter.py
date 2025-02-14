@@ -37,7 +37,7 @@ class LossPlotter:
         """Generate and save the plot to a file."""
         plt.figure(figsize=(10, 5))
         # Train Loss: light blue and 30% transparent
-        plt.plot(self.train_losses, label="Train Loss", color="lightblue", alpha=0.3)
+        plt.plot(self.train_losses, label="Train Loss", color="lightblue", alpha=0.7)
 
         if self.val_losses:
             # Align validation loss with training steps
