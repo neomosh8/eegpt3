@@ -35,8 +35,6 @@ class LossPlotter:
 
     def plot(self, step):
         """Generate and save the plot to a file with custom dark style."""
-        # Set Helvetica font globally for this plot
-        plt.rcParams['font.family'] = 'Helvetica'
 
         # Create figure with dark background
         fig = plt.figure(figsize=(10, 5), facecolor="#000103")
@@ -67,7 +65,6 @@ class LossPlotter:
         leg = plt.legend()
         for text in leg.get_texts():
             text.set_color("white")
-            text.set_fontfamily("Helvetica")
         leg.get_frame().set_facecolor("#000103")
         leg.get_frame().set_edgecolor("white")
 
