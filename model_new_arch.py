@@ -6,6 +6,7 @@ import time
 import inspect
 from dataclasses import dataclass
 import contextlib
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -242,15 +243,8 @@ class GPT(nn.Module):
 # DataLoader (All-In-Memory)
 #########################
 # Ensure these match the channels defined during preprocessing.
-REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
-
 
 class DataLoaderLiteAllInMemory:
-    """
-    DataLoader that handles multiple channels with different shard lengths, maintaining channel alignment
-    within shards and supporting DDP. Each sequence consists of aligned segments from all channels.
-    """
-
     def __init__(
             self,
             B: int,
@@ -263,147 +257,168 @@ class DataLoaderLiteAllInMemory:
             shuffle_shards: bool = False
     ):
         """
+        Initialize the data loader for multiple channels with proper DDP support.
+
         Args:
-            B: Batch size
-            T: Sequence length per channel
-            process_rank: (DDP) process rank
-            num_processes: total DDP processes
-            local_data_dir: directory containing .pt shards
-            shard_prefix: prefix used in naming the shards
-            split: "train" or "val"
-            shuffle_shards: whether to shuffle the order of shards
+            B: Batch size per process
+            T: Sequence length
+            process_rank: Process rank for distributed training
+            num_processes: Number of processes
+            local_data_dir: Directory containing the shards
+            shard_prefix: Prefix for shard files
+            split: Data split ('train' or 'val')
+            shuffle_shards: Whether to shuffle the order of shards
         """
-        self.B = B
+        self.B = B  # batch size per process
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Find all shard files
-        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))
-        if not self.shard_files:
-            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
+        # Load shards for this process only
+        shard_pattern = f"{shard_prefix}_{split}"
+        shard_files = [
+            f for f in sorted(os.listdir(local_data_dir))
+            if f.endswith('.pt') and shard_pattern in f
+        ]
+
         if shuffle_shards:
-            random.shuffle(self.shard_files)
+            random.shuffle(shard_files)
 
-        # Load and process shards
+        # Distribute shards across processes
+        self.process_shard_indices = list(range(process_rank, len(shard_files), num_processes))
+        process_shard_files = [shard_files[i] for i in self.process_shard_indices]
+
+        print(f"Process {process_rank}/{num_processes} loading {len(process_shard_files)} shards...")
+
         self.shards = []
-        self.shard_lengths = []  # Store length of each shard
-        self.total_tokens = 0  # Track total number of tokens
-        skipped_shards = 0  # Count skipped shards
+        self.total_tokens = 0  # Track total tokens across all shards and channels
 
-        for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+        for shard_file in process_shard_files:
+            shard_path = os.path.join(local_data_dir, shard_file)
+            shard_data = torch.load(shard_path)
+            self.shards.append(shard_data)
 
-            # Verify all channels have same length within this shard
-            channel_lengths = [loaded[region].size(0) for region in REGIONS]
-            if not all(l == channel_lengths[0] for l in channel_lengths):
-                raise ValueError(f"Shard {shard_path} has mismatched channel lengths")
+            # Update total tokens count (sum across all channels in this shard)
+            for channel in shard_data.values():
+                self.total_tokens += channel.size(0)
 
-            # Store shard length (in terms of complete sequences we can extract)
-            shard_length = channel_lengths[0]
-            self.total_tokens += shard_length * len(REGIONS)  # Add to total token count
+        if len(self.shards) == 0:
+            raise ValueError(f"No shards found for process {process_rank} in {local_data_dir} for split {split}")
 
-            num_complete_sequences = shard_length // T
-            if num_complete_sequences == 0:
-                print(f"Warning: Skipping shard {shard_path} - too short for sequence length {T}")
-                skipped_shards += 1
-                continue
+        # Verify all shards have the same channels
+        self.channels = list(self.shards[0].keys())
+        for shard in self.shards:
+            assert set(shard.keys()) == set(self.channels), "All shards must have the same channels"
 
-            self.shard_lengths.append(num_complete_sequences)
-            self.shards.append(loaded)
+        # Calculate total samples and validate batch size
+        total_samples = sum(self._get_shard_samples(shard) for shard in self.shards)
+        self.samples_per_process = math.ceil(total_samples / num_processes)
 
-        if not self.shards:
-            raise ValueError("No valid shards remaining after filtering")
-
-        # Calculate total number of sequences across all shards
-        self.total_sequences = sum(self.shard_lengths)
-
-        # Initialize pointers for tracking position
-        self.current_shard_idx = 0
-        self.current_sequence_idx = 0
-
-        # Set starting position based on process rank
-        self.sequences_per_process = self.total_sequences // num_processes
-        start_sequence = self.sequences_per_process * process_rank
-        self._seek_to_sequence(start_sequence)
-
-        # Print statistics
-        print(f"DataLoader Statistics:")
-        print(f"- Total tokens across all channels: {self.total_tokens}")
-        print(f"- Total sequences: {self.total_sequences}")
-        print(f"- Sequences per process: {self.sequences_per_process}")
-        print(f"- Number of skipped shards: {skipped_shards}")
-        print(f"- Number of valid shards: {len(self.shards)}")
-
-    def _seek_to_sequence(self, target_sequence):
-        """Position pointers at the start of the target sequence number"""
-        current_seq = 0
-        for shard_idx, shard_len in enumerate(self.shard_lengths):
-            if current_seq + shard_len > target_sequence:
-                self.current_shard_idx = shard_idx
-                self.current_sequence_idx = target_sequence - current_seq
-                return
-            current_seq += shard_len
-
-    def next_batch(self):
-        """
-        Returns a batch of sequences where each sequence contains concatenated
-        channel data: [ch1_seq, ch2_seq, ..., chN_seq]
-
-        Returns:
-            x: tensor of shape [B, N*T] where N is number of channels
-            y: tensor of shape [B, N*T]
-        """
-        B, T = self.B, self.T
-        samples_x = []
-        samples_y = []
-
-        for _ in range(B):
-            # Get current shard
-            shard = self.shards[self.current_shard_idx]
-
-            # Extract aligned sequences from all channels
-            sequence = []
-            sequence_next = []  # For targets (shifted by 1)
-
-            for region in REGIONS:
-                start_idx = self.current_sequence_idx * T
-                channel_data = shard[region]
-
-                # Extract current sequence
-                curr_seq = channel_data[start_idx:start_idx + T]
-                sequence.append(curr_seq)
-
-                # Extract next sequence (shifted by 1)
-                next_seq = channel_data[start_idx + 1:start_idx + T + 1]
-                sequence_next.append(next_seq)
-
-            # Concatenate all channels for this sequence
-            samples_x.append(torch.cat(sequence))
-            samples_y.append(torch.cat(sequence_next))
-
-            # Update position
-            self.current_sequence_idx += 1
-            if self.current_sequence_idx >= self.shard_lengths[self.current_shard_idx]:
-                self.current_sequence_idx = 0
-                self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
-
-        # Stack all samples into batch
-        x = torch.stack(samples_x)  # [B, N*T]
-        y = torch.stack(samples_y)  # [B, N*T]
-
-        return x, y
+        self.reset()
 
     @property
     def total_len(self):
         """Returns the total number of tokens across all shards and channels"""
         return self.total_tokens
 
+    def _get_shard_samples(self, shard_data):
+        """Calculate number of complete samples in a shard."""
+        channel_length = shard_data[self.channels[0]].size(0)
+        return channel_length // self.T
+
     def reset(self):
-        """Reset to starting position for this process"""
-        start_sequence = self.sequences_per_process * self.process_rank
-        self._seek_to_sequence(start_sequence)
+        """Reset the data loader state."""
+        self.current_shard_idx = 0
+        self.current_position = 0
+
+    def next_batch(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get the next batch of sequences from all channels.
+
+        Returns:
+            Tuple of (input_tensor, target_tensor) where each tensor has shape (B, total_sequence_length)
+            total_sequence_length = T * num_channels
+        """
+        B, T = self.B, self.T
+
+        if self.current_shard_idx >= len(self.shards):
+            # Wrap around to the first shard
+            self.current_shard_idx = 0
+            self.current_position = 0
+
+        current_shard_data = self.shards[self.current_shard_idx]
+
+        # Get the current shard length (all channels should have same length)
+        shard_length = current_shard_data[self.channels[0]].size(0)
+
+        # Check if we need to move to next shard
+        if self.current_position + (B * T) > shard_length:
+            self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
+            self.current_position = 0
+
+            if self.current_shard_idx < len(self.shards):
+                current_shard_data = self.shards[self.current_shard_idx]
+            else:
+                # If we've exhausted all shards, wrap around
+                self.current_shard_idx = 0
+                current_shard_data = self.shards[0]
+
+        # Prepare the batch
+        batch_sequences = []
+        for b in range(B):
+            pos = self.current_position + (b * T)
+            sequence = []
+
+            # Concatenate sequences from all channels
+            for channel in self.channels:
+                channel_data = current_shard_data[channel]
+                channel_seq = channel_data[pos:pos + T]
+
+                # Pad if necessary
+                if channel_seq.size(0) < T:
+                    padding_length = T - channel_seq.size(0)
+                    channel_seq = torch.cat([
+                        channel_seq,
+                        torch.zeros(padding_length, dtype=channel_seq.dtype)
+                    ])
+                sequence.append(channel_seq)
+
+            batch_sequences.append(torch.cat(sequence))
+
+        # Stack all sequences in the batch
+        x = torch.stack(batch_sequences)  # Shape: (B, T * num_channels)
+
+        # For targets, shift the sequences by 1
+        y = torch.roll(x, shifts=-1, dims=1)
+
+        # Update position
+        self.current_position += B * T
+
+        return x, y
+
+    def __len__(self):
+        """
+        Return the total number of possible batches for this process.
+        """
+        total_samples = 0
+        for shard in self.shards:
+            total_samples += self._get_shard_samples(shard)
+        return total_samples // self.B
+
+    def get_state_dict(self):
+        """Get loader state for checkpointing."""
+        return {
+            'current_shard_idx': self.current_shard_idx,
+            'current_position': self.current_position
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load loader state from checkpoint."""
+        self.current_shard_idx = state_dict['current_shard_idx']
+        self.current_position = state_dict['current_position']
+
+
+
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
