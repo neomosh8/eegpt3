@@ -334,7 +334,12 @@ class DataLoaderLiteAllInMemory:
         for i in range(self.num_channels):
             channel_ids.extend([i] * T)
         self.channel_vector = torch.tensor(channel_ids, dtype=torch.long)
-
+    @property
+    def total_len(self):
+        """
+        Returns the total number of tokens per channel across all assigned shards.
+        """
+        return sum(self.shard_lengths)
     def next_batch(self):
         """
         For each sample in the batch, selects a shard (round-robin) and extracts a contiguous block
