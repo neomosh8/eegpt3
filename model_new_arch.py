@@ -244,6 +244,7 @@ class GPT(nn.Module):
 # Ensure these match the channels defined during preprocessing.
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
+
 class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
@@ -253,7 +254,12 @@ class DataLoaderLiteAllInMemory:
     so that the intra-shard channel alignment is preserved.
     For each sample, T+1 tokens are extracted per channel to create input (first T)
     and target (last T, shifted by one) pairs.
+
+    If a shard is missing one or more required channels, the loader will fill in the missing
+    channels by duplicating tokens from one of the available channels (selected randomly if more
+    than one is available). After loading, it prints how many shards were fixed.
     """
+
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
@@ -272,17 +278,33 @@ class DataLoaderLiteAllInMemory:
 
         # Load each shard as a dictionary.
         self.shards = []
+        fixed_shard_count = 0  # counts how many shards needed fixing for missing channels.
         for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu")
-            # Verify that each shard contains all expected channels and that each channel has the same length.
-            channel_lengths = []
+            missing_in_this_shard = False
+            # Check each required region.
             for region in REGIONS:
                 if region not in loaded:
-                    raise ValueError(f"Shard {shard_path} is missing channel {region}")
-                channel_lengths.append(loaded[region].size(0))
+                    # Find available channels (from the expected set) in this shard.
+                    available_channels = [ch for ch in REGIONS if ch in loaded]
+                    if not available_channels:
+                        raise ValueError(f"Shard {shard_path} is missing all expected channels; cannot fix.")
+                    # Duplicate from one available channel (randomly chosen if more than one).
+                    chosen = random.choice(available_channels)
+                    loaded[region] = loaded[chosen]
+                    missing_in_this_shard = True
+            if missing_in_this_shard:
+                fixed_shard_count += 1
+
+            # Verify that all channels in the shard have the same length.
+            channel_lengths = [loaded[region].size(0) for region in REGIONS]
             if not all(l == channel_lengths[0] for l in channel_lengths):
-                raise ValueError(f"Shard {shard_path} has mismatched channel lengths")
+                raise ValueError(f"Shard {shard_path} has mismatched channel lengths after fixing.")
             self.shards.append(loaded)
+
+        if fixed_shard_count > 0:
+            print(f"Warning: {fixed_shard_count} shard(s) were missing one or more channels and have been fixed "
+                  f"by duplicating available channels.")
 
         # Initialize a pointer for each shard to track the current read position.
         self.shard_ptrs = [0 for _ in self.shards]
@@ -346,7 +368,6 @@ class DataLoaderLiteAllInMemory:
         """Resets all shard pointers and the global shard index."""
         self.shard_ptrs = [0 for _ in self.shards]
         self.shard_index = 0
-
 
 #########################
 # Training Setup & Loop (No Epochs)
