@@ -245,17 +245,13 @@ class GPT(nn.Module):
 
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
-
-
 class DataLoaderLiteAllInMemory:
     """
-    Memory-Efficient Design:
+    Memory-Efficient Design with Progress Reporting:
 
     This version makes two passes over the shards:
-      1. A first pass computes the total number of tokens (and captures the dtype)
-         that will appear in the final interleaved tensor.
-      2. A second pass preallocates one huge tensor and fills it in with interleaved
-         tokens using vectorized assignment.
+      1. The first pass computes the total number of tokens and captures the tensor dtype.
+      2. The second pass preallocates one huge tensor and fills it with interleaved tokens using vectorized assignment.
 
     The final ordering is:
         shard1: token0-ch0, token0-ch1, token0-ch2, token1-ch0, token1-ch1, token1-ch2, ...
@@ -290,14 +286,16 @@ class DataLoaderLiteAllInMemory:
         # FIRST PASS: Determine total token count and data type.
         total_tokens = 0
         dtype = None
-        for shard_path in self.shard_files:
+        print("Starting first pass to compute total tokens...")
+        for i, shard_path in enumerate(self.shard_files):
+            print(f"First pass: processing shard {i + 1}/{len(self.shard_files)}: {shard_path}")
             loaded = torch.load(shard_path, map_location="cpu")
             # Handle missing regions:
             for region in REGIONS:
                 if region not in loaded:
                     if len(loaded) > 0:
                         available_region = next(iter(loaded))
-                        print(f"WARNING: Shard {shard_path} is missing channel '{region}'. "
+                        print(f"  WARNING: Shard {shard_path} is missing channel '{region}'. "
                               f"Copying data from channel '{available_region}'.")
                         loaded[region] = loaded[available_region].clone()
                     else:
@@ -310,24 +308,24 @@ class DataLoaderLiteAllInMemory:
         self.total_len = total_tokens
 
         # SECOND PASS: Preallocate final tensor and fill it in.
+        print("Starting second pass to build the final interleaved tensor...")
         final_tensor = torch.empty(total_tokens, dtype=dtype)
         global_index = 0
-        for shard_path in self.shard_files:
+        for i, shard_path in enumerate(self.shard_files):
+            print(f"Second pass: processing shard {i + 1}/{len(self.shard_files)}: {shard_path}")
             loaded = torch.load(shard_path, map_location="cpu")
             # Handle missing regions (again)
             for region in REGIONS:
                 if region not in loaded:
                     if len(loaded) > 0:
                         available_region = next(iter(loaded))
-                        print(f"WARNING: Shard {shard_path} is missing channel '{region}'. "
+                        print(f"  WARNING: Shard {shard_path} is missing channel '{region}'. "
                               f"Copying data from channel '{available_region}'.")
                         loaded[region] = loaded[available_region].clone()
                     else:
                         raise ValueError(f"Shard {shard_path} is missing all channel data.")
             shard_len = len(loaded[REGIONS[0]])
-            # For each region, assign tokens into the final tensor using vectorized slicing.
-            # The tokens for each shard are interleaved as:
-            # final_tensor[global_index + region_index :: num_channels] = loaded[region]
+            # Vectorized assignment: for each region, assign tokens into the final tensor.
             for region_index, region in enumerate(REGIONS):
                 start_idx = global_index + region_index
                 end_idx = global_index + shard_len * num_channels
@@ -337,13 +335,14 @@ class DataLoaderLiteAllInMemory:
         # Store the final huge interleaved token tensor.
         self.interleaved_tokens = final_tensor
         self.tokens = self.interleaved_tokens  # For convenience.
+        print("Finished building final tensor. Total tokens:", self.total_len)
 
         # Initialize current position (for batching) based on process rank.
         self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         """
-        Extract a contiguous block of tokens from the interleaved token stream and constructs
+        Extracts a contiguous block of tokens from the interleaved token stream and constructs
         inputs (x) and targets (y) so that for each channel the target is the next token in that same channel.
 
         Let num_channels = len(REGIONS) and time_steps = T // num_channels.
