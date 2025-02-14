@@ -245,26 +245,23 @@ class GPT(nn.Module):
 
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
-import os
-import glob
-import random
-import torch
-
-
 class DataLoaderLiteAllInMemory:
+    """
+    Loads all .pt shard files from a local directory.
+    Each shard contains separate token tensors for each channel.
+    The loader concatenates tokens per channel across shards and provides batches.
+    Each batch is returned as two dictionaries (x and y) mapping channel names to tensors.
+    """
+
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
-                 split: str = "train", shuffle_shards: bool = False, N: int = None):
-
+                 split: str = "train", shuffle_shards: bool = False):
         self.B = B
         self.T = T
-        self.N = N if N is not None else 1
         self.process_rank = process_rank
         self.num_processes = num_processes
-        self.num_channels = len(REGIONS)
-        self.tokens_per_channel = T // self.num_channels
 
-        # Locate shard files
+        # Locate shard files.
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
@@ -272,111 +269,132 @@ class DataLoaderLiteAllInMemory:
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
-        # FIRST PASS: Determine total token count and data type
-        total_tokens = 0
-        dtype = None
-        print("Starting first pass to compute total tokens...")
-        for i, shard_path in enumerate(self.shard_files):
-            print(f"First pass: processing shard {i + 1}/{len(self.shard_files)}: {shard_path}")
+        # Load and concatenate tokens separately for each channel.
+        self.tokens = {region: [] for region in REGIONS}
+        for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu")
-
-            # Handle missing regions
             for region in REGIONS:
                 if region not in loaded:
-                    if len(loaded) > 0:
-                        available_region = next(iter(loaded))
-                        print(f"  WARNING: Shard {shard_path} is missing channel '{region}'. "
-                              f"Copying data from channel '{available_region}'.")
-                        loaded[region] = loaded[available_region].clone()
-                    else:
-                        raise ValueError(f"Shard {shard_path} is missing all channel data.")
+                    raise ValueError(f"Shard {shard_path} is missing channel {region}")
+                self.tokens[region].append(loaded[region])
+        # Concatenate tokens for each channel along the 0-dimension.
+        for region in REGIONS:
+            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
-            shard_len = len(loaded[REGIONS[0]])
-            total_tokens += shard_len * self.num_channels
-            if dtype is None:
-                dtype = loaded[REGIONS[0]].dtype
-
-        self.total_len = total_tokens
-
-        # SECOND PASS: Build temporally aligned tensor
-        print("Starting second pass to build temporally aligned tensor...")
-        tokens_per_shard = total_tokens // self.num_channels
-        final_tensor = torch.empty(total_tokens, dtype=dtype)
-        current_pos = 0
-
-        for i, shard_path in enumerate(self.shard_files):
-            print(f"Second pass: processing shard {i + 1}/{len(self.shard_files)}: {shard_path}")
-            loaded = torch.load(shard_path, map_location="cpu")
-
-            # Handle missing regions
-            for region in REGIONS:
-                if region not in loaded:
-                    if len(loaded) > 0:
-                        available_region = next(iter(loaded))
-                        loaded[region] = loaded[available_region].clone()
-                    else:
-                        raise ValueError(f"Shard {shard_path} is missing all channel data.")
-
-            shard_len = len(loaded[REGIONS[0]])
-
-            # Store temporally aligned: all tokens from same time window across channels
-            for ch_idx, region in enumerate(REGIONS):
-                start_idx = current_pos + ch_idx * shard_len
-                final_tensor[start_idx:start_idx + shard_len] = loaded[region]
-
-            current_pos += self.num_channels * shard_len
-
-        self.tokens = final_tensor
-        print("Finished building final tensor. Total tokens:", self.total_len)
-
-        # Initialize position based on process rank
+        # Assume all channels have the same total length.
+        self.total_len = len(self.tokens[REGIONS[0]])
         self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         """
-        Returns temporally aligned batches where each sequence contains
-        the same time window from all channels.
+        For each channel, extracts a contiguous block of tokens and then interleaves them.
+        Returns:
+            x: tensor of shape [B, T_total] where T_total = T * num_channels, with tokens arranged as:
+               [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
+            y: similarly structured target tensor.
         """
         B, T = self.B, self.T
-        tokens_per_channel = self.T // self.num_channels
+        needed = B * T + 1  # extra token for shifting.
+        x_dict, y_dict = {}, {}
 
-        # Calculate how many tokens we need for this batch
-        needed = B * T
+        # Extract tokens for each channel separately.
+        for region in REGIONS:
+            tokens_region = self.tokens[region]
+            if self.current_position + needed <= self.total_len:
+                buf_tokens = tokens_region[self.current_position: self.current_position + needed]
+            else:
+                leftover = self.total_len - self.current_position
+                wrap_amount = needed - leftover
+                part1_toks = tokens_region[self.current_position:]
+                part2_toks = tokens_region[: wrap_amount]
+                buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
+            if len(buf_tokens) != needed:
+                raise RuntimeError(f"Unexpected length for channel {region}. Expected {needed}, got {len(buf_tokens)}")
+            # For language modeling, x is all tokens except the last, and y is shifted by one.
+            x_dict[region] = buf_tokens[:-1].view(B, T)
+            y_dict[region] = buf_tokens[1:].view(B, T)
 
-        # Get the tokens
-        if self.current_position + needed <= self.total_len:
-            buf_tokens = self.tokens[self.current_position:self.current_position + needed]
-        else:
-            leftover = self.total_len - self.current_position
-            wrap_amount = needed - leftover
-            buf_tokens = torch.cat([self.tokens[self.current_position:], self.tokens[:wrap_amount]], dim=0)
-
-        # Reshape into [B, num_channels, tokens_per_channel]
-        x = buf_tokens.view(B, self.num_channels, tokens_per_channel)
-
-        # Get the next tokens for targets
-        next_position = (self.current_position + needed) % self.total_len
-        if next_position + needed <= self.total_len:
-            next_tokens = self.tokens[next_position:next_position + needed]
-        else:
-            leftover = self.total_len - next_position
-            wrap_amount = needed - leftover
-            next_tokens = torch.cat([self.tokens[next_position:], self.tokens[:wrap_amount]], dim=0)
-
-        y = next_tokens.view(B, self.num_channels, tokens_per_channel)
-
-        # Update position
         self.current_position = (self.current_position + needed) % self.total_len
 
-        # Flatten the channel dimension to match model input shape
-        return x.reshape(B, T), y.reshape(B, T)
+        # Instead of block-concatenation, stack and then flatten to interleave tokens.
+        # After stacking, each tensor has shape [B, T, num_channels]
+        x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
+        y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
 
-    def total_tokens(self):
-        return self.total_len
+        # Reshape to combine the time and channel dimensions.
+        # This gives a tensor of shape [B, T * num_channels] arranged as:
+        # [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
+        x_combined = x_stacked.view(B, T * len(REGIONS))
+        y_combined = y_stacked.view(B, T * len(REGIONS))
+
+        return x_combined, y_combined
 
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
 
+    @property
+    def total_length(self):
+        """Allows external access to the total number of tokens per channel."""
+        return self.total_len
+#########################
+# Training Setup & Loop (No Epochs)
+#########################
+# Training hyperparameters
+B = 16  # micro-batch size (sequences per mini-batch)
+T = 1032  # sequence length (tokens per sequence)
+desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
+grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
+if master_process:
+    print(f"Using grad_accum_steps: {grad_accum_steps}")
+
+# Create dataloaders for training and validation.
+train_loader = DataLoaderLiteAllInMemory(
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
+)
+val_loader = DataLoaderLiteAllInMemory(
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
+)
+
+# Calculate max_steps based on passes through all data.
+# For example, if you want to run 5 full passes over the training data:
+num_passes = 5
+tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
+steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
+max_steps = num_passes * steps_per_pass
+if master_process:
+    print(f"Total tokens in training set: {train_loader.total_len}")
+    print(f"Steps per pass: {steps_per_pass}")
+    print(f"Running for {max_steps} optimization steps ({num_passes} passes over the data)")
+
+# Instantiate the model.
+model = GPT(GPTConfig())
+model.to(device)
+# Optionally compile the model for potential speedups.
+model = torch.compile(model)
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module if ddp else model
+
+# Set up the optimizer.
+base_lr = 6e-4
+optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
+
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=base_lr,
+    total_steps=max_steps,  # total number of training steps
+    pct_start=0.15,  # fraction of steps for warmup
+    anneal_strategy='cos',  # cosine annealing for decay
+    cycle_momentum=False  # typically False for AdamW
+)
+
+# Log file for training (will be appended at every optimizer step)
+log_file = "training.log"
+if master_process:
+    with open(log_file, "w") as f:
+        f.write("step train_loss\n")
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
