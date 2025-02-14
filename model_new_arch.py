@@ -347,6 +347,8 @@ class DataLoaderLiteAllInMemory:
         y_combined = y_stacked.view(B, L * self.num_channels)
 
         return x_combined, y_combined
+    def reset(self):
+        self.current_position = self.B * self.per_channel_length * self.process_rank
 
 
 #########################
