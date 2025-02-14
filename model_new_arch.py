@@ -280,7 +280,7 @@ class DataLoaderLiteAllInMemory:
         self.shards = []
         fixed_shard_count = 0  # counts how many shards needed fixing for missing channels.
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu")
+            loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
             missing_in_this_shard = False
             # Check each required region.
             for region in REGIONS:
