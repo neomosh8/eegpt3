@@ -244,6 +244,13 @@ class GPT(nn.Module):
 #########################
 # Ensure these match the channels defined during preprocessing.
 
+import torch
+import os
+from typing import Dict, List, Tuple
+import math
+import random
+
+
 class DataLoaderLiteAllInMemory:
     def __init__(
             self,
@@ -256,20 +263,7 @@ class DataLoaderLiteAllInMemory:
             split: str = "train",
             shuffle_shards: bool = False
     ):
-        """
-        Initialize the data loader for multiple channels with proper DDP support.
-
-        Args:
-            B: Batch size per process
-            T: Sequence length
-            process_rank: Process rank for distributed training
-            num_processes: Number of processes
-            local_data_dir: Directory containing the shards
-            shard_prefix: Prefix for shard files
-            split: Data split ('train' or 'val')
-            shuffle_shards: Whether to shuffle the order of shards
-        """
-        self.B = B  # batch size per process
+        self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
@@ -291,28 +285,28 @@ class DataLoaderLiteAllInMemory:
         print(f"Process {process_rank}/{num_processes} loading {len(process_shard_files)} shards...")
 
         self.shards = []
-        self.total_tokens = 0  # Track total tokens across all shards and channels
+        self.total_tokens = 0
 
         for shard_file in process_shard_files:
             shard_path = os.path.join(local_data_dir, shard_file)
             shard_data = torch.load(shard_path)
-            self.shards.append(shard_data)
 
-            # Update total tokens count (sum across all channels in this shard)
-            for channel in shard_data.values():
-                self.total_tokens += channel.size(0)
+            # Verify all channels have same length within shard
+            lengths = [tensor.size(0) for tensor in shard_data.values()]
+            if not all(l == lengths[0] for l in lengths):
+                raise ValueError(f"All channels must have same length within shard {shard_file}")
+
+            self.shards.append(shard_data)
+            self.total_tokens += lengths[0] * len(shard_data)  # length * num_channels
 
         if len(self.shards) == 0:
             raise ValueError(f"No shards found for process {process_rank} in {local_data_dir} for split {split}")
 
         # Verify all shards have the same channels
-        self.channels = list(self.shards[0].keys())
+        self.channels = list(sorted(self.shards[0].keys()))  # Sort channels for consistent order
         for shard in self.shards:
-            assert set(shard.keys()) == set(self.channels), "All shards must have the same channels"
-
-        # Calculate total samples and validate batch size
-        total_samples = sum(self._get_shard_samples(shard) for shard in self.shards)
-        self.samples_per_process = math.ceil(total_samples / num_processes)
+            if set(shard.keys()) != set(self.channels):
+                raise ValueError("All shards must have the same channels")
 
         self.reset()
 
@@ -321,58 +315,43 @@ class DataLoaderLiteAllInMemory:
         """Returns the total number of tokens across all shards and channels"""
         return self.total_tokens
 
-    def _get_shard_samples(self, shard_data):
-        """Calculate number of complete samples in a shard."""
-        channel_length = shard_data[self.channels[0]].size(0)
-        return channel_length // self.T
-
     def reset(self):
         """Reset the data loader state."""
         self.current_shard_idx = 0
         self.current_position = 0
 
     def next_batch(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get the next batch of sequences from all channels.
-
-        Returns:
-            Tuple of (input_tensor, target_tensor) where each tensor has shape (B, total_sequence_length)
-            total_sequence_length = T * num_channels
-        """
+        """Get next batch of sequences from all channels."""
         B, T = self.B, self.T
 
+        # Handle shard exhaustion
         if self.current_shard_idx >= len(self.shards):
-            # Wrap around to the first shard
             self.current_shard_idx = 0
             self.current_position = 0
 
         current_shard_data = self.shards[self.current_shard_idx]
-
-        # Get the current shard length (all channels should have same length)
         shard_length = current_shard_data[self.channels[0]].size(0)
 
-        # Check if we need to move to next shard
-        if self.current_position + (B * T) > shard_length:
-            self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
-            self.current_position = 0
-
-            if self.current_shard_idx < len(self.shards):
-                current_shard_data = self.shards[self.current_shard_idx]
-            else:
-                # If we've exhausted all shards, wrap around
-                self.current_shard_idx = 0
-                current_shard_data = self.shards[0]
-
-        # Prepare the batch
+        # Prepare batch
         batch_sequences = []
         for b in range(B):
             pos = self.current_position + (b * T)
-            sequence = []
 
-            # Concatenate sequences from all channels
+            # Check if we need to move to next shard
+            if pos >= shard_length:
+                self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
+                self.current_position = 0
+                pos = 0
+                current_shard_data = self.shards[self.current_shard_idx]
+                shard_length = current_shard_data[self.channels[0]].size(0)
+
+            sequence = []
             for channel in self.channels:
                 channel_data = current_shard_data[channel]
-                channel_seq = channel_data[pos:pos + T]
+
+                # Ensure we don't go past shard boundary
+                available_tokens = min(T, shard_length - pos)
+                channel_seq = channel_data[pos:pos + available_tokens]
 
                 # Pad if necessary
                 if channel_seq.size(0) < T:
@@ -381,6 +360,7 @@ class DataLoaderLiteAllInMemory:
                         channel_seq,
                         torch.zeros(padding_length, dtype=channel_seq.dtype)
                     ])
+
                 sequence.append(channel_seq)
 
             batch_sequences.append(torch.cat(sequence))
@@ -389,7 +369,16 @@ class DataLoaderLiteAllInMemory:
         x = torch.stack(batch_sequences)  # Shape: (B, T * num_channels)
 
         # For targets, shift the sequences by 1
-        y = torch.roll(x, shifts=-1, dims=1)
+        # Use circular shift within each channel's section
+        num_channels = len(self.channels)
+        y = x.clone()
+        for i in range(num_channels):
+            start_idx = i * T
+            end_idx = (i + 1) * T
+            y[:, start_idx:end_idx] = torch.roll(x[:, start_idx:end_idx], shifts=-1, dims=1)
+            # Handle boundary between channels
+            if i < num_channels - 1:
+                y[:, end_idx - 1] = x[:, end_idx]
 
         # Update position
         self.current_position += B * T
@@ -397,12 +386,11 @@ class DataLoaderLiteAllInMemory:
         return x, y
 
     def __len__(self):
-        """
-        Return the total number of possible batches for this process.
-        """
+        """Return the total number of possible batches for this process."""
         total_samples = 0
         for shard in self.shards:
-            total_samples += self._get_shard_samples(shard)
+            samples_in_shard = shard[self.channels[0]].size(0) // self.T
+            total_samples += samples_in_shard
         return total_samples // self.B
 
     def get_state_dict(self):
@@ -416,7 +404,6 @@ class DataLoaderLiteAllInMemory:
         """Load loader state from checkpoint."""
         self.current_shard_idx = state_dict['current_shard_idx']
         self.current_position = state_dict['current_position']
-
 
 
 #########################
