@@ -6,7 +6,6 @@ import time
 import inspect
 from dataclasses import dataclass
 import contextlib
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -48,6 +47,7 @@ torch.manual_seed(9259)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(9259)
 
+
 #########################
 # Model Components
 #########################
@@ -79,11 +79,12 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(y)
         return y
 
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc   = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu   = nn.GELU(approximate='tanh')
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
@@ -92,6 +93,7 @@ class MLP(nn.Module):
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
+
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -106,6 +108,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
 class CrossChannelFusion(nn.Module):
     def __init__(self, n_embd, num_heads=1):
         super().__init__()
@@ -114,11 +117,12 @@ class CrossChannelFusion(nn.Module):
     def forward(self, x):
         # x: [B, time_steps, num_channels, n_embd]
         B, T, C, E = x.size()
-        x = x.view(B * T, C, E)         # [B*T, num_channels, n_embd]
-        x = x.transpose(0, 1)           # [num_channels, B*T, n_embd]
-        fused, _ = self.attn(x, x, x)     # [num_channels, B*T, n_embd]
-        fused = fused.mean(dim=0)        # [B*T, n_embd]
-        return fused.view(B, T, E)       # [B, time_steps, n_embd]
+        x = x.view(B * T, C, E)  # [B*T, num_channels, n_embd]
+        x = x.transpose(0, 1)  # [num_channels, B*T, n_embd]
+        fused, _ = self.attn(x, x, x)  # [num_channels, B*T, n_embd]
+        fused = fused.mean(dim=0)  # [B*T, n_embd]
+        return fused.view(B, T, E)  # [B, time_steps, n_embd]
+
 
 @dataclass
 class GPTConfig:
@@ -132,6 +136,7 @@ class GPTConfig:
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
+
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -239,11 +244,13 @@ class GPT(nn.Module):
         )
         return optimizer
 
+
 #########################
 # DataLoader (All-In-Memory)
 #########################
-
+# Ensure these match the channels defined during preprocessing.
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+
 
 class DataLoaderLiteAllInMemory:
     """
@@ -254,15 +261,15 @@ class DataLoaderLiteAllInMemory:
     and interleaves them so that the final tensor has shape [B, T_total],
     where T_total (e.g., 1032) is divisible by the number of channels.
     """
-    def __init__(self, B: int, T_total: int, process_rank: int, num_processes: int,
+    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
         self.B = B
-        self.T_total = T_total
+        self.T_total = T
         self.num_channels = len(REGIONS)
-        if T_total % self.num_channels != 0:
+        if T % self.num_channels != 0:
             raise ValueError("T_total must be divisible by the number of channels")
-        self.per_channel_length = T_total // self.num_channels
+        self.per_channel_length = T // self.num_channels
 
         self.process_rank = process_rank
         self.num_processes = num_processes
@@ -340,6 +347,8 @@ class DataLoaderLiteAllInMemory:
         y_combined = y_stacked.view(B, L * self.num_channels)
 
         return x_combined, y_combined
+
+
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
@@ -353,11 +362,11 @@ if master_process:
 
 # Create dataloaders for training and validation.
 train_loader = DataLoaderLiteAllInMemory(
-    B=B, T_total=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
 )
 val_loader = DataLoaderLiteAllInMemory(
-    B=B, T_total=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
 )
 
@@ -389,7 +398,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps,  # total number of training steps
-    pct_start=0.15,  # fraction of steps for warmup
+    pct_start=0.10,  # fraction of steps for warmup
     anneal_strategy='cos',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
 )
@@ -399,56 +408,7 @@ log_file = "training.log"
 if master_process:
     with open(log_file, "w") as f:
         f.write("step train_loss\n")
-#########################
-# Training Setup & Loop (No Epochs)
-#########################
-# Training hyperparameters
-B = 16              # micro-batch size (sequences per mini-batch)
-T = 1032           # sequence length (tokens per sequence)
-desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
-grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
-if master_process:
-    print(f"Using grad_accum_steps: {grad_accum_steps}")
 
-
-# Calculate max_steps based on passes through all data.
-# For example, if you want to run 5 full passes over the training data:
-num_passes = 3
-tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
-steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
-max_steps = num_passes * steps_per_pass
-if master_process:
-    print(f"Total tokens in training set: {train_loader.total_len}")
-    print(f"Steps per pass: {steps_per_pass}")
-    print(f"Running for {max_steps} optimization steps ({num_passes} passes over the data)")
-
-# Instantiate the model.
-model = GPT(GPTConfig())
-model.to(device)
-# Optionally compile the model for potential speedups.
-model = torch.compile(model)
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-raw_model = model.module if ddp else model
-
-# Set up the optimizer.
-base_lr = 3e-4
-optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
-
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer,
-    max_lr=base_lr,
-    total_steps=max_steps,              # total number of training steps
-    pct_start=0.1,   # fraction of steps for warmup
-    anneal_strategy='cos',                # cosine annealing for decay
-    cycle_momentum=False                  # typically False for AdamW
-)
-
-# Log file for training (will be appended at every optimizer step)
-log_file = "training.log"
-if master_process:
-    with open(log_file, "w") as f:
-        f.write("step train_loss\n")
 
 #########################
 # Training Loop (No Epochs)
@@ -502,8 +462,6 @@ def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, devi
     return loss_accum.item(), grad_norm
 
 
-
-
 def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp, scaler):
     """
     Performs a single training step with gradient accumulation in DDP mode using AMP.
@@ -535,7 +493,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
             with torch.autocast(device_type=device_type, dtype=torch.float16):
                 logits, loss = model(x, y)
             # Scale the loss by the accumulation steps to average gradients
-                # Add the full loss to accumulator BEFORE scaling for backward
+            # Add the full loss to accumulator BEFORE scaling for backward
             loss_accum += loss.detach()
 
             # Scale the loss for gradient accumulation
@@ -548,7 +506,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
     # Unscale gradients before clipping
     scaler.unscale_(optimizer)
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
 
     # Take an optimizer step using the scaler and update it.
     scaler.step(optimizer)
@@ -559,12 +517,11 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
 
 val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
-            B * T * ddp_world_size)  # Ceiling division
+        B * T * ddp_world_size)  # Ceiling division
 if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=50, window=100)
     print(f"validation steps: {val_steps_needed}")
-
 
 scaler = torch.amp.GradScaler(device='cuda')
 
@@ -596,45 +553,46 @@ for step in range(max_steps):
     formatted_lrs = ", ".join(f"{lr:.4e}" for lr in current_lrs)
     if master_process:
         print(f"Step {step:5d} | Loss: {loss:.6f} | LR: {formatted_lrs} | "
-              f"Grad Norm: {grad_norm:.4f} | dt: {dt*1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}")
+              f"Grad Norm: {grad_norm:.4f} | dt: {dt * 1000:.2f}ms | tokens/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
             f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    # if ((step % 500 == 0) and step > 0):
-    if ((step % 500 == 0)):
+    if ((step % 500 == 0) and step > 0):
         model.eval()
         val_loader.reset()
         if master_process:
-            print(f"--- Validation Step (Training Step: {step}) ---") # Indicate start of validation
+            print(f"--- Validation Step (Training Step: {step}) ---")  # Indicate start of validation
         with torch.no_grad():
             val_loss_accum = torch.zeros(1, device=device)
             val_loss_steps = val_steps_needed
             # val_loss_steps = 200
 
-            for val_step_num in range(val_loss_steps): # Add step counter for validation
+            for val_step_num in range(val_loss_steps):  # Add step counter for validation
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
                 with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(x_val, y_val)
                 # No longer divide loss by val_loss_steps here for step-wise logging
-                val_loss_accum += loss.detach() # Still accumulate for average
-                if ddp: # Reduce loss across processes at each step for accurate step-wise loss
+                val_loss_accum += loss.detach()  # Still accumulate for average
+                if ddp:  # Reduce loss across processes at each step for accurate step-wise loss
                     step_loss_reduced = loss.clone()
                     dist.all_reduce(step_loss_reduced, op=dist.ReduceOp.AVG)
                 else:
                     step_loss_reduced = loss
 
                 if master_process:
-                    print(f"  Val Step: {val_step_num+1}/{val_loss_steps} | Step Val Loss: {step_loss_reduced.item():.6f}") # Log step-wise loss
+                    print(
+                        f"  Val Step: {val_step_num + 1}/{val_loss_steps} | Step Val Loss: {step_loss_reduced.item():.6f}")  # Log step-wise loss
 
-            avg_val_loss = val_loss_accum / val_loss_steps # Calculate average after loop
+            avg_val_loss = val_loss_accum / val_loss_steps  # Calculate average after loop
         if ddp:
-            dist.all_reduce(avg_val_loss, op=dist.ReduceOp.AVG) # Reduce average loss
+            dist.all_reduce(avg_val_loss, op=dist.ReduceOp.AVG)  # Reduce average loss
 
             current_val_loss = avg_val_loss
             if master_process:
-                print(f"Step {step} | Average val_loss over {val_loss_steps} steps: {current_val_loss.item():.4f} ") # Log average loss
+                print(
+                    f"Step {step} | Average val_loss over {val_loss_steps} steps: {current_val_loss.item():.4f} ")  # Log average loss
                 loss_plotter.update_val(current_val_loss.item())
     if master_process:
         loss_plotter.maybe_plot(step)
