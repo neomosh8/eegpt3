@@ -244,27 +244,31 @@ class GPT(nn.Module):
 # Ensure these match the channels defined during preprocessing.
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
-
 class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
-    Each shard contains separate token tensors for each channel.
-    In each shard, all channels have the same length.
+
+    Each shard is expected to contain separate token tensors for each channel.
+    In each shard, all channels have the same length. These channels are then
+    concatenated (in the order defined by REGIONS) to form a single 1D tensor.
+
     During batching, each sample is drawn from a single shard (using round-robin)
-    so that the intra-shard channel alignment is preserved.
-    For each sample, T+1 tokens are extracted per channel to create input (first T)
-    and target (last T, shifted by one) pairs.
+    and a contiguous block of (T+1) tokens is extracted from the concatenated tensor.
+    The extra token is used for shifting to create input (first T tokens) and target
+    (last T tokens) sequences. This DataLoader returns tensors so that your training
+    loop can call .to(device) on them.
 
     If a shard is missing one or more required channels, the loader will fill in the missing
-    channels by duplicating tokens from one of the available channels (selected randomly if more
-    than one is available). After loading, it prints how many shards had this problem.
+    channels by duplicating tokens from one of the available channels (selected randomly).
+    Shards that have fewer than (T+1) tokens (i.e. too small to extract a sample) are skipped.
     """
 
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
-        self.B = B  # batch size (number of samples per batch)
-        self.T = T  # sequence length per sample (number of tokens per channel)
+        self.B = B  # Batch size (number of samples per batch)
+        self.T = T  # Total sequence length per sample (must be divisible by num_channels)
+        # (T tokens will be used as input; T must be divisible by len(REGIONS))
         self.process_rank = process_rank
         self.num_processes = num_processes
 
@@ -276,35 +280,59 @@ class DataLoaderLiteAllInMemory:
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
-        # Load each shard as a dictionary.
+        # For batching we need to extract (T+1) tokens per sample.
+        sample_length = self.T + 1
+
+        fixed_shard_count = 0  # Counts how many shards had missing channels fixed.
+        skipped_shard_count = 0  # Counts how many shards were skipped (e.g. too small).
+
+        # Load and process shards.
         self.shards = []
-        fixed_shard_count = 0  # counts how many shards needed fixing for missing channels.
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+            loaded = torch.load(shard_path, map_location="cpu")
             missing_in_this_shard = False
-            # Check each required region.
+
+            # Ensure all required channels are present; if missing, fix by duplicating one available.
             for region in REGIONS:
                 if region not in loaded:
-                    # Find available channels (from the expected set) in this shard.
-                    available_channels = [ch for ch in REGIONS if ch in loaded]
-                    if not available_channels:
-                        raise ValueError(f"Shard {shard_path} is missing all expected channels; cannot fix.")
-                    # Duplicate from one available channel (randomly chosen if more than one).
-                    chosen = random.choice(available_channels)
+                    available = [ch for ch in REGIONS if ch in loaded]
+                    if not available:
+                        print(f"Warning: Shard {shard_path} is missing all expected channels. Skipping.")
+                        loaded = None
+                        break
+                    chosen = random.choice(available)
                     loaded[region] = loaded[chosen]
                     missing_in_this_shard = True
+            if loaded is None:
+                skipped_shard_count += 1
+                continue
             if missing_in_this_shard:
                 fixed_shard_count += 1
 
-            # Verify that all channels in the shard have the same length.
-            channel_lengths = [loaded[region].size(0) for region in REGIONS]
-            if not all(l == channel_lengths[0] for l in channel_lengths):
+            # Verify that all channels have the same length.
+            lengths = [loaded[region].size(0) for region in REGIONS]
+            if not all(l == lengths[0] for l in lengths):
                 raise ValueError(f"Shard {shard_path} has mismatched channel lengths after fixing.")
-            self.shards.append(loaded)
+
+            # Concatenate channels in fixed order.
+            concatenated = torch.cat([loaded[region] for region in REGIONS], dim=0)
+            if concatenated.size(0) < sample_length:
+                print(
+                    f"Warning: Shard {shard_path} has only {concatenated.size(0)} tokens (min required {sample_length}). Skipping.")
+                skipped_shard_count += 1
+                continue
+
+            self.shards.append(concatenated)
 
         if fixed_shard_count > 0:
-            print(f"Warning: {fixed_shard_count} shard(s) were missing one or more channels and have been fixed "
-                  f"by duplicating available channels.")
+            print(
+                f"Warning: {fixed_shard_count} shard(s) had missing channels and were fixed by duplicating available channels.")
+        if skipped_shard_count > 0:
+            print(
+                f"Warning: {skipped_shard_count} shard(s) were skipped due to insufficient tokens or missing channels.")
+
+        if not self.shards:
+            raise ValueError("No valid shards remaining after filtering.")
 
         # Initialize a pointer for each shard to track the current read position.
         self.shard_ptrs = [0 for _ in self.shards]
@@ -313,69 +341,50 @@ class DataLoaderLiteAllInMemory:
 
     @property
     def total_len(self):
-        """
-        Returns the total number of tokens available across all shards (using channel 0).
-        This property is used by the training code to compute steps_per_pass.
-        """
-        return sum(shard[REGIONS[0]].size(0) for shard in self.shards)
+        """Returns the total number of tokens across all shards (from the concatenated tensors)."""
+        return sum(shard.size(0) for shard in self.shards)
 
     def next_batch(self):
         """
-        For each sample in the batch, selects a shard (using round-robin)
-        and extracts a contiguous block of tokens (length T+1) for each channel,
-        ensuring that channels remain aligned as in the shard.
+        For each sample in the batch, selects a shard (using round-robin) and extracts a contiguous
+        block of tokens of length (T+1) from the concatenated tensor.
+
         Returns:
-            x: dict mapping channel name -> tensor of shape [B, T] (input tokens)
-            y: dict mapping channel name -> tensor of shape [B, T] (target tokens, shifted by one)
+            x: tensor of shape [B, T] (input tokens)
+            y: tensor of shape [B, T] (target tokens, shifted by one token)
         """
         B, T = self.B, self.T
-        sample_length = T + 1  # extra token is needed for creating input/target pairs.
+        sample_length = T + 1  # Extra token for shift.
 
-        # Dictionaries to hold the batch samples per channel.
-        x = {region: [] for region in REGIONS}
-        y = {region: [] for region in REGIONS}
-
+        samples = []
         # For each sample in the batch:
         for i in range(B):
-            # Select a shard in a round-robin manner.
+            # Select shard using round-robin.
             shard_idx = (self.shard_index + i) % len(self.shards)
             shard = self.shards[shard_idx]
             ptr = self.shard_ptrs[shard_idx]
-            shard_length = shard[REGIONS[0]].size(0)  # All channels in this shard have the same length.
-
-            # If there are not enough tokens remaining in this shard, reset the pointer.
+            shard_length = shard.size(0)
+            # If not enough tokens remain in this shard, reset pointer to 0.
             if ptr + sample_length > shard_length:
                 ptr = 0
-
-            # For each channel, extract a contiguous block of sample_length tokens.
-            for region in REGIONS:
-                tokens = shard[region][ptr:ptr + sample_length]
-                if tokens.size(0) < sample_length:
-                    raise RuntimeError(f"Not enough tokens in shard {shard_idx} for channel {region}. "
-                                       f"Expected {sample_length}, got {tokens.size(0)}")
-                # Create input (first T tokens) and target (last T tokens, shifted by one).
-                sample_x = tokens[:-1]
-                sample_y = tokens[1:]
-                x[region].append(sample_x)
-                y[region].append(sample_y)
-
-            # Update this shard's pointer.
+            sample = shard[ptr:ptr + sample_length]
             self.shard_ptrs[shard_idx] = ptr + sample_length
-
-        # Update the global shard index (advance by the number of samples drawn).
+            samples.append(sample)
+        # Update global shard index.
         self.shard_index = (self.shard_index + B) % len(self.shards)
-
-        # Stack the samples for each channel to form tensors of shape [B, T].
-        for region in REGIONS:
-            x[region] = torch.stack(x[region], dim=0)
-            y[region] = torch.stack(y[region], dim=0)
-
+        # Stack samples to form a tensor of shape [B, sample_length]
+        batch = torch.stack(samples, dim=0)
+        # Create input and target sequences.
+        x = batch[:, :-1]  # [B, T]
+        y = batch[:, 1:]  # [B, T]
         return x, y
 
     def reset(self):
         """Resets all shard pointers and the global shard index."""
         self.shard_ptrs = [0 for _ in self.shards]
         self.shard_index = 0
+
+
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
