@@ -492,7 +492,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
         # Use no_sync() on all micro-steps except the last one to reduce inter-GPU communication.
         context = model.no_sync() if ddp and micro_step < grad_accum_steps - 1 else contextlib.nullcontext()
         with context:
-            with torch.autocast(device_type=device_type, dtype=torch.float16):
+            with torch.autocast(device_type=device_type, dtype=torch.float32):
                 logits, loss = model(x, y)
             # Scale the loss by the accumulation steps to average gradients
             # Add the full loss to accumulator BEFORE scaling for backward
@@ -573,7 +573,7 @@ for step in range(max_steps):
             for val_step_num in range(val_loss_steps):  # Add step counter for validation
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device_type, dtype=torch.float32):
                     logits, loss = model(x_val, y_val)
                 # No longer divide loss by val_loss_steps here for step-wise logging
                 val_loss_accum += loss.detach()  # Still accumulate for average
