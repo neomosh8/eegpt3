@@ -315,7 +315,7 @@ class DataLoaderLiteAllInMemory:
 
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
-        
+
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
