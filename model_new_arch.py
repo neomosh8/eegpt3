@@ -440,10 +440,16 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
             with torch.autocast(device_type=device_type, dtype=torch.float16):
                 logits, loss = model(x, y)
             # Scale the loss by the accumulation steps to average gradients
-            loss = loss / grad_accum_steps
+                # Add the full loss to accumulator BEFORE scaling for backward
+            loss_accum += loss.detach()
+
+            # Scale the loss for gradient accumulation
+            scaled_loss = loss / grad_accum_steps
             # Backward pass with AMP scaling
-            scaler.scale(loss).backward()
-        loss_accum += loss.detach()
+            scaler.scale(scaled_loss).backward()
+
+    # Average the accumulated loss
+    loss_accum = loss_accum / grad_accum_steps
 
     # Unscale gradients before clipping
     scaler.unscale_(optimizer)
@@ -507,7 +513,8 @@ for step in range(max_steps):
             print(f"--- Validation Step (Training Step: {step}) ---") # Indicate start of validation
         with torch.no_grad():
             val_loss_accum = torch.zeros(1, device=device)
-            val_loss_steps = val_steps_needed # or your automated val_steps if you implemented it
+            # val_loss_steps = val_steps_needed
+            val_loss_steps = 200
 
             for val_step_num in range(val_loss_steps): # Add step counter for validation
                 x_val, y_val = val_loader.next_batch()
