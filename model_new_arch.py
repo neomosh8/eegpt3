@@ -242,13 +242,6 @@ class GPT(nn.Module):
 #########################
 # DataLoader (All-In-Memory)
 #########################
-# Ensure these match the channels defined during preprocessing.
-
-import torch
-import os
-from typing import Dict, List, Tuple
-import math
-import random
 
 
 class DataLoaderLiteAllInMemory:
@@ -264,7 +257,7 @@ class DataLoaderLiteAllInMemory:
             shuffle_shards: bool = False
     ):
         self.B = B
-        self.T = T
+        self.T = T  # This will be the length per channel
         self.process_rank = process_rank
         self.num_processes = num_processes
 
@@ -297,7 +290,7 @@ class DataLoaderLiteAllInMemory:
                 raise ValueError(f"All channels must have same length within shard {shard_file}")
 
             self.shards.append(shard_data)
-            self.total_tokens += lengths[0] * len(shard_data)  # length * num_channels
+            self.total_tokens += lengths[0] * len(shard_data)
 
         if len(self.shards) == 0:
             raise ValueError(f"No shards found for process {process_rank} in {local_data_dir} for split {split}")
@@ -324,64 +317,49 @@ class DataLoaderLiteAllInMemory:
         """Get next batch of sequences from all channels."""
         B, T = self.B, self.T
 
-        # Handle shard exhaustion
-        if self.current_shard_idx >= len(self.shards):
-            self.current_shard_idx = 0
-            self.current_position = 0
+        # Initialize batch tensors
+        x = torch.zeros((B, T * len(self.channels)), dtype=torch.long)
+        y = torch.zeros((B, T * len(self.channels)), dtype=torch.long)
 
-        current_shard_data = self.shards[self.current_shard_idx]
-        shard_length = current_shard_data[self.channels[0]].size(0)
-
-        # Prepare batch
-        batch_sequences = []
         for b in range(B):
-            pos = self.current_position + (b * T)
-
             # Check if we need to move to next shard
-            if pos >= shard_length:
+            if self.current_position + T > self.shards[self.current_shard_idx][self.channels[0]].size(0):
                 self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
                 self.current_position = 0
-                pos = 0
-                current_shard_data = self.shards[self.current_shard_idx]
-                shard_length = current_shard_data[self.channels[0]].size(0)
 
-            sequence = []
-            for channel in self.channels:
+            current_shard_data = self.shards[self.current_shard_idx]
+
+            # Get sequences from each channel
+            for i, channel in enumerate(self.channels):
                 channel_data = current_shard_data[channel]
+                start_idx = i * T
+                end_idx = (i + 1) * T
 
-                # Ensure we don't go past shard boundary
-                available_tokens = min(T, shard_length - pos)
-                channel_seq = channel_data[pos:pos + available_tokens]
+                # Get the sequence
+                sequence = channel_data[self.current_position:self.current_position + T]
+                x[b, start_idx:end_idx] = sequence
 
-                # Pad if necessary
-                if channel_seq.size(0) < T:
-                    padding_length = T - channel_seq.size(0)
-                    channel_seq = torch.cat([
-                        channel_seq,
-                        torch.zeros(padding_length, dtype=channel_seq.dtype)
-                    ])
+                # Set up target (shifted by 1)
+                if i < len(self.channels) - 1:
+                    # For all channels except the last, targets are the next position
+                    y[b, start_idx:end_idx - 1] = sequence[1:]
+                    # Bridge to next channel
+                    y[b, end_idx - 1] = current_shard_data[self.channels[i + 1]][self.current_position]
+                else:
+                    # For the last channel, wrap around to the next position in first channel
+                    y[b, start_idx:end_idx - 1] = sequence[1:]
+                    next_pos = (self.current_position + T) % channel_data.size(0)
+                    if next_pos == 0 and self.current_shard_idx + 1 < len(self.shards):
+                        # If we're at shard boundary, get from next shard
+                        next_shard_data = self.shards[(self.current_shard_idx + 1) % len(self.shards)]
+                        y[b, end_idx - 1] = next_shard_data[self.channels[0]][0]
+                    else:
+                        # Otherwise get from current shard
+                        y[b, end_idx - 1] = current_shard_data[self.channels[0]][next_pos]
 
-                sequence.append(channel_seq)
-
-            batch_sequences.append(torch.cat(sequence))
-
-        # Stack all sequences in the batch
-        x = torch.stack(batch_sequences)  # Shape: (B, T * num_channels)
-
-        # For targets, shift the sequences by 1
-        # Use circular shift within each channel's section
-        num_channels = len(self.channels)
-        y = x.clone()
-        for i in range(num_channels):
-            start_idx = i * T
-            end_idx = (i + 1) * T
-            y[:, start_idx:end_idx] = torch.roll(x[:, start_idx:end_idx], shifts=-1, dims=1)
-            # Handle boundary between channels
-            if i < num_channels - 1:
-                y[:, end_idx - 1] = x[:, end_idx]
-
-        # Update position
-        self.current_position += B * T
+            # If this was the last sequence in the batch, update position
+            if b == B - 1:
+                self.current_position += T
 
         return x, y
 
@@ -404,7 +382,6 @@ class DataLoaderLiteAllInMemory:
         """Load loader state from checkpoint."""
         self.current_shard_idx = state_dict['current_shard_idx']
         self.current_position = state_dict['current_position']
-
 
 #########################
 # Training Setup & Loop (No Epochs)
@@ -442,7 +419,7 @@ if master_process:
 model = GPT(GPTConfig())
 model.to(device)
 # Optionally compile the model for potential speedups.
-# model = torch.compile(model)
+model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
