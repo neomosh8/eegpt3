@@ -249,15 +249,21 @@ class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
     Each shard contains separate token tensors for each channel.
-    The loader concatenates tokens per channel across shards and provides batches.
-    Each batch is returned as two dictionaries (x and y) mapping channel names to tensors.
+    This dataloader concatenates tokens per channel across shards,
+    then extracts contiguous blocks per channel (of length per_channel_length)
+    and interleaves them so that the final tensor has shape [B, T_total],
+    where T_total (e.g., 1032) is divisible by the number of channels.
     """
-
-    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
+    def __init__(self, B: int, T_total: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
         self.B = B
-        self.T = T
+        self.T_total = T_total
+        self.num_channels = len(REGIONS)
+        if T_total % self.num_channels != 0:
+            raise ValueError("T_total must be divisible by the number of channels")
+        self.per_channel_length = T_total // self.num_channels
+
         self.process_rank = process_rank
         self.num_processes = num_processes
 
@@ -283,18 +289,25 @@ class DataLoaderLiteAllInMemory:
 
         # Assume all channels have the same total length.
         self.total_len = len(self.tokens[REGIONS[0]])
-        self.current_position = self.B * self.T * self.process_rank
+        # Starting position is offset by process_rank.
+        self.current_position = self.B * self.per_channel_length * self.process_rank
+
+    @property
+    def total_length(self):
+        """Return the total number of tokens per channel."""
+        return self.total_len
 
     def next_batch(self):
         """
-        For each channel, extracts a contiguous block of tokens and then interleaves them.
+        For each channel, extract a contiguous block of tokens and then interleave them.
         Returns:
-            x: tensor of shape [B, T_total] where T_total = T * num_channels, with tokens arranged as:
+            x: tensor of shape [B, T_total] with tokens arranged as:
                [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
             y: similarly structured target tensor.
         """
-        B, T = self.B, self.T
-        needed = B * T + 1  # extra token for shifting.
+        B = self.B
+        L = self.per_channel_length  # tokens per channel
+        needed = B * L + 1  # extra token for shifting.
         x_dict, y_dict = {}, {}
 
         # Extract tokens for each channel separately.
@@ -306,36 +319,27 @@ class DataLoaderLiteAllInMemory:
                 leftover = self.total_len - self.current_position
                 wrap_amount = needed - leftover
                 part1_toks = tokens_region[self.current_position:]
-                part2_toks = tokens_region[: wrap_amount]
+                part2_toks = tokens_region[:wrap_amount]
                 buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
             if len(buf_tokens) != needed:
                 raise RuntimeError(f"Unexpected length for channel {region}. Expected {needed}, got {len(buf_tokens)}")
-            # For language modeling, x is all tokens except the last, and y is shifted by one.
-            x_dict[region] = buf_tokens[:-1].view(B, T)
-            y_dict[region] = buf_tokens[1:].view(B, T)
+            # x: all tokens except the last; y: shifted by one.
+            x_dict[region] = buf_tokens[:-1].view(B, L)
+            y_dict[region] = buf_tokens[1:].view(B, L)
 
         self.current_position = (self.current_position + needed) % self.total_len
 
-        # Instead of block-concatenation, stack and then flatten to interleave tokens.
-        # After stacking, each tensor has shape [B, T, num_channels]
+        # Stack the tokens from all channels along a new dimension.
+        # Shape becomes [B, L, num_channels]
         x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
         y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
 
-        # Reshape to combine the time and channel dimensions.
-        # This gives a tensor of shape [B, T * num_channels] arranged as:
-        # [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
-        x_combined = x_stacked.view(B, T * len(REGIONS))
-        y_combined = y_stacked.view(B, T * len(REGIONS))
+        # Interleave the tokens: flatten the last two dims.
+        # The result has shape [B, L * num_channels] which equals [B, T_total]
+        x_combined = x_stacked.view(B, L * self.num_channels)
+        y_combined = y_stacked.view(B, L * self.num_channels)
 
         return x_combined, y_combined
-
-    def reset(self):
-        self.current_position = self.B * self.T * self.process_rank
-
-    @property
-    def total_length(self):
-        """Allows external access to the total number of tokens per channel."""
-        return self.total_len
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
