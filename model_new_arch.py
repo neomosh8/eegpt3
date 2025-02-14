@@ -353,11 +353,11 @@ if master_process:
 
 # Create dataloaders for training and validation.
 train_loader = DataLoaderLiteAllInMemory(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    B=B, T_total=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
 )
 val_loader = DataLoaderLiteAllInMemory(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
+    B=B, T_total=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
 )
 
