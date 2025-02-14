@@ -248,18 +248,21 @@ class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
     Each shard contains separate token tensors for each channel.
-    The loader concatenates tokens per channel across shards and provides batches.
-    Each batch is returned as two dictionaries (x and y) mapping channel names to tensors.
+    In each shard, all channels have the same length.
+    During batching, each sample is drawn from a single shard (using round-robin)
+    so that the intra-shard channel alignment is preserved.
+    For each sample, T+1 tokens are extracted per channel to create input (first T)
+    and target (last T, shifted by one) pairs.
     """
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
-        self.B = B
-        self.T = T
+        self.B = B  # batch size (number of samples per batch)
+        self.T = T  # sequence length per sample (number of tokens per channel)
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Locate shard files.
+        # Find all shard files matching the given prefix and split.
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
@@ -267,54 +270,83 @@ class DataLoaderLiteAllInMemory:
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
-        # Load and concatenate tokens separately for each channel.
-        self.tokens = {region: [] for region in REGIONS}
+        # Load each shard as a dictionary.
+        self.shards = []
         for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu")
+            # Verify that each shard contains all expected channels and that each channel has the same length.
+            channel_lengths = []
             for region in REGIONS:
                 if region not in loaded:
                     raise ValueError(f"Shard {shard_path} is missing channel {region}")
-                self.tokens[region].append(loaded[region])
-        # Concatenate tokens for each channel along the 0-dimension.
-        for region in REGIONS:
-            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
+                channel_lengths.append(loaded[region].size(0))
+            if not all(l == channel_lengths[0] for l in channel_lengths):
+                raise ValueError(f"Shard {shard_path} has mismatched channel lengths")
+            self.shards.append(loaded)
 
-        # Assume all channels have the same total length.
-        self.total_len = len(self.tokens[REGIONS[0]])
-        self.current_position = self.B * self.T * self.process_rank
+        # Initialize a pointer for each shard to track the current read position.
+        self.shard_ptrs = [0 for _ in self.shards]
+        # Global shard index for round-robin sampling.
+        self.shard_index = 0
 
     def next_batch(self):
         """
-        For each channel, extracts a contiguous block of tokens.
+        For each sample in the batch, selects a shard (using round-robin)
+        and extracts a contiguous block of tokens (length T+1) for each channel,
+        ensuring that channels remain aligned as in the shard.
         Returns:
-            x: dict mapping channel -> tensor of shape [B, T] (input tokens)
-            y: dict mapping channel -> tensor of shape [B, T] (target tokens, shifted by one token)
+            x: dict mapping channel name -> tensor of shape [B, T] (input tokens)
+            y: dict mapping channel name -> tensor of shape [B, T] (target tokens, shifted by one)
         """
         B, T = self.B, self.T
-        needed = B * T + 1  # extra token for shifting.
-        x, y = {}, {}
+        sample_length = T + 1  # extra token is needed for creating input/target pairs.
 
-        # For each channel, extract the batch from its token stream.
+        # Dictionaries to hold the batch samples per channel.
+        x = {region: [] for region in REGIONS}
+        y = {region: [] for region in REGIONS}
+
+        # For each sample in the batch:
+        for i in range(B):
+            # Select a shard in a round-robin manner.
+            shard_idx = (self.shard_index + i) % len(self.shards)
+            shard = self.shards[shard_idx]
+            ptr = self.shard_ptrs[shard_idx]
+            shard_length = shard[REGIONS[0]].size(0)  # All channels in this shard have the same length.
+
+            # If there are not enough tokens remaining in this shard, reset the pointer.
+            if ptr + sample_length > shard_length:
+                ptr = 0
+
+            # For each channel, extract a contiguous block of sample_length tokens.
+            for region in REGIONS:
+                tokens = shard[region][ptr:ptr + sample_length]
+                if tokens.size(0) < sample_length:
+                    raise RuntimeError(f"Not enough tokens in shard {shard_idx} for channel {region}. "
+                                       f"Expected {sample_length}, got {tokens.size(0)}")
+                # Create input (first T tokens) and target (last T tokens, shifted by one).
+                sample_x = tokens[:-1]
+                sample_y = tokens[1:]
+                x[region].append(sample_x)
+                y[region].append(sample_y)
+
+            # Update this shard's pointer.
+            self.shard_ptrs[shard_idx] = ptr + sample_length
+
+        # Update the global shard index (advance by the number of samples drawn).
+        self.shard_index = (self.shard_index + B) % len(self.shards)
+
+        # Stack the samples for each channel to form tensors of shape [B, T].
         for region in REGIONS:
-            tokens_region = self.tokens[region]
-            if self.current_position + needed <= self.total_len:
-                buf_tokens = tokens_region[self.current_position: self.current_position + needed]
-            else:
-                leftover = self.total_len - self.current_position
-                wrap_amount = needed - leftover
-                part1_toks = tokens_region[self.current_position:]
-                part2_toks = tokens_region[: wrap_amount]
-                buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
-            if len(buf_tokens) != needed:
-                raise RuntimeError(f"Unexpected length for channel {region}. Expected {needed}, got {len(buf_tokens)}")
-            # For language modeling, x is all tokens except the last, and y is all tokens shifted by one.
-            x[region] = buf_tokens[:-1].view(B, T)
-            y[region] = buf_tokens[1:].view(B, T)
-        self.current_position = (self.current_position + needed) % self.total_len
+            x[region] = torch.stack(x[region], dim=0)
+            y[region] = torch.stack(y[region], dim=0)
+
         return x, y
 
     def reset(self):
-        self.current_position = self.B * self.T * self.process_rank
+        """Resets all shard pointers and the global shard index."""
+        self.shard_ptrs = [0 for _ in self.shards]
+        self.shard_index = 0
+
 
 #########################
 # Training Setup & Loop (No Epochs)

@@ -32,8 +32,8 @@ def _process_single_group(args):
       - Download the file,
       - Prepend the token '|trial|' and a space,
       - Tokenize its contents using the new tokenizer.
-    Then, trim all region token sequences to the same length.
-    Instead of concatenating them, save each region's tokens in its own tensor.
+    Then, trim all region token sequences to the same length and save each channel's tokens
+    under its corresponding key. This allows the DataLoader to later extract T tokens per channel.
     """
     (base_name, files, shard_prefix, local_data_dir, bucket_name,
      split_name, group_index, total_groups) = args
@@ -42,7 +42,8 @@ def _process_single_group(args):
     tokenizer = _get_tokenizer()
     print(f"[{split_name.upper()}] Processing group {group_index}/{total_groups} for base '{base_name}'")
 
-    region_tokens = []
+    # Use a dictionary to store tokens for each channel.
+    region_tokens = {}
     for region in REGIONS:
         key = None
         # Look for the file that ends with _{region}.txt
@@ -59,30 +60,26 @@ def _process_single_group(args):
         with open(local_path, 'r', encoding='utf-8') as f:
             # Prepend the token '|trial|' plus a space to the file content.
             text = '|trial| ' + f.read().strip()
-        # Tokenize using the new tokenizer.
+        # Tokenize the text.
         encoded = tokenizer.encode(text)
         tokens_tensor = torch.tensor(encoded, dtype=torch.long)
-        region_tokens.append(tokens_tensor)
+        region_tokens[region] = tokens_tensor
         try:
             os.remove(local_path)
         except OSError as e:
             print(f"  - Error removing {local_path}: {e}")
 
-    # Trim all region token sequences to the same (minimum) length.
-    lengths = [t.size(0) for t in region_tokens]
-    min_length = min(lengths)
-    if any(l != min_length for l in lengths):
-        print(f"  - Length mismatch in group {base_name}, trimming to {min_length} tokens per region.")
-        region_tokens = [t[:min_length] for t in region_tokens]
+    # Ensure all channels have the same token length; trim if necessary.
+    min_length = min(t.size(0) for t in region_tokens.values())
+    if any(t.size(0) != min_length for t in region_tokens.values()):
+        print(f"  - Length mismatch in group {base_name}, trimming all channels to {min_length} tokens.")
+    for region in region_tokens:
+        region_tokens[region] = region_tokens[region][:min_length]
 
     shard_id = group_index - 1
     shard_path = os.path.join(local_data_dir, f"{shard_prefix}_{split_name}_{shard_id}.pt")
-    # Save each channel's tokens separately.
-    torch.save({
-        "frontal": region_tokens[0],
-        "motor_temporal": region_tokens[1],
-        "parietal_occipital": region_tokens[2]
-    }, shard_path)
+    # Save the dictionary with separate keys for each channel.
+    torch.save(region_tokens, shard_path)
     print(f"  - Shard saved: {shard_path}")
     return shard_path
 
