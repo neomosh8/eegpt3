@@ -241,10 +241,15 @@ class GPT(nn.Module):
 #########################
 # DataLoader (All-In-Memory)
 #########################
+# Ensure these match the channels defined during preprocessing.
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+
 class DataLoaderLiteAllInMemory:
     """
-    Loads all .pt shard files from a local directory, concatenates them, and provides batches.
-    Only the 'tokens' field is used.
+    Loads all .pt shard files from a local directory.
+    Each shard contains separate token tensors for each channel.
+    The loader concatenates tokens per channel across shards and provides batches.
+    Each batch is returned as two dictionaries (x and y) mapping channel names to tensors.
     """
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
@@ -254,9 +259,7 @@ class DataLoaderLiteAllInMemory:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Make sure T is divisible by the number of channels.
-        if self.T % GPTConfig().num_channels != 0:
-            raise ValueError("T must be divisible by num_channels")
+        # Locate shard files.
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
@@ -264,37 +267,55 @@ class DataLoaderLiteAllInMemory:
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
-        all_tokens = []
+        # Load and concatenate tokens separately for each channel.
+        self.tokens = {region: [] for region in REGIONS}
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu",weights_only=False)
-            shard_tokens = loaded['tokens']
-            all_tokens.append(shard_tokens)
-        self.tokens = torch.cat(all_tokens, dim=0)
+            loaded = torch.load(shard_path, map_location="cpu")
+            for region in REGIONS:
+                if region not in loaded:
+                    raise ValueError(f"Shard {shard_path} is missing channel {region}")
+                self.tokens[region].append(loaded[region])
+        # Concatenate tokens for each channel along the 0-dimension.
+        for region in REGIONS:
+            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
+
+        # Assume all channels have the same total length.
+        self.total_len = len(self.tokens[REGIONS[0]])
         self.current_position = self.B * self.T * self.process_rank
-        self.total_len = len(self.tokens)
 
     def next_batch(self):
+        """
+        For each channel, extracts a contiguous block of tokens.
+        Returns:
+            x: dict mapping channel -> tensor of shape [B, T] (input tokens)
+            y: dict mapping channel -> tensor of shape [B, T] (target tokens, shifted by one token)
+        """
         B, T = self.B, self.T
-        needed = B * T + 1
-        if self.current_position + needed <= self.total_len:
-            buf_tokens = self.tokens[self.current_position: self.current_position + needed]
-            self.current_position += needed
-        else:
-            leftover = self.total_len - self.current_position
-            wrap_amount = needed - leftover
-            part1_toks = self.tokens[self.current_position:]
-            part2_toks = self.tokens[: wrap_amount]
-            buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
-            self.current_position = wrap_amount
-        if len(buf_tokens) != needed:
-            raise RuntimeError(f"Unexpected length. Expected {needed}, got {len(buf_tokens)}")
-        x = buf_tokens[:-1].view(B, T)
-        y = buf_tokens[1:].view(B, T)
+        needed = B * T + 1  # extra token for shifting.
+        x, y = {}, {}
+
+        # For each channel, extract the batch from its token stream.
+        for region in REGIONS:
+            tokens_region = self.tokens[region]
+            if self.current_position + needed <= self.total_len:
+                buf_tokens = tokens_region[self.current_position: self.current_position + needed]
+            else:
+                leftover = self.total_len - self.current_position
+                wrap_amount = needed - leftover
+                part1_toks = tokens_region[self.current_position:]
+                part2_toks = tokens_region[: wrap_amount]
+                buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
+            if len(buf_tokens) != needed:
+                raise RuntimeError(f"Unexpected length for channel {region}. Expected {needed}, got {len(buf_tokens)}")
+            # For language modeling, x is all tokens except the last, and y is all tokens shifted by one.
+            x[region] = buf_tokens[:-1].view(B, T)
+            y[region] = buf_tokens[1:].view(B, T)
+        self.current_position = (self.current_position + needed) % self.total_len
         return x, y
 
     def reset(self):
         self.current_position = self.B * self.T * self.process_rank
-
+        
 #########################
 # Training Setup & Loop (No Epochs)
 #########################

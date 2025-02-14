@@ -6,6 +6,7 @@ import torch
 import concurrent.futures
 from pathlib import Path
 from typing import List
+import glob
 
 # Use the new tokenizer.
 from Tokenizer_new_arch import StreamingPassBasedWordLevelBPETokenizer
@@ -31,8 +32,8 @@ def _process_single_group(args):
       - Download the file,
       - Prepend the token '|trial|' and a space,
       - Tokenize its contents using the new tokenizer.
-    Then, trim all region token sequences to the same length and concatenate them.
-    This produces a shard whose total token length is divisible by the number of regions.
+    Then, trim all region token sequences to the same length.
+    Instead of concatenating them, save each region's tokens in its own tensor.
     """
     (base_name, files, shard_prefix, local_data_dir, bucket_name,
      split_name, group_index, total_groups) = args
@@ -58,7 +59,7 @@ def _process_single_group(args):
         with open(local_path, 'r', encoding='utf-8') as f:
             # Prepend the token '|trial|' plus a space to the file content.
             text = '|trial| ' + f.read().strip()
-        # Use the new tokenizer's encode method (no alignment here).
+        # Tokenize using the new tokenizer.
         encoded = tokenizer.encode(text)
         tokens_tensor = torch.tensor(encoded, dtype=torch.long)
         region_tokens.append(tokens_tensor)
@@ -67,26 +68,21 @@ def _process_single_group(args):
         except OSError as e:
             print(f"  - Error removing {local_path}: {e}")
 
-    # Ensure all regions have the same token length; trim if necessary.
+    # Trim all region token sequences to the same (minimum) length.
     lengths = [t.size(0) for t in region_tokens]
     min_length = min(lengths)
     if any(l != min_length for l in lengths):
         print(f"  - Length mismatch in group {base_name}, trimming to {min_length} tokens per region.")
         region_tokens = [t[:min_length] for t in region_tokens]
 
-    # Concatenate tokens from all regions.
-    final_tokens = torch.cat(region_tokens, dim=0)
-    # Ensure the total length is divisible by the number of regions.
-    num_regions = len(REGIONS)
-    total_length = final_tokens.size(0)
-    if total_length % num_regions != 0:
-        new_length = (total_length // num_regions) * num_regions
-        final_tokens = final_tokens[:new_length]
-
     shard_id = group_index - 1
     shard_path = os.path.join(local_data_dir, f"{shard_prefix}_{split_name}_{shard_id}.pt")
-    # Save only the tokens; the model will infer channel structure from token order.
-    torch.save({'tokens': final_tokens}, shard_path)
+    # Save each channel's tokens separately.
+    torch.save({
+        "frontal": region_tokens[0],
+        "motor_temporal": region_tokens[1],
+        "parietal_occipital": region_tokens[2]
+    }, shard_path)
     print(f"  - Shard saved: {shard_path}")
     return shard_path
 
@@ -96,15 +92,12 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
     """
     This function performs the following steps:
       - Lists all *_quantized_coeffs_*.txt files in S3 under the specified prefix.
-      - Groups files by their base name (common part before '_quantized_coeffs_'),
-        so that each group represents one subject/instance.
-      - Filters groups so that only those with files for all defined regions (channels) are retained.
-      - Splits the groups into training and validation splits based on val_ratio.
+      - Groups files by their base name so that each group represents one instance.
+      - Retains only groups that have files for all defined regions.
+      - Splits the groups into training and validation splits.
       - Processes each group in parallel:
-          For each group, it downloads the corresponding files from S3, prepends the token '|trial|'
-          to the contents of each file, tokenizes the text using the new StreamingPassBasedWordLevelBPETokenizer,
-          trims the token sequences to the same length, concatenates them (in the defined order of regions),
-          and saves the result as a shard.
+          Downloads the files, prepends '|trial|', tokenizes, trims each region to equal length,
+          and then saves a shard with separate tensors for each channel.
     """
     os.makedirs(local_data_dir, exist_ok=True)
     s3 = boto3.client('s3')
