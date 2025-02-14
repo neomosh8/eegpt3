@@ -503,22 +503,35 @@ for step in range(max_steps):
     if step % 100 == 0:
         model.eval()
         val_loader.reset()
+        if master_process:
+            print(f"--- Validation Step (Training Step: {step}) ---") # Indicate start of validation
         with torch.no_grad():
             val_loss_accum = torch.zeros(1, device=device)
-            val_loss_steps = val_steps_needed
-            for _ in range(val_loss_steps):
+            val_loss_steps = val_steps_needed # or your automated val_steps if you implemented it
+
+            for val_step_num in range(val_loss_steps): # Add step counter for validation
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
                 with torch.autocast(device_type=device_type, dtype=torch.float16):
                     logits, loss = model(x_val, y_val)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach()
-        if ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+                # No longer divide loss by val_loss_steps here for step-wise logging
+                val_loss_accum += loss.detach() # Still accumulate for average
+                if ddp: # Reduce loss across processes at each step for accurate step-wise loss
+                    step_loss_reduced = loss.clone()
+                    dist.all_reduce(step_loss_reduced, op=dist.ReduceOp.AVG)
+                else:
+                    step_loss_reduced = loss
 
-            current_val_loss = val_loss_accum
+                if master_process:
+                    print(f"  Val Step: {val_step_num+1}/{val_loss_steps} | Step Val Loss: {step_loss_reduced.item():.6f}") # Log step-wise loss
+
+            avg_val_loss = val_loss_accum / val_loss_steps # Calculate average after loop
+        if ddp:
+            dist.all_reduce(avg_val_loss, op=dist.ReduceOp.AVG) # Reduce average loss
+
+            current_val_loss = avg_val_loss
             if master_process:
-                print(f"Step {step} | val_loss {current_val_loss.item():.4f} ")
+                print(f"Step {step} | Average val_loss over {val_loss_steps} steps: {current_val_loss.item():.4f} ") # Log average loss
                 loss_plotter.update_val(current_val_loss.item())
     if master_process:
         loss_plotter.maybe_plot(step)
