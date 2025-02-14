@@ -246,7 +246,7 @@ class GPT(nn.Module):
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 
-class ChannelAwareDataLoader:
+class DataLoaderLiteAllInMemory:
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
