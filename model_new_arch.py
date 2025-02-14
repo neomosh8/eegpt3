@@ -258,7 +258,7 @@ class DataLoaderLiteAllInMemory:
         if self.T % GPTConfig().num_channels != 0:
             raise ValueError("T must be divisible by num_channels")
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[:10000]
+        self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -325,7 +325,7 @@ max_steps = num_passes * steps_per_pass
 if master_process:
     print(f"Total tokens in training set: {train_loader.total_len}")
     print(f"Steps per pass: {steps_per_pass}")
-    print(f"Running for {max_steps} optimization steps (i.e. {num_passes} passes over the data)")
+    print(f"Running for {max_steps} optimization steps ({num_passes} passes over the data)")
 
 # Instantiate the model.
 model = GPT(GPTConfig())
@@ -467,7 +467,7 @@ val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
             B * T * ddp_world_size)  # Ceiling division
 if master_process:
     print("Starting training...")
-    loss_plotter = LossPlotter(plot_interval=50, window=50)
+    loss_plotter = LossPlotter(plot_interval=50, window=100)
     print(f"validation steps: {val_steps_needed}")
 
 
@@ -513,8 +513,8 @@ for step in range(max_steps):
             print(f"--- Validation Step (Training Step: {step}) ---") # Indicate start of validation
         with torch.no_grad():
             val_loss_accum = torch.zeros(1, device=device)
-            # val_loss_steps = val_steps_needed
-            val_loss_steps = 200
+            val_loss_steps = val_steps_needed
+            # val_loss_steps = 200
 
             for val_step_num in range(val_loss_steps): # Add step counter for validation
                 x_val, y_val = val_loader.next_batch()
