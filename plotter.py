@@ -34,25 +34,45 @@ class LossPlotter:
             self.plot(step)
 
     def plot(self, step):
-        """Generate and save the plot to a file."""
-        plt.figure(figsize=(10, 5))
-        # Train Loss: light blue and 30% transparent
-        plt.plot(self.train_losses, label="Train Loss", color="lightblue", alpha=0.7)
+        """Generate and save the plot to a file with custom dark style."""
+        # Set Helvetica font globally for this plot
+        plt.rcParams['font.family'] = 'Helvetica'
 
+        # Create figure with dark background
+        fig = plt.figure(figsize=(10, 5), facecolor="#000103")
+        ax = fig.add_subplot(111)
+        ax.set_facecolor("#000103")
+
+        # Customize grid
+        ax.grid(True, color="#515052")
+
+        # Set tick and label colors to white for contrast
+        ax.tick_params(colors="white")
+        plt.xlabel("Step", color="white")
+        plt.ylabel("Loss", color="white")
+        plt.title(f"Loss Curves up to step {step}", color="white")
+
+        # Plot train loss in #011638
+        plt.plot(self.train_losses, label="Train Loss", color="#011638")
+
+        # Plot validation loss in #EEC643 (if available) with a thick line
         if self.val_losses:
-            # Align validation loss with training steps
             val_steps = np.linspace(0, len(self.train_losses), len(self.val_losses))
-            # Val Loss: dark blue and thick
-            plt.plot(val_steps, self.val_losses, label="Val Loss", color="darkblue", linewidth=1)
+            plt.plot(val_steps, self.val_losses, label="Val Loss", color="#EEC643", linewidth=3)
 
-        # Moving Average: thick and black
-        plt.plot(self.moving_avg, label="Moving Avg Train Loss", color="black", linewidth=3)
+        # Plot moving average in #0D21A1 with a thick line
+        plt.plot(self.moving_avg, label="Moving Avg Train Loss", color="#0D21A1", linewidth=3)
 
-        plt.xlabel("Step")
-        plt.ylabel("Loss")
-        plt.title(f"Loss Curves up to step {step}")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"{self.filename_prefix}.png")
+        # Create legend with custom styling: text in white, Helvetica, and matching background
+        leg = plt.legend()
+        for text in leg.get_texts():
+            text.set_color("white")
+            text.set_fontfamily("Helvetica")
+        leg.get_frame().set_facecolor("#000103")
+        leg.get_frame().set_edgecolor("white")
+
+        # Save the figure using the dark background color
+        plt.savefig(f"{self.filename_prefix}.png", facecolor="#000103")
         plt.close()
+
 
