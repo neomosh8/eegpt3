@@ -358,7 +358,7 @@ val_loader = DataLoaderLiteAllInMemory(
 # For example, if you want to run 5 full passes over the training data:
 num_passes = 3
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
-steps_per_pass = (train_loader.total_tokens() - 1) // tokens_per_optim
+steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
 max_steps = num_passes * steps_per_pass
 if master_process:
     print(f"Total tokens in training set: {train_loader.total_len}")
