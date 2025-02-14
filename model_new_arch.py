@@ -410,7 +410,7 @@ val_loader = DataLoaderLiteAllInMemory(
 
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
-num_passes = 5
+num_passes = 3
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
 steps_per_pass = (train_loader.total_tokens() - 1) // tokens_per_optim
 max_steps = num_passes * steps_per_pass
@@ -429,14 +429,14 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 6e-4
+base_lr = 3e-4
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps,              # total number of training steps
-    pct_start=0.15,   # fraction of steps for warmup
+    pct_start=0.1,   # fraction of steps for warmup
     anneal_strategy='cos',                # cosine annealing for decay
     cycle_momentum=False                  # typically False for AdamW
 )
@@ -545,7 +545,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
     # Unscale gradients before clipping
     scaler.unscale_(optimizer)
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
     # Take an optimizer step using the scaler and update it.
     scaler.step(optimizer)
@@ -598,7 +598,8 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    if ((step % 500 == 0) and step > 0):
+    # if ((step % 500 == 0) and step > 0):
+    if ((step % 500 == 0)):
         model.eval()
         val_loader.reset()
         if master_process:
