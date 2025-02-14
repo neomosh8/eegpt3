@@ -341,10 +341,14 @@ class DataLoaderLiteAllInMemory:
         x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
         y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
 
-        # Interleave the tokens: flatten the last two dims.
-        # The result has shape [B, L * num_channels] which equals [B, T_total]
-        x_combined = x_stacked.view(B, L * self.num_channels)
-        y_combined = y_stacked.view(B, L * self.num_channels)
+        # Swap the time and channel dimensions so each channel's tokens are contiguous.
+        # New shape becomes [B, num_channels, L]
+        x_swapped = x_stacked.transpose(1, 2)
+        y_swapped = y_stacked.transpose(1, 2)
+
+        # Flatten the swapped tensors to get the final shape [B, T_total]
+        x_combined = x_swapped.reshape(B, self.num_channels * L)
+        y_combined = y_swapped.reshape(B, self.num_channels * L)
 
         return x_combined, y_combined
     def reset(self):
