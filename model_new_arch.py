@@ -289,6 +289,8 @@ class DataLoaderLiteAllInMemory:
         # Load and process shards
         self.shards = []
         self.shard_lengths = []  # Store length of each shard
+        self.total_tokens = 0  # Track total number of tokens
+        skipped_shards = 0  # Count skipped shards
 
         for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
@@ -300,9 +302,12 @@ class DataLoaderLiteAllInMemory:
 
             # Store shard length (in terms of complete sequences we can extract)
             shard_length = channel_lengths[0]
+            self.total_tokens += shard_length * len(REGIONS)  # Add to total token count
+
             num_complete_sequences = shard_length // T
             if num_complete_sequences == 0:
                 print(f"Warning: Skipping shard {shard_path} - too short for sequence length {T}")
+                skipped_shards += 1
                 continue
 
             self.shard_lengths.append(num_complete_sequences)
@@ -322,6 +327,14 @@ class DataLoaderLiteAllInMemory:
         self.sequences_per_process = self.total_sequences // num_processes
         start_sequence = self.sequences_per_process * process_rank
         self._seek_to_sequence(start_sequence)
+
+        # Print statistics
+        print(f"DataLoader Statistics:")
+        print(f"- Total tokens across all channels: {self.total_tokens}")
+        print(f"- Total sequences: {self.total_sequences}")
+        print(f"- Sequences per process: {self.sequences_per_process}")
+        print(f"- Number of skipped shards: {skipped_shards}")
+        print(f"- Number of valid shards: {len(self.shards)}")
 
     def _seek_to_sequence(self, target_sequence):
         """Position pointers at the start of the target sequence number"""
@@ -382,11 +395,15 @@ class DataLoaderLiteAllInMemory:
 
         return x, y
 
+    @property
+    def total_len(self):
+        """Returns the total number of tokens across all shards and channels"""
+        return self.total_tokens
+
     def reset(self):
         """Reset to starting position for this process"""
         start_sequence = self.sequences_per_process * self.process_rank
         self._seek_to_sequence(start_sequence)
-
 #########################
 # Training Setup & Loop (No Epochs)
 #########################
