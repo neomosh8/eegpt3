@@ -243,145 +243,143 @@ class GPT(nn.Module):
 # DataLoader (All-In-Memory)
 #########################
 
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 class DataLoaderLiteAllInMemory:
-    def __init__(
-            self,
-            B: int,
-            T: int,
-            process_rank: int,
-            num_processes: int,
-            local_data_dir: str = "./local_shards",
-            shard_prefix: str = "mydata",
-            split: str = "train",
-            shuffle_shards: bool = False
-    ):
+    """
+    Loads all .pt shard files from a local directory.
+
+    Each shard is expected to be a dictionary mapping region names (from the global REGIONS)
+    to a token tensor. This loader processes each shard by interleaving one token at a time from
+    each region. The final global token stream is arranged as:
+
+        shard1: token0-ch0, token0-ch1, token0-ch2, token1-ch0, token1-ch1, token1-ch2, ...
+        shard2: token0-ch0, token0-ch1, token0-ch2, token1-ch0, token1-ch1, token1-ch2, ...
+        ...
+
+    **Missing Regions Handling:**
+    If a shard is missing any region (but has at least one region present), the available data
+    from the first encountered region is copied over to fill in the missing region. A warning is printed.
+
+    **Batching and Target Construction:**
+    To create a batch, the loader draws a flat sequence of tokens from the global interleaved stream.
+    However, to compute channel-specific targets (i.e. for each channel the next token in that channel),
+    we reshape the drawn tokens into shape \[B, time_steps+1, num_channels\] where:
+      - B is the batch size.
+      - time_steps = T // num_channels, with T the total sequence length (which must be divisible by num_channels).
+
+    The input `x` is taken as the first time_steps tokens (flattened back to \[B, T\]) and the target `y`
+    as the next time_steps tokens (flattened similarly). This guarantees that for each channel, the target
+    is the next token in that same channel.
+    """
+
+    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
+                 local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
+                 split: str = "train", shuffle_shards: bool = False, N: int = None):
+        # Here N is the block size. We set it to 1 by default to interleave one token at a time.
+        if N is None:
+            N = 1
         self.B = B
-        self.T = T  # This will be the length per channel
+        self.T = T  # T must be divisible by number of channels.
+        self.N = N
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        # Load shards for this process only
-        shard_pattern = f"{shard_prefix}_{split}"
-        shard_files = [
-            f for f in sorted(os.listdir(local_data_dir))
-            if f.endswith('.pt') and shard_pattern in f
-        ]
-
+        # Locate shard files.
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
+        self.shard_files = sorted(glob.glob(pattern))
+        if not self.shard_files:
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
-            random.shuffle(shard_files)
+            random.shuffle(self.shard_files)
 
-        # Distribute shards across processes
-        self.process_shard_indices = list(range(process_rank, len(shard_files), num_processes))
-        process_shard_files = [shard_files[i] for i in self.process_shard_indices]
-
-        print(f"Process {process_rank}/{num_processes} loading {len(process_shard_files)} shards...")
-
-        self.shards = []
-        self.total_tokens = 0
-
-        for shard_file in process_shard_files:
-            shard_path = os.path.join(local_data_dir, shard_file)
-            shard_data = torch.load(shard_path)
-
-            # Verify all channels have same length within shard
-            lengths = [tensor.size(0) for tensor in shard_data.values()]
-            if not all(l == lengths[0] for l in lengths):
-                raise ValueError(f"All channels must have same length within shard {shard_file}")
-
-            self.shards.append(shard_data)
-            self.total_tokens += lengths[0] * len(shard_data)
-
-        if len(self.shards) == 0:
-            raise ValueError(f"No shards found for process {process_rank} in {local_data_dir} for split {split}")
-
-        # Verify all shards have the same channels
-        self.channels = list(sorted(self.shards[0].keys()))  # Sort channels for consistent order
-        for shard in self.shards:
-            if set(shard.keys()) != set(self.channels):
-                raise ValueError("All shards must have the same channels")
-
-        self.reset()
-
-    @property
-    def total_len(self):
-        """Returns the total number of tokens across all shards and channels"""
-        return self.total_tokens
-
-    def reset(self):
-        """Reset the data loader state."""
-        self.current_shard_idx = 0
-        self.current_position = 0
-
-    def next_batch(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get next batch of sequences from all channels."""
-        B, T = self.B, self.T
-
-        # Initialize batch tensors
-        x = torch.zeros((B, T * len(self.channels)), dtype=torch.long)
-        y = torch.zeros((B, T * len(self.channels)), dtype=torch.long)
-
-        for b in range(B):
-            # Check if we need to move to next shard
-            if self.current_position + T > self.shards[self.current_shard_idx][self.channels[0]].size(0):
-                self.current_shard_idx = (self.current_shard_idx + 1) % len(self.shards)
-                self.current_position = 0
-
-            current_shard_data = self.shards[self.current_shard_idx]
-
-            # Get sequences from each channel
-            for i, channel in enumerate(self.channels):
-                channel_data = current_shard_data[channel]
-                start_idx = i * T
-                end_idx = (i + 1) * T
-
-                # Get the sequence
-                sequence = channel_data[self.current_position:self.current_position + T]
-                x[b, start_idx:end_idx] = sequence
-
-                # Set up target (shifted by 1)
-                if i < len(self.channels) - 1:
-                    # For all channels except the last, targets are the next position
-                    y[b, start_idx:end_idx - 1] = sequence[1:]
-                    # Bridge to next channel
-                    y[b, end_idx - 1] = current_shard_data[self.channels[i + 1]][self.current_position]
-                else:
-                    # For the last channel, wrap around to the next position in first channel
-                    y[b, start_idx:end_idx - 1] = sequence[1:]
-                    next_pos = (self.current_position + T) % channel_data.size(0)
-                    if next_pos == 0 and self.current_shard_idx + 1 < len(self.shards):
-                        # If we're at shard boundary, get from next shard
-                        next_shard_data = self.shards[(self.current_shard_idx + 1) % len(self.shards)]
-                        y[b, end_idx - 1] = next_shard_data[self.channels[0]][0]
+        # Build one global interleaved token stream.
+        # For each shard, for each token index i, we append tokens in this order:
+        # token_i from region0, token_i from region1, token_i from region2, etc.
+        interleaved_blocks = []
+        for shard_path in self.shard_files:
+            loaded = torch.load(shard_path, map_location="cpu")
+            # For each expected region, if it is missing, copy data from an available region.
+            for region in REGIONS:
+                if region not in loaded:
+                    if len(loaded) > 0:
+                        available_region = next(iter(loaded))
+                        print(f"WARNING: Shard {shard_path} is missing channel '{region}'. "
+                              f"Copying data from channel '{available_region}'.")
+                        loaded[region] = loaded[available_region].clone()
                     else:
-                        # Otherwise get from current shard
-                        y[b, end_idx - 1] = current_shard_data[self.channels[0]][next_pos]
+                        raise ValueError(f"Shard {shard_path} is missing all channel data.")
+            # Assume each region's tensor has the same length.
+            shard_len = len(loaded[REGIONS[0]])
+            num_blocks = math.ceil(shard_len / N)  # With N=1, num_blocks equals shard_len.
+            for b in range(num_blocks):
+                for region in REGIONS:
+                    start = b * N
+                    end = min((b + 1) * N, shard_len)
+                    block = loaded[region][start:end]
+                    interleaved_blocks.append(block)
 
-            # If this was the last sequence in the batch, update position
-            if b == B - 1:
-                self.current_position += T
+        # Concatenate all interleaved tokens into a flat global stream.
+        self.interleaved_tokens = torch.cat(interleaved_blocks, dim=0)
+        self.total_len = len(self.interleaved_tokens)
 
+        # Use a single global interleaved stream.
+        self.tokens = self.interleaved_tokens
+
+        # Set the starting position based on process rank.
+        self.current_position = self.B * self.T * self.process_rank
+
+    def next_batch(self):
+        """
+        Extracts a contiguous block of tokens from the interleaved token stream and constructs inputs (x)
+        and targets (y) so that for each channel the target is the next token from the same channel.
+
+        Since T (the total sequence length per example) is assumed to be divisible by num_channels,
+        let time_steps = T // num_channels. We then need a flat sequence of tokens of length:
+
+            needed = B * (time_steps + 1) * num_channels
+
+        We reshape these tokens to shape [B, time_steps+1, num_channels] and then:
+            - x = tokens[:, :-1, :] reshaped back to [B, T]
+            - y = tokens[:, 1:, :] reshaped back to [B, T]
+
+        This guarantees that for each channel, the target is the token that follows in that channel.
+        """
+        B, T = self.B, self.T
+        num_channels = len(REGIONS)
+        time_steps = T // num_channels  # number of time steps per channel.
+
+        # We need an extra token per channel per batch sample.
+        needed = B * (time_steps + 1) * num_channels
+
+        # Get the flat token stream from self.tokens.
+        if self.current_position + needed <= self.total_len:
+            buf_tokens = self.tokens[self.current_position: self.current_position + needed]
+        else:
+            leftover = self.total_len - self.current_position
+            wrap_amount = needed - leftover
+            buf_tokens = torch.cat([self.tokens[self.current_position:], self.tokens[:wrap_amount]], dim=0)
+
+        if len(buf_tokens) != needed:
+            raise RuntimeError(f"Unexpected token count. Expected {needed}, got {len(buf_tokens)}")
+
+        # Reshape into [B, time_steps+1, num_channels]
+        buf_tokens = buf_tokens.view(B, time_steps + 1, num_channels)
+
+        # For each channel, x gets the first time_steps tokens and y gets the next time_steps tokens.
+        x = buf_tokens[:, :-1, :].reshape(B, T)
+        y = buf_tokens[:, 1:, :].reshape(B, T)
+
+        self.current_position = (self.current_position + needed) % self.total_len
         return x, y
 
-    def __len__(self):
-        """Return the total number of possible batches for this process."""
-        total_samples = 0
-        for shard in self.shards:
-            samples_in_shard = shard[self.channels[0]].size(0) // self.T
-            total_samples += samples_in_shard
-        return total_samples // self.B
-
-    def get_state_dict(self):
-        """Get loader state for checkpointing."""
-        return {
-            'current_shard_idx': self.current_shard_idx,
-            'current_position': self.current_position
-        }
-
-    def load_state_dict(self, state_dict):
-        """Load loader state from checkpoint."""
-        self.current_shard_idx = state_dict['current_shard_idx']
-        self.current_position = state_dict['current_position']
+    def reset(self):
+        self.current_position = self.B * self.T * self.process_rank
+    def total_tokens(self):
+        """
+        Returns the total number of tokens loaded into the interleaved token stream.
+        """
+        return self.total_len
 
 #########################
 # Training Setup & Loop (No Epochs)
@@ -408,7 +406,7 @@ val_loader = DataLoaderLiteAllInMemory(
 # For example, if you want to run 5 full passes over the training data:
 num_passes = 5
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
-steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
+steps_per_pass = (train_loader.total_tokens() - 1) // tokens_per_optim
 max_steps = num_passes * steps_per_pass
 if master_process:
     print(f"Total tokens in training set: {train_loader.total_len}")
