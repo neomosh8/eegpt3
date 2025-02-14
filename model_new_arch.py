@@ -410,15 +410,6 @@ grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gra
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
 
-# Create dataloaders for training and validation.
-train_loader = DataLoaderLiteAllInMemory(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
-    local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
-)
-val_loader = DataLoaderLiteAllInMemory(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
-    local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
-)
 
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
