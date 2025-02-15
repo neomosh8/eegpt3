@@ -52,6 +52,60 @@ if torch.cuda.is_available():
 #########################
 # Model Components
 #########################
+class MultiScaleCrossChannelFusion(nn.Module):
+    def __init__(self, n_embd, num_heads=1, scales=[1, 2, 4]):
+        """
+        Args:
+            n_embd: hidden size.
+            num_heads: number of attention heads.
+            scales: list of downsampling factors (1 means no downsampling).
+                    For each scale > 1, we pool over 'scale' time steps, apply attention,
+                    then upsample back.
+        """
+        super().__init__()
+        self.scales = scales
+        self.attn_blocks = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
+            for _ in scales
+        ])
+        # Combine multi-scale outputs back to n_embd dimensions.
+        self.out_linear = nn.Linear(len(scales) * n_embd, n_embd)
+
+    def forward(self, x):
+        """
+        x: [B, T, C, n_embd] -- B=batch size, T=time steps, C=channels.
+        Since channel order is unimportant, we pool over channels with a permutation-invariant operation.
+        Then we perform multi-scale self-attention along time.
+        """
+        B, T, C, E = x.size()
+        # Permutation-invariant pooling over channels (mean pooling)
+        x_pooled = x.mean(dim=2)  # [B, T, E]
+
+        scale_outputs = []
+        for scale, attn in zip(self.scales, self.attn_blocks):
+            if scale > 1:
+                new_T = T // scale
+                # Downsample: average pool over non-overlapping windows of size 'scale'
+                x_down = x_pooled[:, :new_T * scale, :].view(B, new_T, scale, E).mean(dim=2)  # [B, new_T, E]
+            else:
+                x_down = x_pooled  # [B, T, E]
+
+            # Apply self-attention on the (possibly downsampled) sequence.
+            attn_out, _ = attn(x_down, x_down, x_down)  # [B, new_T, E]
+
+            if scale > 1:
+                # Upsample back to T by repeating each token 'scale' times.
+                attn_out = attn_out.unsqueeze(2).repeat(1, 1, scale, 1).view(B, -1, E)
+                attn_out = attn_out[:, :T, :]  # ensure shape [B, T, E]
+            scale_outputs.append(attn_out)  # each: [B, T, E]
+
+        # Concatenate multi-scale outputs along the feature dimension and project back to n_embd.
+        fused = torch.cat(scale_outputs, dim=-1)  # [B, T, len(scales)*E]
+        fused = self.out_linear(fused)  # [B, T, E]
+        return fused
+
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -161,12 +215,14 @@ class GPT(nn.Module):
         # Weight tying between token embedding and output projection.
         self.transformer.wte.weight = self.lm_head.weight
 
-        # Per-channel encoder: 2 blocks per channel.
+        # Per-channel encoder: 3 blocks per channel.
         self.channel_encoder = nn.ModuleList([
-            nn.Sequential(Block(config), Block(config),Block(config))
+            nn.Sequential(Block(config), Block(config), Block(config))
             for _ in range(config.num_channels)
         ])
-        self.cross_channel_fusion = CrossChannelFusion(config.n_embd, num_heads=1)
+
+        # Use the new multi-scale cross-channel fusion.
+        self.cross_channel_fusion = MultiScaleCrossChannelFusion(config.n_embd, num_heads=1, scales=[1, 2, 4])
 
         self.apply(self._init_weights)
 
@@ -183,61 +239,49 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         """
-        idx: [B, T] token IDs, where T = time_steps * num_channels.
+        Args:
+            idx: [B, T] token IDs, where T = time_steps * num_channels.
         """
         B, T = idx.size()
-        # Make sure T is divisible by num_channels
+        # Ensure that T is divisible by the number of channels.
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
 
-        # (1) Token embeddings: [B, T, n_embd]
+        # Token embeddings: [B, T, n_embd]
         tok_emb = self.transformer.wte(idx)
 
         # Reshape to [B, time_steps, num_channels, n_embd]
         x = tok_emb.view(B, time_steps, self.config.num_channels, self.config.n_embd)
 
-        # (1) Add position embeddings *now*, so each channel at time t has the same pos.
-        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # shape [1, time_steps]
-        pos_emb = self.transformer.wpe(pos)  # shape [1, time_steps, n_embd]
-        # Broadcast pos_emb across `num_channels`
-        x = x + pos_emb.unsqueeze(2)  # => [B, time_steps, num_channels, n_embd]
+        # Add position embeddings so that every channel at a given time-step gets the same time index.
+        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # [1, time_steps]
+        pos_emb = self.transformer.wpe(pos)  # [1, time_steps, n_embd]
+        x = x + pos_emb.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
 
-        # (2) Per-channel encoder
+        # Apply per-channel encoder.
         channel_outs = []
         for c in range(self.config.num_channels):
             x_c = x[:, :, c, :]  # [B, time_steps, n_embd]
-            x_c = self.channel_encoder[c](x_c)  # 2-3 blocks for this channel
+            x_c = self.channel_encoder[c](x_c)  # [B, time_steps, n_embd]
             channel_outs.append(x_c)
-
-        # Re-stack so we have [B, time_steps, num_channels, n_embd]
+        # Re-stack to get shape [B, time_steps, num_channels, n_embd]
         x = torch.stack(channel_outs, dim=2)
 
-        # (3) Cross-channel fusion that mixes across time and channel
-        x = self.cross_channel_fusion(x)  # [B, time_steps, num_channels, n_embd]
+        # Fuse across channels using multi-scale temporal self-attention.
+        # Output shape: [B, time_steps, n_embd]
+        x = self.cross_channel_fusion(x)
 
-        # If you want to collapse channels entirely, do e.g.:
-        # x = x.mean(dim=2)  # => [B, time_steps, n_embd]
-        # Then T_final = time_steps for the final GPT blocks, meaning you'd also have
-        # to reshape `targets` to [B, time_steps] or handle partial vs. full LM tasks.
-        #
-        # Instead, let's keep T*C as the final sequence length (so we can do LM on all tokens).
-        # We'll flatten back to [B, T, n_embd], where T = time_steps * num_channels:
-
-        x = x.view(B, T, self.config.n_embd)  # no replication, just flatten
-
-        # Now run the standard GPT blocks:
+        # Continue with the final GPT transformer blocks.
         for block in self.transformer.h:
-            x = block(x)  # each block is [B, T, n_embd] -> [B, T, n_embd]
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
 
-        x = self.transformer.ln_f(x)  # [B, T, n_embd]
-        logits = self.lm_head(x)  # [B, T, vocab_size]
-
-        # Optionally compute loss
         loss = None
         if targets is not None:
-            # targets: [B, T], same shape as idx
+            # Note: if your targets were originally shaped [B, T],
+            # you might need to adjust them to [B, time_steps] for this design.
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
