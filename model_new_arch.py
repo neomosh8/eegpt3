@@ -97,16 +97,25 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, n_embd):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.ln_1 = nn.LayerNorm(n_embd)
+        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=4, batch_first=True)
+        self.ln_2 = nn.LayerNorm(n_embd)
+        self.ffn = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.GELU(),
+            nn.Linear(4 * n_embd, n_embd),
+        )
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        # x: [B, T, n_embd]
+        x_ = self.ln_1(x)
+        attn_out, _ = self.attn(x_, x_, x_)
+        x = x + attn_out
+
+        x_ = self.ln_2(x)
+        x = x + self.ffn(x_)
         return x
 
 
@@ -132,6 +141,81 @@ class CrossChannelFusion(nn.Module):
 
         return fused
 
+class MultiTimescaleCrossChannelFusion(nn.Module):
+    """
+    Fuse [B, time_steps, num_channels, n_embd] via multi-head attention
+    at multiple "timescales" (temporal groupings).
+    """
+    def __init__(self, n_embd, num_heads=1, timescale_factors=(1, 2, 4)):
+        """
+        timescale_factors: e.g. (1, 2, 4) means:
+          - scale=1: Full resolution (each time step).
+          - scale=2: Group pairs of time steps, etc.
+        """
+        super().__init__()
+        self.timescale_factors = timescale_factors
+        # One MultiheadAttention per scale
+        self.attentions = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
+            for _ in timescale_factors
+        ])
+        # A simple linear to combine the fused outputs from each scale
+        self.mix = nn.Linear(len(timescale_factors) * n_embd, n_embd)
+
+    def forward(self, x):
+        """
+        x: [B, time_steps, num_channels, n_embd]
+        Returns: [B, time_steps, num_channels, n_embd] (fused)
+        """
+        B, T, C, E = x.shape
+
+        # We'll store the fused representation from each scale here:
+        all_scales = []
+
+        for attn, scale in zip(self.attentions, self.timescale_factors):
+            # 1) Possibly truncate T so it's divisible by `scale`
+            T_eff = (T // scale) * scale
+            x_trunc = x[:, :T_eff]  # shape [B, T_eff, C, E]
+
+            # 2) Reshape in "blocks" of size `scale` along the time dim
+            #    so each block is shape [scale, C]
+            #    => new time dimension = T_eff // scale
+            # We'll group them into (time_blocks, scale*C).
+            new_T = T_eff // scale
+            x_block = x_trunc.reshape(B, new_T, scale*C, E)  # [B, new_T, scale*C, E]
+
+            # 3) Flatten "time_blocks × (scale*C)" into one dimension
+            #    => [B, new_T * (scale*C), E]
+            x_flat = x_block.view(B, new_T * scale * C, E)
+
+            # 4) Self-attention over that entire dimension (batch_first=True)
+            fused, _ = attn(x_flat, x_flat, x_flat)
+
+            # 5) Reshape back to [B, new_T, scale*C, E]
+            fused = fused.view(B, new_T, scale*C, E)
+
+            # 6) "Unblock" to the original T dimension. We'll fill back to shape [B, T, C, E].
+            #    We effectively invert the reshape:
+            fused = fused.view(B, new_T, scale, C, E)  # => [B, new_T, scale, C, E]
+            fused = fused.reshape(B, new_T * scale, C, E)  # => [B, T_eff, C, E]
+
+            # 7) If original T had leftover, we can pad or just keep T_eff. For simplicity, just keep T_eff:
+            #    We'll do zero-pad to match the original T dimension if needed.
+            if T_eff < T:
+                pad_size = T - T_eff
+                pad_shape = (B, pad_size, C, E)
+                pad_zeros = fused.new_zeros(pad_shape)
+                fused = torch.cat([fused, pad_zeros], dim=1)  # => [B, T, C, E]
+
+            all_scales.append(fused)
+
+        # 8) Concatenate along the embedding dimension => [B, T, C, len(scales)*E]
+        fused_cat = torch.cat(all_scales, dim=-1)
+
+        # 9) Mix down to [B, T, C, E] again
+        fused_final = self.mix(fused_cat)  # => [B, T, C, E]
+
+        return fused_final
 
 @dataclass
 class GPTConfig:
@@ -279,6 +363,81 @@ class GPT(nn.Module):
         return optimizer
 
 
+class GPTWithChannelFusion(nn.Module):
+    def __init__(self, vocab_size, block_size=512, n_embd=256, num_layers=6, num_channels=3):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.n_embd = n_embd
+        self.num_layers = num_layers
+        self.num_channels = num_channels
+
+        self.token_emb = nn.Embedding(vocab_size, n_embd)
+        self.pos_emb = nn.Embedding(block_size, n_embd)
+
+        # Per-channel blocks
+        self.channel_encoder = nn.ModuleList([
+            nn.Sequential(Block(n_embd), Block(n_embd))
+            for _ in range(num_channels)
+        ])
+
+        # Multi-timescale cross‐channel fusion
+        self.cross_channel_fusion = MultiTimescaleCrossChannelFusion(n_embd, num_heads=4,
+                                                                     timescale_factors=(1, 2))
+
+        # Final GPT stack (shared across channels)
+        self.transformer_blocks = nn.ModuleList([Block(n_embd) for _ in range(num_layers)])
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.head = nn.Linear(n_embd, vocab_size)
+
+    def forward(self, idx, targets=None):
+        """
+        idx: [B, T] long
+        where T = time_steps * num_channels.
+        """
+        B, T = idx.shape
+        assert T % self.num_channels == 0, "T must be divisible by num_channels"
+        time_steps = T // self.num_channels
+
+        # (1) Token embedding
+        tok_emb = self.token_emb(idx)  # [B, T, n_embd]
+
+        # (2) Reshape to [B, time_steps, num_channels, n_embd]
+        x = tok_emb.view(B, time_steps, self.num_channels, self.n_embd)
+
+        # (3) Add position embeddings so that each channel at time t has same pos
+        pos_ids = torch.arange(time_steps, device=idx.device).unsqueeze(0)  # [1, time_steps]
+        pos_emb = self.pos_emb(pos_ids)  # [1, time_steps, n_embd]
+        # Broadcast over channels
+        x = x + pos_emb.unsqueeze(2)  # => [B, time_steps, num_channels, n_embd]
+
+        # (4) Per-channel "mini-encoder"
+        channel_outs = []
+        for c in range(self.num_channels):
+            x_c = x[:, :, c, :]  # => [B, time_steps, n_embd]
+            x_c = self.channel_encoder[c](x_c)  # apply 2 blocks
+            channel_outs.append(x_c)
+        # Stack back => [B, time_steps, num_channels, n_embd]
+        x = torch.stack(channel_outs, dim=2)
+
+        # (5) Multi-timescale cross‐channel fusion => [B, time_steps, num_channels, n_embd]
+        x = self.cross_channel_fusion(x)
+
+        # (6) Finally, flatten => [B, T, n_embd], then standard GPT blocks
+        x = x.view(B, time_steps * self.num_channels, self.n_embd)  # => [B, T, n_embd]
+
+        for block in self.transformer_blocks:
+            x = block(x)
+
+        x = self.ln_f(x)
+        logits = self.head(x)  # [B, T, vocab_size]
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
+
+        return logits, loss
+
 #########################
 # DataLoader (All-In-Memory)
 #########################
@@ -424,7 +583,7 @@ if master_process:
     print(f"Running for {max_steps} optimization steps ({num_passes} passes over the data)")
 
 # Instantiate the model.
-model = GPT(GPTConfig())
+model = GPTWithChannelFusion(GPTConfig())
 model.to(device)
 # Optionally compile the model for potential speedups.
 model = torch.compile(model)
