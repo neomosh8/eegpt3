@@ -241,46 +241,60 @@ class GPT(nn.Module):
         """
         Args:
             idx: [B, T] token IDs, where T = time_steps * num_channels.
+            targets: [B, T] with different target tokens for each channel.
         """
         B, T = idx.size()
-        # Ensure that T is divisible by the number of channels.
+        # Ensure T is divisible by the number of channels.
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
 
-        # Token embeddings: [B, T, n_embd]
-        tok_emb = self.transformer.wte(idx)
-
+        # 1. Token Embeddings and Reshape:
+        tok_emb = self.transformer.wte(idx)  # [B, T, n_embd]
         # Reshape to [B, time_steps, num_channels, n_embd]
         x = tok_emb.view(B, time_steps, self.config.num_channels, self.config.n_embd)
 
-        # Add position embeddings so that every channel at a given time-step gets the same time index.
+        # 2. Add Positional Embeddings (same time index for every channel):
         pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # [1, time_steps]
         pos_emb = self.transformer.wpe(pos)  # [1, time_steps, n_embd]
         x = x + pos_emb.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
 
-        # Apply per-channel encoder.
+        # (Optional) Add a learnable channel embedding if you want to inform the model of channel identity.
+        # Even if channel ordering is unimportant, if targets differ per channel you might benefit from it.
+        # Uncomment the following if desired:
+        # channel_ids = torch.arange(self.config.num_channels, device=x.device).unsqueeze(0).unsqueeze(0)  # [1,1,num_channels]
+        # channel_emb = self.channel_embedding(channel_ids)  # [1,1,num_channels, n_embd]
+        # x = x + channel_emb  # [B, time_steps, num_channels, n_embd]
+
+        # 3. Per-Channel Encoding:
         channel_outs = []
         for c in range(self.config.num_channels):
             x_c = x[:, :, c, :]  # [B, time_steps, n_embd]
-            x_c = self.channel_encoder[c](x_c)  # [B, time_steps, n_embd]
+            x_c = self.channel_encoder[c](x_c)  # Process each channel separately.
             channel_outs.append(x_c)
-        # Re-stack to get shape [B, time_steps, num_channels, n_embd]
+        # Stack back: [B, time_steps, num_channels, n_embd]
         x = torch.stack(channel_outs, dim=2)
 
-        # Fuse across channels using multi-scale temporal self-attention.
-        # Output shape: [B, time_steps, n_embd]
-        x = self.cross_channel_fusion(x)
+        # 4. Cross-Channel Fusion (Global Fusion Over Channels at Each Time Step):
+        # This module is expected to take an input of shape [B, time_steps, num_channels, n_embd]
+        # and output a fused representation of shape [B, time_steps, n_embd].
+        fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
 
-        # Continue with the final GPT transformer blocks.
+        # 5. Combine the Fused Representation with the Original Per-Channel Features:
+        # Broadcast the fused representation over the channel dimension and add it.
+        x = x + fused.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
+
+        # 6. Flatten the (time, channel) dimensions to get a sequence of length T:
+        x = x.view(B, T, self.config.n_embd)  # [B, T, n_embd]
+
+        # 7. Process with the Final GPT Transformer Blocks:
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        logits = self.lm_head(x)  # [B, T, vocab_size]
 
         loss = None
         if targets is not None:
-            # Note: if your targets were originally shaped [B, T],
-            # you might need to adjust them to [B, time_steps] for this design.
+            # Now targets have shape [B, T] (with T = time_steps * num_channels)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
