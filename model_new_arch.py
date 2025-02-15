@@ -155,7 +155,7 @@ class GPT(nn.Module):
 
         # Per-channel encoder: 2 blocks per channel.
         self.channel_encoder = nn.ModuleList([
-            nn.Sequential(Block(config), Block(config))
+            nn.Sequential(Block(config), Block(config),Block(config))
             for _ in range(config.num_channels)
         ])
         self.cross_channel_fusion = CrossChannelFusion(config.n_embd, num_heads=1)
