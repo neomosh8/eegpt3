@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from checkpoint_manager import save_checkpoint
 # assumed available; replace or remove if not using S3 logging
 from handle_tokenized import upload_folder_to_s3
 from plotter import LossPlotter
@@ -564,7 +565,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    if ((step % 500 == 0) and step > 0):
+    if ((step % 500 == 0)):
         model.eval()
         val_loader.reset()
         if master_process:
@@ -602,6 +603,16 @@ for step in range(max_steps):
                 loss_plotter.update_val(current_val_loss.item())
     if master_process:
         loss_plotter.maybe_plot(step)
+    if step % 3000 == 0 and master_process and step>0:
+        save_checkpoint(
+            model=raw_model,
+            optimizer=optimizer,
+            config=raw_model.config,
+            step=step,
+            val_loss=current_val_loss.item(),
+            log_dir="./checkpoints"
+        )
+
 
 # Clean up DDP resources.
 if ddp:
