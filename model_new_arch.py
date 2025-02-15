@@ -113,16 +113,24 @@ class Block(nn.Module):
 class CrossChannelFusion(nn.Module):
     def __init__(self, n_embd, num_heads=1):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads)
+        # use batch_first=True so shapes are [B, seq_len, embd]
+        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
 
     def forward(self, x):
-        # x: [B, time_steps, num_channels, n_embd]
+        """
+        x: [B, time_steps, num_channels, n_embd]
+        We flatten (time_steps * num_channels) into a single dimension => "seq_len".
+        """
         B, T, C, E = x.size()
-        x = x.view(B * T, C, E)  # [B*T, num_channels, n_embd]
-        x = x.transpose(0, 1)  # [num_channels, B*T, n_embd]
-        fused, _ = self.attn(x, x, x)  # [num_channels, B*T, n_embd]
-        fused = fused.mean(dim=0)  # [B*T, n_embd]
-        return fused.view(B, T, E)  # [B, time_steps, n_embd]
+        # Flatten time & channels => [B, T*C, E]
+        x = x.view(B, T * C, E)
+
+        # MultiheadAttention expects [B, seq_len, embd] if batch_first=True
+        fused, _ = self.attn(x, x, x)  # [B, T*C, E]
+        # Reshape back to [B, T, C, E] if you still want that 4D layout:
+        fused = fused.view(B, T, C, E)
+
+        return fused
 
 
 @dataclass
@@ -174,37 +182,62 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
+        """
+        idx: [B, T] token IDs, where T = time_steps * num_channels.
+        """
         B, T = idx.size()
-        # Ensure that T is divisible by the number of channels.
+        # Make sure T is divisible by num_channels
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
 
-        tok_emb = self.transformer.wte(idx)  # [B, T, n_embd]
-        # Reshape tokens so each contiguous block corresponds to one channel.
+        # (1) Token embeddings: [B, T, n_embd]
+        tok_emb = self.transformer.wte(idx)
+
+        # Reshape to [B, time_steps, num_channels, n_embd]
         x = tok_emb.view(B, time_steps, self.config.num_channels, self.config.n_embd)
+
+        # (1) Add position embeddings *now*, so each channel at time t has the same pos.
+        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # shape [1, time_steps]
+        pos_emb = self.transformer.wpe(pos)  # shape [1, time_steps, n_embd]
+        # Broadcast pos_emb across `num_channels`
+        x = x + pos_emb.unsqueeze(2)  # => [B, time_steps, num_channels, n_embd]
+
+        # (2) Per-channel encoder
         channel_outs = []
         for c in range(self.config.num_channels):
             x_c = x[:, :, c, :]  # [B, time_steps, n_embd]
-            x_c = self.channel_encoder[c](x_c)
+            x_c = self.channel_encoder[c](x_c)  # 2-3 blocks for this channel
             channel_outs.append(x_c)
-        x = torch.stack(channel_outs, dim=2)  # [B, time_steps, num_channels, n_embd]
-        x_fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
-        # Replicate fused output to recover original sequence length.
-        x_fused_rep = x_fused.unsqueeze(2).repeat(1, 1, self.config.num_channels, 1)
-        x_flat = x_fused_rep.view(B, T, self.config.n_embd)
 
-        pos = torch.arange(0, T, device=x_flat.device).unsqueeze(0)
-        pos_emb = self.transformer.wpe(pos)
-        x_flat = x_flat + pos_emb
+        # Re-stack so we have [B, time_steps, num_channels, n_embd]
+        x = torch.stack(channel_outs, dim=2)
 
+        # (3) Cross-channel fusion that mixes across time and channel
+        x = self.cross_channel_fusion(x)  # [B, time_steps, num_channels, n_embd]
+
+        # If you want to collapse channels entirely, do e.g.:
+        # x = x.mean(dim=2)  # => [B, time_steps, n_embd]
+        # Then T_final = time_steps for the final GPT blocks, meaning you'd also have
+        # to reshape `targets` to [B, time_steps] or handle partial vs. full LM tasks.
+        #
+        # Instead, let's keep T*C as the final sequence length (so we can do LM on all tokens).
+        # We'll flatten back to [B, T, n_embd], where T = time_steps * num_channels:
+
+        x = x.view(B, T, self.config.n_embd)  # no replication, just flatten
+
+        # Now run the standard GPT blocks:
         for block in self.transformer.h:
-            x_flat = block(x_flat)
-        x_flat = self.transformer.ln_f(x_flat)
-        logits = self.lm_head(x_flat)
+            x = block(x)  # each block is [B, T, n_embd] -> [B, T, n_embd]
 
+        x = self.transformer.ln_f(x)  # [B, T, n_embd]
+        logits = self.lm_head(x)  # [B, T, vocab_size]
+
+        # Optionally compute loss
         loss = None
         if targets is not None:
+            # targets: [B, T], same shape as idx
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
