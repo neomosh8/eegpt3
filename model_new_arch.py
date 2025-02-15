@@ -348,8 +348,10 @@ class DataLoaderLiteAllInMemory:
         y_swapped = y_stacked.transpose(1, 2)
 
         # Flatten the swapped tensors to get the final shape [B, T_total]
-        x_combined = x_swapped.reshape(B, self.num_channels * L)
-        y_combined = y_swapped.reshape(B, self.num_channels * L)
+        # x_combined = x_swapped.reshape(B, self.num_channels * L)
+        # y_combined = y_swapped.reshape(B, self.num_channels * L)
+        x_combined = x_stacked.reshape(B, self.num_channels * L)
+        y_combined = y_stacked.reshape(B, self.num_channels * L)
 
         return x_combined, y_combined
     def reset(self):
