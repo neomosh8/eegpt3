@@ -342,37 +342,51 @@ class GPT(nn.Module):
 
 
 # Helper: compute completion loss for one prompt–candidate pair.
+import torch
+import torch.nn.functional as F
+
+
 def compute_completion_loss_with_channels(model, prompt_tokens, candidate_tokens, device="cuda"):
     """
     Given a prompt and a candidate (both already interleaved as 1D tensors),
-    compute the (summed) negative log–likelihood loss on the candidate tokens.
+    compute the summed negative log-likelihood loss on the candidate tokens.
 
     Args:
         model: the trained model (expects input shape [B, seq_length])
-        prompt_tokens: LongTensor of shape [prompt_length]
-        candidate_tokens: LongTensor of shape [candidate_length]
-        device: device string
+        prompt_tokens: LongTensor of shape [prompt_length] (1D) on CPU
+        candidate_tokens: LongTensor of shape [candidate_length] (1D) on CPU
+        device: device string ("cuda" or "cpu")
+
     Returns:
         loss: scalar loss (float)
     """
-    # Form a batch of 1 by concatenating prompt and candidate.
+    # Move tokens to the target device.
+    prompt_tokens = prompt_tokens.to(device)
+    candidate_tokens = candidate_tokens.to(device)
+
+    # Create batch dimension.
     prompt_tokens = prompt_tokens.unsqueeze(0)  # [1, prompt_length]
     candidate_tokens = candidate_tokens.unsqueeze(0)  # [1, candidate_length]
-    input_seq = torch.cat([prompt_tokens, candidate_tokens], dim=1).to(device)  # [1, total_length]
-    # Forward pass (we ignore any internal loss return)
+
+    # Concatenate prompt and candidate tokens.
+    input_seq = torch.cat([prompt_tokens, candidate_tokens], dim=1)  # [1, total_length]
+
+    # Forward pass through the model.
     logits, _ = model(input_seq)  # logits: [1, total_length, vocab_size]
 
-    # We only care about predicting the candidate tokens.
+    # Compute log probabilities only for the candidate portion.
     prompt_length = prompt_tokens.size(1)
     candidate_logits = logits[:, prompt_length:, :]  # [1, candidate_length, vocab_size]
-    # Compute log-probs
-    log_probs = F.log_softmax(candidate_logits, dim=-1)  # [1, candidate_length, vocab_size]
-    # Gather log-probabilities of the ground-truth candidate tokens.
+    log_probs = F.log_softmax(candidate_logits, dim=-1)
+
+    # Gather the log-probabilities corresponding to the ground-truth candidate tokens.
     token_log_probs = log_probs.gather(dim=-1, index=candidate_tokens.unsqueeze(-1)).squeeze(
         -1)  # [1, candidate_length]
-    # Sum over candidate tokens
+
+    # Sum over candidate tokens to get the total log-likelihood loss.
     loss = - token_log_probs.sum()
     return loss.item()
+
 
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
