@@ -511,7 +511,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4)
 
     # Specify the path to the checkpoint file you want to load.
-    checkpoint_path = "./checkpoints/model_00010.pt"  # Update the filename as needed.
+    checkpoint_path = "./checkpoints/model_06000.pt"  # Update the filename as needed.
 
     # Load the checkpoint.
     checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
