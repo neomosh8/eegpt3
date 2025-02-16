@@ -516,8 +516,17 @@ if __name__ == "__main__":
     # Load the checkpoint.
     checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
 
-    print(
-        f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+    # Fix the keys in the state_dict by removing the '_orig_mod.' prefix.
+    orig_sd = checkpoint['model_state_dict']
+    fixed_sd = {}
+    for k, v in orig_sd.items():
+        new_key = k.replace("_orig_mod.", "")
+        fixed_sd[new_key] = v
+    model.load_state_dict(fixed_sd, strict=True)
+
+    print(f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+
+    # If using DDP, unwrap the model.
     try:
         model_for_eval = model.module if hasattr(model, "module") else model
     except NameError:
@@ -526,11 +535,8 @@ if __name__ == "__main__":
     # Set the model to evaluation mode.
     model_for_eval.eval()
 
-    # Set device (should be the same used during training)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
     # Instantiate the forced-choice classifier.
-    # Here we assume the token shards are in "./local_shards" (adjust as needed).
+    # Here we assume the token shards for evaluation are in "./local_shards_val" (adjust as needed).
     fc_classifier = ForcedChoiceClassifier(
         model=model_for_eval,
         device=device,
