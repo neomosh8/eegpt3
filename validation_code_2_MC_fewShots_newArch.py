@@ -423,7 +423,7 @@ def evaluate_multiclass_with_channels(
                 raise ValueError(f"Shard {path} is missing channel {region}")
             tokens_by_region[region] = loaded[region].cpu()
         # Assume all channels have the same length.
-        shard_length = tokens_by_region[REGIONS[0]].size(0)
+        shard_length =3* tokens_by_region[REGIONS[0]].size(0)
         shards.append({
             'tokens': tokens_by_region,  # dict: region -> 1D tensor of tokens
             'length': shard_length,
@@ -437,8 +437,8 @@ def evaluate_multiclass_with_channels(
     correct_count = 0
 
     # Parameters for prompt sampling.
-    chunk_size = 128  # tokens per chunk per channel
-    num_chunks = 4  # number of chunks sampled per channel for the prompt
+    chunk_size = 258  # tokens per chunk per channel
+    num_chunks = 2  # number of chunks sampled per channel for the prompt
     # For candidate: candidate_segment_size is given (total candidate length)
     # Per-channel candidate length:
     num_channels = len(REGIONS)
