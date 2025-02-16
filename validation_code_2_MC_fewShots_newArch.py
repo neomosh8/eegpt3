@@ -365,43 +365,46 @@ class ForcedChoiceClassifier:
 
         # Find all .pt files in the provided directory.
         self.file_paths = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
-        random.shuffle(self.file_paths)
         if not self.file_paths:
             raise ValueError(f"No .pt files found in directory {data_dir}")
 
         # Preload interleaved token sequences from each file.
         self.file_tokens = {}
         for path in self.file_paths:
-            self.file_tokens[path] = self.load_interleaved_tokens(path)
+            tokens = self.load_interleaved_tokens(path, T_total=sequence_length)
+            if tokens is not None:
+                self.file_tokens[path] = tokens
+            else:
+                print(f"Skipping file: {path} due to insufficient tokens.")
+
+        if not self.file_tokens:
+            raise ValueError("No valid files found for forced choice evaluation.")
+
         print(f"Loaded {len(self.file_tokens)} files for forced choice evaluation.")
 
-    def load_interleaved_tokens(self,file_path, T_total=1032):
+    def load_interleaved_tokens(self, file_path, T_total=1032):
         """
         Loads tokens from a single shard file, extracts a contiguous block
         from each channel, and interleaves them to form a single sample.
 
-        This mimics the behavior of DataLoaderLiteAllInMemory: each channel’s tokens
-        are concatenated (if there are multiple shards, here we assume one shard) and
-        then a contiguous block is extracted (with the same starting index across channels).
+        If the file does not have enough tokens (i.e. if max_start < 0),
+        it prints the total tokens per channel and returns None so that the file can be skipped.
 
         Args:
             file_path (str): Path to the shard file.
             T_total (int): Total sequence length expected (must be divisible by number of channels).
 
         Returns:
-            A tensor of shape [1, T_total] containing interleaved tokens.
+            A tensor of shape [1, T_total] containing interleaved tokens, or None if not enough tokens.
         """
-        # Load the shard file.
         data = torch.load(file_path, map_location="cpu")
         tokens = {}
-
-        # For each region, check that it exists and load the token tensor.
         for region in REGIONS:
             if region not in data:
                 raise ValueError(f"File {file_path} is missing channel {region}")
             tokens[region] = data[region]
 
-        # Ensure all channels have the same total length.
+        # Ensure all channels have the same length.
         lengths = [t.numel() for t in tokens.values()]
         if len(set(lengths)) != 1:
             raise ValueError(f"Channel lengths differ in {file_path}")
@@ -410,30 +413,24 @@ class ForcedChoiceClassifier:
         num_channels = len(REGIONS)
         if T_total % num_channels != 0:
             raise ValueError("T_total must be divisible by the number of channels")
-
         L = T_total // num_channels  # tokens per channel to extract
 
-        # Choose a random starting index that allows extracting L tokens from each channel.
         max_start = total_length_per_channel - L
-        print(total_length_per_channel)
         if max_start < 0:
-            raise ValueError(f"Not enough tokens in each channel in {file_path} (need at least {L})")
-        start = random.randint(0, max_start)
+            print(
+                f"File {file_path} has total_length_per_channel = {total_length_per_channel}, which is less than required {L}. Skipping this file.")
+            return None  # Indicate that this file is not usable.
 
-        # Extract a contiguous block from each channel.
+        start = random.randint(0, max_start)
         blocks = []
         for region in REGIONS:
             block = tokens[region][start: start + L]  # shape: [L]
             blocks.append(block)
 
-        # Stack blocks into a tensor of shape [num_channels, L]
-        stacked = torch.stack(blocks, dim=0)
-        # Transpose to [L, num_channels] and then flatten to get interleaved tokens:
-        # [token0_ch0, token0_ch1, token0_ch2, token1_ch0, token1_ch1, token1_ch2, ...]
-        interleaved = stacked.t().reshape(-1)
-
-        # Return as a batch of one sample: shape [1, T_total]
-        return interleaved.unsqueeze(0)
+        # Stack and interleave tokens.
+        stacked = torch.stack(blocks, dim=0)  # shape: [num_channels, L]
+        interleaved = stacked.t().reshape(-1)  # shape: [num_channels * L]
+        return interleaved.unsqueeze(0)  # Return as a batch of one sample: [1, T_total]
 
     def compute_completion_logprob(self, prompt, candidate):
         # Ensure both prompt and candidate are 1D
