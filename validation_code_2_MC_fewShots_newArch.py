@@ -415,6 +415,7 @@ class ForcedChoiceClassifier:
 
         # Choose a random starting index that allows extracting L tokens from each channel.
         max_start = total_length_per_channel - L
+        print(total_length_per_channel)
         if max_start < 0:
             raise ValueError(f"Not enough tokens in each channel in {file_path} (need at least {L})")
         start = random.randint(0, max_start)
