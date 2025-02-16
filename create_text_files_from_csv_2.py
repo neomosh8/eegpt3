@@ -44,7 +44,8 @@ def average_eeg_channels(df, channels_to_drop):
     compute overall left/right averages based solely on the ending digit.
     Returns (left_data, right_data)
     """
-    filtered_columns = [col for col in df.columns if col not in channels_to_drop]
+    # filtered_columns = [col for col in df.columns if col not in channels_to_drop]
+    filtered_columns = [col for col in df.columns if col.lower() not in [c.lower() for c in channels_to_drop]]# for emotiv
 
     left_channels = []
     right_channels = []
