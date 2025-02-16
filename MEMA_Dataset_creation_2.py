@@ -25,9 +25,10 @@ def load_mat_epoch_data(mat_file_path):
 
 def plot_eeg_channels(df, fs=500, title="EEG Channels"):
     """
-    Plots each column in df as a separate subplot.
+    Plots each channel in df as a separate subplot.
+
     Args:
-        df: Pandas DataFrame where each column is one EEG channel.
+        df: Pandas DataFrame where each column represents one EEG channel.
         fs: Sampling rate in Hz.
         title: Title of the plot.
     """
@@ -58,33 +59,40 @@ if __name__ == "__main__":
     epochs, labels = load_mat_epoch_data(mat_file_path)
     fs = 500  # Sampling frequency (Hz)
 
+    # Define actual channel names as per the 10-10 system
+    electrode_names = [
+        "Fp1", "Fp2", "Fz", "F3", "F4", "F7", "F8", "FCz",
+        "FC3", "FC4", "FT7", "FT8", "Cz", "C3", "C4",
+        "T3 (T7 left temporal)", "T4 (T8 right temporal)", "CPz",
+        "CP3", "CP4", "TP7", "TP8", "Pz", "P3", "P4",
+        "T5 (P7 left posterior temporal)", "T6 (P8 right posterior temporal)",
+        "Oz", "O1", "O2", "HEOL", "VEOR"
+    ]
+
     # ---------------------------
-    # 2) For each label (task), concatenate raw epochs and save as CSV
+    # 2) Process each label (task): concatenate raw epochs and save as CSV
     # ---------------------------
     unique_labels = np.unique(labels)
     for lab in unique_labels:
         print(f"Processing task (label): {lab}")
 
         # Select all epochs belonging to the current label.
-        # epochs has shape (n_epochs, n_samples, n_channels)
+        # epochs shape: (n_epochs, n_samples, n_channels)
         epochs_class = epochs[labels == lab]
-        # Ensure the data has three dimensions (in case there is only one epoch)
+        # In case there is only one epoch, ensure epochs_class is 3D
         if epochs_class.ndim == 2:
             epochs_class = np.expand_dims(epochs_class, axis=0)
 
         # Concatenate the epochs along the time (sample) axis.
-        # Each epoch is of shape (n_samples, n_channels), so the combined data
-        # will have shape (total_samples, n_channels).
+        # Each epoch is (n_samples, n_channels) so the combined data has shape (total_samples, n_channels)
         combined_data = np.concatenate(epochs_class, axis=0)
         total_samples = combined_data.shape[0]
 
         # Create a time stamp column (in seconds).
         time_stamps = np.arange(total_samples) / fs
 
-        # Create a DataFrame with columns: TimeStamp, ch_1, ch_2, ...
-        n_channels = combined_data.shape[1]
-        channel_names = [f"ch_{i + 1}" for i in range(n_channels)]
-        df_data = pd.DataFrame(combined_data, columns=channel_names)
+        # Create a DataFrame with columns: TimeStamp, then electrode names.
+        df_data = pd.DataFrame(combined_data, columns=electrode_names)
         df_data.insert(0, "TimeStamp", time_stamps)
 
         # Save CSV file for this task/label
@@ -95,7 +103,6 @@ if __name__ == "__main__":
         print(f"Saved CSV for task {lab} to {csv_filename}")
 
         # ---------------------------
-        # 3) Plot all channels for this task
+        # 3) Plot all channels for this task (excluding TimeStamp)
         # ---------------------------
-        # (TimeStamp is not plotted; only the channel data is plotted.)
-        plot_eeg_channels(df_data[channel_names], fs=fs, title=f"Task (Label): {lab}")
+        plot_eeg_channels(df_data[electrode_names], fs=fs, title=f"Task (Label): {lab}")
