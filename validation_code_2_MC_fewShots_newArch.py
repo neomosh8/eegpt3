@@ -493,8 +493,8 @@ class ForcedChoiceClassifier:
             # Choose a random start index so that we can extract a full sequence.
             max_start = total_length - self.sequence_length
             start = random.randint(0, max_start)
-            prompt = tokens_correct[start: start + self.prompt_length]
-            correct_completion = tokens_correct[start + self.prompt_length: start + self.sequence_length]
+            prompt = tokens_correct[0, start: start + self.prompt_length]
+            correct_completion = tokens_correct[0, start + self.prompt_length: start + self.sequence_length]
 
             # ----- Sample a wrong candidate from a different file -----
             wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
