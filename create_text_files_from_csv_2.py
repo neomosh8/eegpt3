@@ -374,10 +374,10 @@ def write_final_report(results):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    folders = list_s3_folders()
+    # folders = list_s3_folders()
     csv_files = []
     i = 1
-    # folders = ["ds003509"]
+    folders = ["csv_emotiv"]
 
     # folders_to_delete = ["ds002338", "ds002336","ds001849","ds001971","ds002718","ds002814","ds003380","ds003474"]
 
@@ -405,4 +405,4 @@ if __name__ == "__main__":
     # results = [result]
 
     # Write final report with overall statistics including folder names.
-    write_final_report(results)
+    # write_final_report(results)
