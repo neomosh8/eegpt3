@@ -160,8 +160,8 @@ def download_and_preprocess_s3(bucket_name: str, s3_prefix: str, local_data_dir:
 
 if __name__ == "__main__":
     BUCKET_NAME = "dataframes--use1-az6--x-s3"
-    S3_PREFIX = "output/"
-    LOCAL_DIR = "./local_shards"
+    S3_PREFIX = "output_emotiv/"
+    LOCAL_DIR = "./local_shards_val"
     download_and_preprocess_s3(bucket_name=BUCKET_NAME,
                                s3_prefix=S3_PREFIX,
                                local_data_dir=LOCAL_DIR,
