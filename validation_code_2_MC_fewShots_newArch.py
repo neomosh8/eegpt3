@@ -354,14 +354,15 @@ class ForcedChoiceClassifier:
             device: Device (e.g., 'cuda:0' or 'cpu') on which to run the model.
             data_dir: Directory containing the .pt files.
             sequence_length: Total sequence length (must be divisible by the number of channels).
-                             A prompt will be created from the first half.
+                             For few-shot, we'll interpret this as the sum of 3 prompt segments (each T/4)
+                             and 1 candidate segment (T/4).
         """
         self.model = model
         self.device = device
         self.data_dir = data_dir
         self.sequence_length = sequence_length
-        self.prompt_length = sequence_length // 2
-        self.completion_length = sequence_length - self.prompt_length
+        # For few-shot, define segment length as one quarter of the sequence.
+        self.segment_length = sequence_length // 4
 
         # Find all .pt files in the provided directory.
         self.file_paths = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
@@ -374,157 +375,146 @@ class ForcedChoiceClassifier:
             self.file_tokens[path] = self.load_interleaved_tokens(path)
         print(f"Loaded {len(self.file_tokens)} files for forced choice evaluation.")
 
-    def load_interleaved_tokens(self,file_path, T_total=1032):
+    def load_interleaved_tokens(self, file_path, T_total=None):
         """
         Loads tokens from a single shard file, extracts a contiguous block
         from each channel, and interleaves them to form a single sample.
+        (Here we use the same logic as in training.)
 
-        This mimics the behavior of DataLoaderLiteAllInMemory: each channel’s tokens
-        are concatenated (if there are multiple shards, here we assume one shard) and
-        then a contiguous block is extracted (with the same starting index across channels).
-
-        Args:
-            file_path (str): Path to the shard file.
-            T_total (int): Total sequence length expected (must be divisible by number of channels).
+        If T_total is not provided, we use the entire sequence in the file.
 
         Returns:
             A tensor of shape [1, T_total] containing interleaved tokens.
         """
-        # Load the shard file.
         data = torch.load(file_path, map_location="cpu")
         tokens = {}
-
-        # For each region, check that it exists and load the token tensor.
         for region in REGIONS:
             if region not in data:
                 raise ValueError(f"File {file_path} is missing channel {region}")
             tokens[region] = data[region]
-
-        # Ensure all channels have the same total length.
         lengths = [t.numel() for t in tokens.values()]
         if len(set(lengths)) != 1:
             raise ValueError(f"Channel lengths differ in {file_path}")
         total_length_per_channel = lengths[0]
-
         num_channels = len(REGIONS)
+        # If no T_total is given, use all tokens interleaved.
+        if T_total is None:
+            T_total = total_length_per_channel * num_channels
+
         if T_total % num_channels != 0:
             raise ValueError("T_total must be divisible by the number of channels")
-
         L = T_total // num_channels  # tokens per channel to extract
 
-        # Choose a random starting index that allows extracting L tokens from each channel.
         max_start = total_length_per_channel - L
         if max_start < 0:
             raise ValueError(f"Not enough tokens in each channel in {file_path} (need at least {L})")
         start = random.randint(0, max_start)
 
-        # Extract a contiguous block from each channel.
         blocks = []
         for region in REGIONS:
-            block = tokens[region][start: start + L]  # shape: [L]
+            block = tokens[region][start: start + L]
             blocks.append(block)
-
-        # Stack blocks into a tensor of shape [num_channels, L]
         stacked = torch.stack(blocks, dim=0)
-        # Transpose to [L, num_channels] and then flatten to get interleaved tokens:
-        # [token0_ch0, token0_ch1, token0_ch2, token1_ch0, token1_ch1, token1_ch2, ...]
         interleaved = stacked.t().reshape(-1)
-
-        # Return as a batch of one sample: shape [1, T_total]
         return interleaved.unsqueeze(0)
 
     def compute_completion_logprob(self, prompt, candidate):
-        # Ensure both prompt and candidate are 1D
+        """
+        Computes the total log probability of the candidate tokens conditioned on the prompt.
+        """
+        # Ensure both prompt and candidate are 1D.
         prompt = prompt.view(-1)
         candidate = candidate.view(-1)
-
-        # Concatenate prompt and candidate into one sequence and add a batch dimension.
         full_seq = torch.cat([prompt, candidate], dim=0).unsqueeze(0).to(self.device)
         self.model.eval()
         with torch.no_grad():
             logits, _ = self.model(full_seq)
-        # Let pl = prompt length, cl = candidate length.
         pl = prompt.size(0)
         cl = candidate.size(0)
-        # In language modeling, token at position i is predicted by the logits at position i-1.
-        # Thus, the first candidate token (at position pl) is predicted by logits at index pl-1.
-        candidate_logits = logits[0, pl - 1: pl - 1 + cl, :]  # shape: [cl, vocab_size]
+        candidate_logits = logits[0, pl - 1: pl - 1 + cl, :]
         log_probs = F.log_softmax(candidate_logits, dim=-1)
-        # Gather the log probability of each candidate token.
-        candidate = candidate.to(self.device)
-        token_log_probs = log_probs.gather(dim=-1, index=candidate.unsqueeze(-1)).squeeze(-1)
+        token_log_probs = log_probs.gather(dim=-1, index=candidate.to(self.device).unsqueeze(-1)).squeeze(-1)
         total_log_prob = token_log_probs.sum()
         return total_log_prob.item()
 
-    def evaluate(self, num_samples=100):
+    def evaluate_few_shot(self, num_samples=100):
         """
-        Runs forced choice evaluation for a given number of samples.
-        For each sample:
-          - Randomly select a file and a starting position.
-          - Create a prompt (first half) and the "correct" completion (immediately following the prompt).
-          - Sample a "wrong" completion from a different file.
-          - Compute log likelihoods for both candidates.
-          - Count the example as correct if the correct candidate has a higher log probability.
-
-        Args:
-            num_samples: Number of forced choice examples to evaluate.
-
-        Returns:
-            Accuracy (percentage of examples where the correct completion scored higher).
+        Runs few-shot forced-choice evaluation. For each sample:
+          - From a randomly chosen file, sample 3 random non-overlapping segments (each of length T/4)
+            and concatenate them (in order) to form the prompt.
+          - Also sample a candidate (completion) segment of length T/4 from a non-overlapping region.
+          - For the "wrong" candidate, sample a segment of length T/4 from a different file.
+          - Compare log probabilities and count as correct if the prompt yields a higher log likelihood
+            for the correct candidate.
         """
         correct_count = 0
         total_evaluated = 0
+        seg_len = self.segment_length  # T/4
 
         for i in range(num_samples):
             # ----- Sample a correct example from one file -----
             correct_file = random.choice(self.file_paths)
-            tokens_correct = self.file_tokens[correct_file]
-            total_length = tokens_correct.numel()  # tokens_correct is [1, T_total]
-            if total_length < self.sequence_length:
-                # Skip if this file is too short.
+            tokens_correct = self.file_tokens[correct_file]  # shape [1, T_total_file]
+            file_length = tokens_correct.size(1)
+            if file_length < seg_len:
                 continue
-            # Choose a random start index so that we can extract a full sequence.
-            max_start = tokens_correct.size(1) - self.sequence_length
-            start = random.randint(0, max_start)
-            # Index the first (and only) batch element so that prompt and completion are 1D tensors.
-            # Sample prompt as before.
-            prompt = tokens_correct[0, start: start + self.prompt_length]
 
-            # Now, sample a random starting index for the correct candidate from the same file.
-            max_candidate_start = tokens_correct.size(1) - self.completion_length
-            correct_candidate_start = random.randint(0, max_candidate_start)
-            correct_completion = tokens_correct[0,
-                                 correct_candidate_start: correct_candidate_start + self.completion_length]
+            # Sample 3 random segments for the prompt.
+            # We sample start indices (0 to file_length - seg_len) without replacement.
+            if file_length - seg_len < 3:
+                continue  # not enough space to sample 3 segments
+            prompt_indices = random.sample(range(0, file_length - seg_len + 1), 3)
+            prompt_indices.sort()  # so the prompt is in order
+            prompt_segments = [tokens_correct[0, start:start + seg_len] for start in prompt_indices]
+            prompt = torch.cat(prompt_segments, dim=0)  # shape: [3 * seg_len]
+
+            # Now sample a candidate segment (the "correct" completion) that does not overlap with any prompt segments.
+            attempts = 0
+            candidate_start = None
+            while attempts < 100:
+                cand_start = random.randint(0, file_length - seg_len)
+                overlap = False
+                for start in prompt_indices:
+                    # Check if the candidate interval [cand_start, cand_start+seg_len) overlaps with [start, start+seg_len).
+                    if not (cand_start + seg_len <= start or cand_start >= start + seg_len):
+                        overlap = True
+                        break
+                if not overlap:
+                    candidate_start = cand_start
+                    break
+                attempts += 1
+            if candidate_start is None:
+                continue  # skip this sample if no candidate found
+            correct_completion = tokens_correct[0, candidate_start:candidate_start + seg_len]
 
             # ----- Sample a wrong candidate from a different file -----
             wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
             tokens_wrong = self.file_tokens[wrong_file]
-            if tokens_wrong.size(1) < self.completion_length:
+            if tokens_wrong.size(1) < seg_len:
                 continue
-            wrong_start = random.randint(0, tokens_wrong.size(1) - self.completion_length)
-            wrong_completion = tokens_wrong[0, wrong_start: wrong_start + self.completion_length]
+            wrong_start = random.randint(0, tokens_wrong.size(1) - seg_len)
+            wrong_completion = tokens_wrong[0, wrong_start:wrong_start + seg_len]
 
-            # ----- Compute log probabilities for each candidate given the prompt -----
+            # ----- Compute log probabilities given the prompt.
             logprob_correct = self.compute_completion_logprob(prompt, correct_completion)
             logprob_wrong = self.compute_completion_logprob(prompt, wrong_completion)
 
-            # ----- Forced choice: choose the candidate with the higher log probability -----
             predicted_correct = logprob_correct > logprob_wrong
             if predicted_correct:
                 correct_count += 1
             total_evaluated += 1
 
-            print(f"Sample {i + 1}:")
+            print(f"Few-shot sample {i + 1}:")
             print(f"  Correct candidate logprob: {logprob_correct:.4f}")
             print(f"  Wrong candidate   logprob: {logprob_wrong:.4f}")
             print(f"  Model choice: {'Correct' if predicted_correct else 'Wrong'}\n")
 
         if total_evaluated == 0:
-            print("No samples were evaluated. Check that your files have enough tokens.")
+            print("No few-shot samples were evaluated. Check that your files have enough tokens.")
             return 0.0
 
         accuracy = (correct_count / total_evaluated) * 100
-        print(f"Forced Choice Accuracy over {total_evaluated} samples: {accuracy:.2f}%")
+        print(f"Few-shot Forced Choice Accuracy over {total_evaluated} samples: {accuracy:.2f}%")
         return accuracy
 
 
