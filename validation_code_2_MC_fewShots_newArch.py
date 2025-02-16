@@ -437,8 +437,8 @@ def evaluate_multiclass_with_channels(
     correct_count = 0
 
     # Parameters for prompt sampling.
-    chunk_size = 172  # tokens per chunk per channel
-    num_chunks = 1 # number of chunks sampled per channel for the prompt
+    chunk_size = 86  # tokens per chunk per channel
+    num_chunks = 2 # number of chunks sampled per channel for the prompt
     # For candidate: candidate_segment_size is given (total candidate length)
     # Per-channel candidate length:
     num_channels = len(REGIONS)
