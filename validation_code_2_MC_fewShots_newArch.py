@@ -1,28 +1,32 @@
-#!/usr/bin/env python3
-import inspect
-import random
-import time
-import pickle
-from dataclasses import dataclass
-import numpy as np
-import torch
-import math
 import os
-from torch.nn import functional as F
-import matplotlib.pyplot as plt
-from torch import nn
-
-from tokenizer2 import BPE_RLE_Tokenizer as Tokenizer
-small_model = False
-tokenizer = Tokenizer()
-tokenizer.load_merges("neo_tokenizer/merges.json")
-tokenizer.load_vocab("neo_tokenizer/vocab.json")
-
-import os, glob, random
-import numpy as np
+import glob
+import random
 import torch
 import torch.nn.functional as F
+import glob
+import os
+import math
+import random
+import time
+import inspect
+from dataclasses import dataclass
+import contextlib
 
+import torch
+import torch.nn as nn
+from fontTools.unicodedata import script
+from torch.nn import functional as F
+import torch.distributed as dist
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from checkpoint_manager import save_checkpoint, load_checkpoint
+# assumed available; replace or remove if not using S3 logging
+from handle_tokenized import upload_folder_to_s3
+from plotter import LossPlotter
+
+# Assume REGIONS is defined as in your training code:
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 #########################
 # DDP Setup
 #########################
@@ -340,277 +344,188 @@ class GPT(nn.Module):
         return optimizer
 
 
+#########################
 
-# Helper: compute completion loss for one prompt–candidate pair.
-import torch
-import torch.nn.functional as F
+class ForcedChoiceClassifier:
+    def __init__(self, model, device, data_dir, sequence_length=1032):
+        """
+        Args:
+            model: A trained GPT model.
+            device: Device (e.g., 'cuda:0' or 'cpu') on which to run the model.
+            data_dir: Directory containing the .pt files.
+            sequence_length: Total sequence length (must be divisible by the number of channels).
+                             A prompt will be created from the first half.
+        """
+        self.model = model
+        self.device = device
+        self.data_dir = data_dir
+        self.sequence_length = sequence_length
+        self.prompt_length = sequence_length // 2
+        self.completion_length = sequence_length - self.prompt_length
 
+        # Find all .pt files in the provided directory.
+        self.file_paths = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
+        if not self.file_paths:
+            raise ValueError(f"No .pt files found in directory {data_dir}")
 
-def compute_completion_loss_with_channels(model, prompt_tokens, candidate_tokens, device="cuda"):
-    """
-    Given a prompt and a candidate (both already interleaved as 1D tensors),
-    compute the summed negative log-likelihood loss on the candidate tokens.
+        # Preload interleaved token sequences from each file.
+        self.file_tokens = {}
+        for path in self.file_paths:
+            self.file_tokens[path] = self.load_interleaved_tokens(path)
+        print(f"Loaded {len(self.file_tokens)} files for forced choice evaluation.")
 
-    Args:
-        model: the trained model (expects input shape [B, seq_length])
-        prompt_tokens: LongTensor of shape [prompt_length] (1D) on CPU
-        candidate_tokens: LongTensor of shape [candidate_length] (1D) on CPU
-        device: device string ("cuda" or "cpu")
-
-    Returns:
-        loss: scalar loss (float)
-    """
-    # Move tokens to the target device.
-    prompt_tokens = prompt_tokens.to(device)
-    candidate_tokens = candidate_tokens.to(device)
-
-    # Create batch dimension.
-    prompt_tokens = prompt_tokens.unsqueeze(0)  # [1, prompt_length]
-    candidate_tokens = candidate_tokens.unsqueeze(0)  # [1, candidate_length]
-
-    # Concatenate prompt and candidate tokens.
-    input_seq = torch.cat([prompt_tokens, candidate_tokens], dim=1)  # [1, total_length]
-
-    # Forward pass through the model.
-    logits, _ = model(input_seq)  # logits: [1, total_length, vocab_size]
-
-    # Compute log probabilities only for the candidate portion.
-    prompt_length = prompt_tokens.size(1)
-    candidate_logits = logits[:, prompt_length:, :]  # [1, candidate_length, vocab_size]
-    log_probs = F.log_softmax(candidate_logits, dim=-1)
-
-    # Gather the log-probabilities corresponding to the ground-truth candidate tokens.
-    token_log_probs = log_probs.gather(dim=-1, index=candidate_tokens.unsqueeze(-1)).squeeze(
-        -1)  # [1, candidate_length]
-
-    # Sum over candidate tokens to get the total log-likelihood loss.
-    loss = - token_log_probs.sum() / candidate_tokens.size(1)
-
-    return loss.item()
-
-
-REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
-
-def evaluate_multiclass_with_channels(
-        model,  # the trained model
-        shard_paths,  # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", ...])
-        device="cuda",
-        segment_size=512,  # total candidate (completion) segment size (must be divisible by num_channels)
-        prompt_stride=258  # stride used when sampling prompt/candidate offsets
-):
-    """
-    For each shard in shard_paths, we perform an evaluation block as follows:
-      - For the chosen (prompt) shard, sample a prompt by taking several random chunks
-        (here, 4 chunks of 128 tokens each) from each channel.
-      - Interleave the per–channel prompt blocks (so that the final prompt has shape
-        [num_channels * (4*128)]).
-      - Choose a correct candidate continuation from the same shard—a contiguous block
-        from each channel (so that the total candidate length equals segment_size).
-      - For every other shard, sample one candidate continuation similarly.
-      - For each candidate, compute the summed negative log–likelihood loss on the candidate tokens,
-        given the prompt.
-      - The candidate with the lowest loss is considered the model's prediction.
-      - Record the ground truth (the prompt’s shard index) and the predicted candidate’s shard index
-        in order to build a confusion matrix.
-    Returns the overall accuracy and prints the confusion matrix.
-    """
-    # Load all shards into memory.
-    shards = []
-    for path in shard_paths:
-        loaded = torch.load(path, map_location="cpu")
-        tokens_by_region = {}
+    def load_interleaved_tokens(self, file_path):
+        """
+        Loads a .pt file and returns a 1D tensor of interleaved tokens.
+        Assumes the file contains a dict with keys in REGIONS.
+        """
+        data = torch.load(file_path, map_location="cpu")
+        tokens_list = []
         for region in REGIONS:
-            if region not in loaded:
-                raise ValueError(f"Shard {path} is missing channel {region}")
-            tokens_by_region[region] = loaded[region].cpu()
-        # Assume all channels have the same length.
-        shard_length = tokens_by_region[REGIONS[0]].size(0)
-        shards.append({
-            'tokens': tokens_by_region,  # dict: region -> 1D tensor of tokens
-            'length': shard_length,
-            'path': path
-        })
-    num_shards = len(shards)
-    # Initialize confusion matrix: rows = true (prompt) shard, columns = predicted candidate shard.
-    confusion_matrix = np.zeros((num_shards, num_shards), dtype=int)
+            if region not in data:
+                raise ValueError(f"File {file_path} is missing channel {region}")
+            tokens_list.append(data[region])
+        # Check that all channels have the same length.
+        lengths = [t.numel() for t in tokens_list]
+        if len(set(lengths)) != 1:
+            raise ValueError(f"Channel lengths differ in file {file_path}")
+        L = lengths[0]
+        # Interleave tokens:
+        #   First token from each channel, then second token from each channel, etc.
+        stacked = torch.stack(tokens_list, dim=0)  # [num_channels, L]
+        interleaved = stacked.t().reshape(-1)  # [num_channels * L]
+        return interleaved
 
-    total_evals = 0
-    correct_count = 0
+    def compute_completion_logprob(self, prompt, candidate):
+        """
+        Computes the total log probability of the candidate tokens conditioned on the prompt.
+        Uses the model’s standard LM prediction (i.e. token i is predicted from tokens 0..i-1).
 
-    # Parameters for prompt sampling.
-    chunk_size = 86  # tokens per chunk per channel
-    num_chunks = 2 # number of chunks sampled per channel for the prompt
-    # For candidate: candidate_segment_size is given (total candidate length)
-    # Per-channel candidate length:
-    num_channels = len(REGIONS)
-    if segment_size % num_channels != 0:
-        raise ValueError("segment_size must be divisible by the number of channels")
-    per_channel_candidate_length = segment_size // num_channels
+        Args:
+            prompt: 1D tensor of token IDs (length = prompt_length).
+            candidate: 1D tensor of token IDs (length = completion_length).
 
-    # Evaluate using each shard as the prompt source.
-    for i, shard in enumerate(shards):
-        tokens_by_region = shard['tokens']  # dict: region -> tensor
-        len_i = shard['length']
-        # Sample prompt chunks for each channel.
-        valid_offsets = list(range(0, len_i - chunk_size + 1, prompt_stride))
-        if not valid_offsets:
-            print(f"Not enough tokens in shard {i} for a prompt. Skipping...")
-            continue
+        Returns:
+            Total log probability (a float).
+        """
+        # Concatenate prompt and candidate into one sequence and add a batch dimension.
+        full_seq = torch.cat([prompt, candidate], dim=0).unsqueeze(0).to(self.device)
+        self.model.eval()
+        with torch.no_grad():
+            logits, _ = self.model(full_seq)
+        # Let pl = prompt length, cl = candidate length.
+        pl = prompt.size(0)
+        cl = candidate.size(0)
+        # In language modeling, token at position i is predicted by the logits at position i-1.
+        # Thus, the first candidate token (at position pl) is predicted by logits at index pl-1.
+        candidate_logits = logits[0, pl - 1: pl - 1 + cl, :]  # shape: [cl, vocab_size]
+        log_probs = F.log_softmax(candidate_logits, dim=-1)
+        # Gather the log probability of each candidate token.
+        candidate = candidate.to(self.device)
+        token_log_probs = log_probs.gather(dim=-1, index=candidate.unsqueeze(-1)).squeeze(-1)
+        total_log_prob = token_log_probs.sum()
+        return total_log_prob.item()
 
-        prompt_chunks_by_region = {}
-        prompt_offsets_by_region = {}
-        for region in REGIONS:
-            # Sample num_chunks offsets (with replacement) from valid offsets.
-            offsets = random.choices(valid_offsets, k=num_chunks)
-            prompt_offsets_by_region[region] = offsets
-            # For each offset, extract a chunk of size chunk_size.
-            chunks = [tokens_by_region[region][off: off + chunk_size] for off in offsets]
-            # Concatenate chunks for this region.
-            prompt_chunks_by_region[region] = torch.cat(chunks, dim=0)  # shape: [num_chunks*chunk_size]
+    def evaluate(self, num_samples=100):
+        """
+        Runs forced choice evaluation for a given number of samples.
+        For each sample:
+          - Randomly select a file and a starting position.
+          - Create a prompt (first half) and the "correct" completion (immediately following the prompt).
+          - Sample a "wrong" completion from a different file.
+          - Compute log likelihoods for both candidates.
+          - Count the example as correct if the correct candidate has a higher log probability.
 
-        # Interleave the per-channel prompt blocks.
-        # Stack per-channel prompts into tensor of shape [num_channels, num_chunks*chunk_size]
-        prompt_stack = torch.stack([prompt_chunks_by_region[region] for region in REGIONS], dim=0)
-        # Transpose to [num_chunks*chunk_size, num_channels] then flatten to 1D.
-        prompt_interleaved = prompt_stack.transpose(0, 1).reshape(-1)
+        Args:
+            num_samples: Number of forced choice examples to evaluate.
 
-        # --- Candidate sampling for the correct candidate (from the same shard) ---
-        # For each region, define a helper to check overlap with prompt chunks.
-        def region_overlaps(candidate_offset, offsets):
-            for off in offsets:
-                # Candidate block [candidate_offset, candidate_offset+per_channel_candidate_length]
-                # overlaps with prompt chunk [off, off+chunk_size] if they are not completely separate.
-                if not (candidate_offset + per_channel_candidate_length <= off or candidate_offset >= off + chunk_size):
-                    return True
-            return False
+        Returns:
+            Accuracy (percentage of examples where the correct completion scored higher).
+        """
+        correct_count = 0
+        total_evaluated = 0
 
-        candidate_offsets_by_region = {}
-        valid_candidate_exists = True
-        for region in REGIONS:
-            valid_candidate_offsets = [
-                c for c in range(0, len_i - per_channel_candidate_length + 1, prompt_stride)
-                if not region_overlaps(c, prompt_offsets_by_region[region])
-            ]
-            if not valid_candidate_offsets:
-                print(f"No valid candidate offsets in shard {i} for region {region}. Skipping this block...")
-                valid_candidate_exists = False
-                break
-            candidate_offsets_by_region[region] = random.choice(valid_candidate_offsets)
-        if not valid_candidate_exists:
-            continue
-
-        candidate_chunks_by_region = {}
-        for region in REGIONS:
-            off = candidate_offsets_by_region[region]
-            candidate_chunks_by_region[region] = tokens_by_region[region][off: off + per_channel_candidate_length]
-        # Interleave candidate tokens.
-        candidate_stack = torch.stack([candidate_chunks_by_region[region] for region in REGIONS], dim=0)
-        candidate_interleaved = candidate_stack.transpose(0, 1).reshape(-1)  # shape: [segment_size]
-
-        # Build candidate_info list. First candidate is the correct one.
-        candidate_info = []
-        candidate_info.append({
-            'tokens': candidate_interleaved,
-            'source_shard': i,
-            'label': 'correct'
-        })
-        # --- For every other shard, sample one candidate continuation. ---
-        for j, other_shard in enumerate(shards):
-            if j == i:
+        for i in range(num_samples):
+            # ----- Sample a correct example from one file -----
+            correct_file = random.choice(self.file_paths)
+            tokens_correct = self.file_tokens[correct_file]
+            total_length = tokens_correct.numel()
+            if total_length < self.sequence_length:
+                # Skip if this file is too short.
                 continue
-            len_j = other_shard['length']
-            tokens_by_region_j = other_shard['tokens']
-            candidate_chunks_j = {}
-            for region in REGIONS:
-                off = random.randint(0, len_j - per_channel_candidate_length)
-                candidate_chunks_j[region] = tokens_by_region_j[region][off: off + per_channel_candidate_length]
-            candidate_stack_j = torch.stack([candidate_chunks_j[region] for region in REGIONS], dim=0)
-            candidate_interleaved_j = candidate_stack_j.transpose(0, 1).reshape(-1)
-            candidate_info.append({
-                'tokens': candidate_interleaved_j,
-                'source_shard': j,
-                'label': 'wrong'
-            })
+            # Choose a random start index so that we can extract a full sequence.
+            max_start = total_length - self.sequence_length
+            start = random.randint(0, max_start)
+            prompt = tokens_correct[start: start + self.prompt_length]
+            correct_completion = tokens_correct[start + self.prompt_length: start + self.sequence_length]
 
-        # Evaluate each candidate using the helper.
-        candidate_losses = []
-        for candidate in candidate_info:
-            loss = compute_completion_loss_with_channels(model, prompt_interleaved, candidate['tokens'], device=device)
-            candidate_losses.append(loss)
-        # The candidate with the lowest loss is chosen.
-        min_loss_index = np.argmin(candidate_losses)
-        chosen = candidate_info[min_loss_index]
-        predicted_shard = chosen['source_shard']
-        confusion_matrix[i, predicted_shard] += 1
-        if chosen['label'] == 'correct':
-            correct_count += 1
-        total_evals += 1
+            # ----- Sample a wrong candidate from a different file -----
+            wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
+            tokens_wrong = self.file_tokens[wrong_file]
+            total_length_wrong = tokens_wrong.numel()
+            if total_length_wrong < self.completion_length:
+                continue
+            wrong_start = random.randint(0, total_length_wrong - self.completion_length)
+            wrong_completion = tokens_wrong[wrong_start: wrong_start + self.completion_length]
 
-        print(f"[Shard {i}] Candidate losses: {candidate_losses}")
-        print(
-            f" -> Correct candidate loss: {candidate_losses[0]:.4f} vs. others: {[f'{l:.4f}' for l in candidate_losses[1:]]}")
-        print(f" -> Model selected candidate from shard {predicted_shard} (label: {chosen['label']})")
+            # ----- Compute log probabilities for each candidate given the prompt -----
+            logprob_correct = self.compute_completion_logprob(prompt, correct_completion)
+            logprob_wrong = self.compute_completion_logprob(prompt, wrong_completion)
 
-    if total_evals == 0:
-        print("No evaluations were performed (possibly not enough tokens in the shards).")
-        return 0.0
+            # ----- Forced choice: choose the candidate with the higher log probability -----
+            predicted_correct = logprob_correct > logprob_wrong
+            if predicted_correct:
+                correct_count += 1
+            total_evaluated += 1
 
-    accuracy = correct_count / total_evals
-    print(f"\n[Multi-class Evaluation] Final Accuracy = {correct_count}/{total_evals} = {accuracy:.4f}")
-    print("\nConfusion Matrix (rows: true prompt shard, columns: predicted candidate shard):")
-    header = "      " + " ".join([f"Shd{j}" for j in range(num_shards)])
-    print(header)
-    for i in range(num_shards):
-        row = " ".join([f"{confusion_matrix[i, j]:5d}" for j in range(num_shards)])
-        print(f"Shd{i}: {row}")
-    return accuracy
+            print(f"Sample {i + 1}:")
+            print(f"  Correct candidate logprob: {logprob_correct:.4f}")
+            print(f"  Wrong candidate   logprob: {logprob_wrong:.4f}")
+            print(f"  Model choice: {'Correct' if predicted_correct else 'Wrong'}\n")
+
+        if total_evaluated == 0:
+            print("No samples were evaluated. Check that your files have enough tokens.")
+            return 0.0
+
+        accuracy = (correct_count / total_evaluated) * 100
+        print(f"Forced Choice Accuracy over {total_evaluated} samples: {accuracy:.2f}%")
+        return accuracy
 
 
-import os
-import torch
-import numpy as np
+# -------------------------------------------
+# Example usage:
+# (This snippet assumes you have already instantiated and/or trained your GPT model.)
+# -------------------------------------------
 
-# Set device.
-d = 'cuda'
-device = torch.device(d)
+if __name__ == "__main__":
+    # For evaluation, use the raw model (if using DDP, use model.module)
+    # Here, 'model' is assumed to be the trained GPT model (or DDP-wrapped version).
+    # Replace with your actual model variable if different.
+    # Specify the checkpoint file path (adjust as needed)
+    checkpoint_path = os.path.join("./checkpoints", "model_06000.pt")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load the checkpoint.
-checkpoint = torch.load('checkpoints/model_06000.pt', map_location=device)
+    model, optimizer, config, step, val_loss = load_checkpoint(checkpoint_path,device=device)
 
-# The checkpoint's 'config' is already a GPTConfig instance.
-config = checkpoint['config']
+    try:
+        model_for_eval = model.module if hasattr(model, "module") else model
+    except NameError:
+        raise RuntimeError("The GPT model is not defined. Make sure you have trained/loaded your model.")
 
-# Instantiate the model with the loaded config.
-model = GPT(config).to(device)
+    # Set the model to evaluation mode.
+    model_for_eval.eval()
 
-# Load the state dict.
-orig_sd = checkpoint['model_state_dict']  # note: new key name from save_checkpoint
-fixed_sd = {}
-for k, v in orig_sd.items():
-    # Fix key names if necessary.
-    new_key = k.replace("_orig_mod.", "")
-    fixed_sd[new_key] = v
-model.load_state_dict(fixed_sd, strict=True)
+    # Set device (should be the same used during training)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Set the model's configuration attribute to the loaded config.
-model.config = config
-
-model.eval()
-
-# Example: Evaluate over 10 epochs using three shards.
-accs = []
-epochs = 10
-shard_paths = glob.glob("local_shards_val/*.pt")
-for epoch in range(epochs):
-    print(f"\n=== Epoch {epoch+1}/{epochs} ===")
-    acc = evaluate_multiclass_with_channels(
-        model=model,
-        shard_paths=sorted(shard_paths),
-        device=d,
-        segment_size=1032//2
+    # Instantiate the forced-choice classifier.
+    # Here we assume the token shards are in "./local_shards" (adjust as needed).
+    fc_classifier = ForcedChoiceClassifier(
+        model=model_for_eval,
+        device=device,
+        data_dir="./local_shards",
+        sequence_length=1032
     )
-    accs.append(acc)
 
-mean_acc = np.mean(accs)
-print(f"\nMean Accuracy over {epochs} epochs: {mean_acc}")
-print(f"Accuracies per epoch: {accs}")
+    # Run forced-choice evaluation over a desired number of samples.
+    fc_classifier.evaluate(num_samples=10)
