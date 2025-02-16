@@ -595,7 +595,7 @@ for epoch in range(epochs):
             "local_shards_val/mydata_train_2.pt"
         ],
         device=d,
-        segment_size=512  # candidate continuation remains 512 tokens total
+        segment_size=1032//2  # candidate continuation remains 512 tokens total
     )
     accs.append(acc)
 
