@@ -365,6 +365,7 @@ class ForcedChoiceClassifier:
 
         # Find all .pt files in the provided directory.
         self.file_paths = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
+        random.shuffle(self.file_paths)
         if not self.file_paths:
             raise ValueError(f"No .pt files found in directory {data_dir}")
 
