@@ -67,6 +67,8 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, device="cpu"):
     """
     Loads a checkpoint and restores the model (and optionally the optimizer).
 
+    This version strips the "_orig_mod." prefix from state dict keys if present.
+
     Args:
         checkpoint_path (str): Path to the checkpoint file.
         model (torch.nn.Module): The model to load the state into.
@@ -77,8 +79,20 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, device="cpu"):
         checkpoint (dict): The loaded checkpoint dictionary.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint['model_state_dict']
 
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Remove the '_orig_mod.' prefix if it exists.
+    new_state_dict = {}
+    prefix = "_orig_mod."
+    for key, value in state_dict.items():
+        if key.startswith(prefix):
+            new_key = key[len(prefix):]
+        else:
+            new_key = key
+        new_state_dict[new_key] = value
+
+    # Load the modified state dict.
+    model.load_state_dict(new_state_dict)
     print(f"Model state loaded from {checkpoint_path}")
 
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
