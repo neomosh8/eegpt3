@@ -434,17 +434,10 @@ class ForcedChoiceClassifier:
         return interleaved.unsqueeze(0)
 
     def compute_completion_logprob(self, prompt, candidate):
-        """
-        Computes the total log probability of the candidate tokens conditioned on the prompt.
-        Uses the model’s standard LM prediction (i.e. token i is predicted from tokens 0..i-1).
+        # Ensure both prompt and candidate are 1D
+        prompt = prompt.view(-1)
+        candidate = candidate.view(-1)
 
-        Args:
-            prompt: 1D tensor of token IDs (length = prompt_length).
-            candidate: 1D tensor of token IDs (length = completion_length).
-
-        Returns:
-            Total log probability (a float).
-        """
         # Concatenate prompt and candidate into one sequence and add a batch dimension.
         full_seq = torch.cat([prompt, candidate], dim=0).unsqueeze(0).to(self.device)
         self.model.eval()
@@ -486,24 +479,24 @@ class ForcedChoiceClassifier:
             # ----- Sample a correct example from one file -----
             correct_file = random.choice(self.file_paths)
             tokens_correct = self.file_tokens[correct_file]
-            total_length = tokens_correct.numel()
+            total_length = tokens_correct.numel()  # tokens_correct is [1, T_total]
             if total_length < self.sequence_length:
                 # Skip if this file is too short.
                 continue
             # Choose a random start index so that we can extract a full sequence.
-            max_start = total_length - self.sequence_length
+            max_start = tokens_correct.size(1) - self.sequence_length
             start = random.randint(0, max_start)
+            # Index the first (and only) batch element so that prompt and completion are 1D tensors.
             prompt = tokens_correct[0, start: start + self.prompt_length]
             correct_completion = tokens_correct[0, start + self.prompt_length: start + self.sequence_length]
 
             # ----- Sample a wrong candidate from a different file -----
             wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
             tokens_wrong = self.file_tokens[wrong_file]
-            total_length_wrong = tokens_wrong.numel()
-            if total_length_wrong < self.completion_length:
+            if tokens_wrong.size(1) < self.completion_length:
                 continue
-            wrong_start = random.randint(0, total_length_wrong - self.completion_length)
-            wrong_completion = tokens_wrong[wrong_start: wrong_start + self.completion_length]
+            wrong_start = random.randint(0, tokens_wrong.size(1) - self.completion_length)
+            wrong_completion = tokens_wrong[0, wrong_start: wrong_start + self.completion_length]
 
             # ----- Compute log probabilities for each candidate given the prompt -----
             logprob_correct = self.compute_completion_logprob(prompt, correct_completion)
