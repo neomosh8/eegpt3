@@ -167,4 +167,4 @@ if __name__ == "__main__":
                                local_data_dir=LOCAL_DIR,
                                shard_prefix="mydata",
                                limit_files=None,
-                               val_ratio=0.1)
+                               val_ratio=0)

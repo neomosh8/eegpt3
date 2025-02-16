@@ -312,7 +312,7 @@ def process_csv_file_s3(csv_key: str,
         for region in ["frontal", "motor_temporal", "parietal_occipital"]:
             token_fname = f"{base_name}_quantized_coeffs_{region}.txt"
             fpath = os.path.join(local_dir, token_fname)
-            s3.upload_file(fpath, bucket, f"{output_prefix}_emotiv/{token_fname}")
+            s3.upload_file(fpath, bucket, f"{output_prefix}/{token_fname}")
             os.remove(fpath)
     os.remove(local_csv)
     return folder, base_name, token_count, skipped, reason
