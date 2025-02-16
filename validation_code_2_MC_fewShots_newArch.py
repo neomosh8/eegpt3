@@ -423,7 +423,7 @@ def evaluate_multiclass_with_channels(
                 raise ValueError(f"Shard {path} is missing channel {region}")
             tokens_by_region[region] = loaded[region].cpu()
         # Assume all channels have the same length.
-        shard_length =3* tokens_by_region[REGIONS[0]].size(0)
+        shard_length = tokens_by_region[REGIONS[0]].size(0)
         shards.append({
             'tokens': tokens_by_region,  # dict: region -> 1D tensor of tokens
             'length': shard_length,
