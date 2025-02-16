@@ -541,21 +541,21 @@ if __name__ == "__main__":
     # Using model.configure_optimizer(...) so that parameter groups match.
     optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
-    # Specify the path to the checkpoint file you want to load.
-    checkpoint_path = "./checkpoints/model_06000.pt"  # Update the filename as needed.
+    # # Specify the path to the checkpoint file you want to load.
+    # checkpoint_path = "./checkpoints/model_06000.pt"  # Update the filename as needed.
+    #
+    # # Load the checkpoint.
+    # checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
+    #
+    # # Fix the keys in the state_dict by removing the '_orig_mod.' prefix.
+    # orig_sd = checkpoint['model_state_dict']
+    # fixed_sd = {}
+    # for k, v in orig_sd.items():
+    #     new_key = k.replace("_orig_mod.", "")
+    #     fixed_sd[new_key] = v
+    # model.load_state_dict(fixed_sd, strict=True)
 
-    # Load the checkpoint.
-    checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
-
-    # Fix the keys in the state_dict by removing the '_orig_mod.' prefix.
-    orig_sd = checkpoint['model_state_dict']
-    fixed_sd = {}
-    for k, v in orig_sd.items():
-        new_key = k.replace("_orig_mod.", "")
-        fixed_sd[new_key] = v
-    model.load_state_dict(fixed_sd, strict=True)
-
-    print(f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+    # print(f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
 
     # If using DDP, unwrap the model (for now, we assume a non-DDP setting).
     model_for_eval = model  # or model.module if using DDP
