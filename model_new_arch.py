@@ -469,6 +469,8 @@ num_passes = 5
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
 steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
 max_steps = num_passes * steps_per_pass
+print(f"Total tokens in training set for {ddp_local_rank}: {train_loader.total_len}")
+
 if master_process:
     print(f"Total tokens in training set: {train_loader.total_len}")
     print(f"Steps per pass: {steps_per_pass}")
