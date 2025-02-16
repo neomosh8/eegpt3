@@ -487,18 +487,8 @@ class ForcedChoiceClassifier:
             max_start = tokens_correct.size(1) - self.sequence_length
             start = random.randint(0, max_start)
             # Index the first (and only) batch element so that prompt and completion are 1D tensors.
-            # Sample prompt as before.
             prompt = tokens_correct[0, start: start + self.prompt_length]
-
-            # Determine a candidate starting index that does not overlap with the prompt.
-            max_candidate_start = tokens_correct.size(1) - self.completion_length
-            while True:
-                candidate_start = random.randint(0, max_candidate_start)
-                # Check for overlap with prompt region.
-                # Here, we assume the prompt is taken from 'start' to 'start + self.prompt_length'.
-                if candidate_start + self.completion_length <= start or candidate_start >= start + self.prompt_length:
-                    break
-            correct_completion = tokens_correct[0, candidate_start: candidate_start + self.completion_length]
+            correct_completion = tokens_correct[0, start + self.prompt_length: start + self.sequence_length]
 
             # ----- Sample a wrong candidate from a different file -----
             wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
