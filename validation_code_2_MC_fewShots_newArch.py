@@ -605,8 +605,8 @@ for epoch in range(epochs):
         model=model,
         shard_paths=[
             "local_shards_val/mydata_train_0.pt",
-            "local_shards_val/mydata_train_1.pt",
-            "local_shards_val/mydata_train_20.pt"
+            "local_shards_val/mydata_train_9.pt",
+            "local_shards_val/mydata_train_18.pt"
         ],
         device=d,
         segment_size=1032//2  # candidate continuation remains 512 tokens total
