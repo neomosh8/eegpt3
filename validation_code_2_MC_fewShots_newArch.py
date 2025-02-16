@@ -487,8 +487,14 @@ class ForcedChoiceClassifier:
             max_start = tokens_correct.size(1) - self.sequence_length
             start = random.randint(0, max_start)
             # Index the first (and only) batch element so that prompt and completion are 1D tensors.
+            # Sample prompt as before.
             prompt = tokens_correct[0, start: start + self.prompt_length]
-            correct_completion = tokens_correct[0, start + self.prompt_length: start + self.sequence_length]
+
+            # Now, sample a random starting index for the correct candidate from the same file.
+            max_candidate_start = tokens_correct.size(1) - self.completion_length
+            correct_candidate_start = random.randint(0, max_candidate_start)
+            correct_completion = tokens_correct[0,
+                                 correct_candidate_start: correct_candidate_start + self.completion_length]
 
             # ----- Sample a wrong candidate from a different file -----
             wrong_file = random.choice([fp for fp in self.file_paths if fp != correct_file])
