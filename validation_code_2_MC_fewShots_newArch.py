@@ -384,7 +384,8 @@ def compute_completion_loss_with_channels(model, prompt_tokens, candidate_tokens
         -1)  # [1, candidate_length]
 
     # Sum over candidate tokens to get the total log-likelihood loss.
-    loss = - token_log_probs.sum()
+    loss = - token_log_probs.sum() / candidate_tokens.size(1)
+
     return loss.item()
 
 
