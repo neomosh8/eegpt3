@@ -387,7 +387,7 @@ class DataLoaderLiteAllInMemory:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
         # Assume all channels have the same total length.
-        self.total_len = self.num_channels * len(self.tokens[REGIONS[0]])
+        self.total_len =  len(self.tokens[REGIONS[0]])
         # Starting position is offset by process_rank.
         self.current_position = self.B * self.per_channel_length * self.process_rank
 
