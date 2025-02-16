@@ -573,4 +573,4 @@ if __name__ == "__main__":
     )
 
     # Run forced-choice evaluation over a desired number of samples.
-    fc_classifier.evaluate(num_samples=100)
+    fc_classifier.evaluate(num_samples=1000)
