@@ -455,7 +455,11 @@ def calculate_sps(csv_file_path):
     df = pd.read_csv(csv_file_path)
 
     # Extract the 'timestamp' column into a NumPy array
-    timestamps = df['timestamp'].values
+    try:
+        timestamps = df['timestamp'].values
+    except:
+        timestamps = df['TimeStamp'].values
+
 
     # Option A: Compute the mean difference between consecutive timestamps
     avg_dt = np.mean(np.diff(timestamps))  # average time-step (seconds)
