@@ -568,7 +568,7 @@ if __name__ == "__main__":
     fc_classifier = ForcedChoiceClassifier(
         model=model_for_eval,
         device=device,
-        data_dir="./local_shards_val",
+        data_dir="./local_shards",
         sequence_length=1032
     )
 
