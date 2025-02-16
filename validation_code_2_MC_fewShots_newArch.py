@@ -551,18 +551,33 @@ def evaluate_multiclass_with_channels(
     return accuracy
 
 
-# === Main script ===
+import os
+import torch
+import numpy as np
+
+# Assuming GPTConfig and GPT have been imported from your model code.
+# Also assuming evaluate_multiclass_with_channels is defined.
+
+# Set device.
 d = 'cuda'
 device = torch.device(d)
-model = GPT(GPTConfig).to(device)
+
+# Load checkpoint to retrieve configuration.
 checkpoint = torch.load('checkpoints/model_06000.pt', map_location=device, weights_only=False)
+# Create a config instance from the checkpoint config (assumed to be a dict).
+config = GPTConfig(**checkpoint['config'])
+# Instantiate the model using the config.
+model = GPT(config).to(device)
+
+# Fix state_dict keys (e.g. remove any legacy prefix).
 orig_sd = checkpoint['model']
 fixed_sd = {}
 for k, v in orig_sd.items():
     new_key = k.replace("_orig_mod.", "")
     fixed_sd[new_key] = v
+
+# Load the fixed state_dict.
 model.load_state_dict(fixed_sd, strict=True)
-model.config(checkpoint['config'])
 model.eval()
 
 # Example: Evaluate over 10 epochs using three shards.
@@ -578,9 +593,10 @@ for epoch in range(epochs):
             "local_shards_val/mydata_train_2.pt"
         ],
         device=d,
-        segment_size=512  # candidate continuation remains 512 tokens
+        segment_size=512  # candidate continuation remains 512 tokens (total; will be divided across channels)
     )
     accs.append(acc)
-mean = np.mean(accs)
-print(f"\nMean Accuracy over {epochs} epochs: {mean}")
+
+mean_acc = np.mean(accs)
+print(f"\nMean Accuracy over {epochs} epochs: {mean_acc}")
 print(f"Accuracies per epoch: {accs}")
