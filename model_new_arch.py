@@ -387,7 +387,7 @@ class DataLoaderLiteAllInMemory:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
         # Assume all channels have the same total length.
-        self.total_len = len(self.tokens[REGIONS[0]])
+        self.total_len = self.num_channels * len(self.tokens[REGIONS[0]])
         # Starting position is offset by process_rank.
         self.current_position = self.B * self.per_channel_length * self.process_rank
 
@@ -433,14 +433,7 @@ class DataLoaderLiteAllInMemory:
         x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
         y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
 
-        # Swap the time and channel dimensions so each channel's tokens are contiguous.
-        # New shape becomes [B, num_channels, L]
-        x_swapped = x_stacked.transpose(1, 2)
-        y_swapped = y_stacked.transpose(1, 2)
 
-        # Flatten the swapped tensors to get the final shape [B, T_total]
-        # x_combined = x_swapped.reshape(B, self.num_channels * L)
-        # y_combined = y_swapped.reshape(B, self.num_channels * L)
         x_combined = x_stacked.reshape(B, self.num_channels * L)
         y_combined = y_stacked.reshape(B, self.num_channels * L)
 
