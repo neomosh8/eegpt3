@@ -44,8 +44,7 @@ def average_eeg_channels(df, channels_to_drop):
     compute overall left/right averages based solely on the ending digit.
     Returns (left_data, right_data)
     """
-    # filtered_columns = [col for col in df.columns if col not in channels_to_drop]
-    filtered_columns = [col for col in df.columns if col.lower() not in [c.lower() for c in channels_to_drop]]# for emotiv
+    filtered_columns = [col for col in df.columns if col not in channels_to_drop]
 
     left_channels = []
     right_channels = []
@@ -152,7 +151,6 @@ def generate_quantized_files_local(csv_file: str,
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
     try:
         df = pd.read_csv(csv_file)
-        df.columns = df.columns.str.lower()
         all_columns = list(df.columns)
         instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
         if instructions.get("action") == "skip":
