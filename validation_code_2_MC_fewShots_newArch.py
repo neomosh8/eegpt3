@@ -606,7 +606,7 @@ for epoch in range(epochs):
         model=model,
         shard_paths=sorted(shard_paths),
         device=d,
-        segment_size=1032
+        segment_size=1032//2
     )
     accs.append(acc)
 
