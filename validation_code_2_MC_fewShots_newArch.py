@@ -395,7 +395,7 @@ def evaluate_multiclass_with_channels(
         shard_paths,  # list of shard file paths (e.g., ["shard_train_0.pt", "shard_train_1.pt", ...])
         device="cuda",
         segment_size=512,  # total candidate (completion) segment size (must be divisible by num_channels)
-        prompt_stride=256  # stride used when sampling prompt/candidate offsets
+        prompt_stride=258  # stride used when sampling prompt/candidate offsets
 ):
     """
     For each shard in shard_paths, we perform an evaluation block as follows:
