@@ -498,15 +498,26 @@ class ForcedChoiceClassifier:
 # -------------------------------------------
 
 if __name__ == "__main__":
-    # For evaluation, use the raw model (if using DDP, use model.module)
-    # Here, 'model' is assumed to be the trained GPT model (or DDP-wrapped version).
-    # Replace with your actual model variable if different.
-    # Specify the checkpoint file path (adjust as needed)
-    checkpoint_path = os.path.join("./checkpoints", "model_06000.pt")
+    # Set the device.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model, optimizer, config, step, val_loss = load_checkpoint(checkpoint_path,device=device)
+    # Instantiate the model and move it to the correct device.
+    config = GPTConfig()  # Ensure this configuration matches the one used during training.
+    model = GPT(config)
+    model.to(device)
 
+    # Create an optimizer that matches the one used during training.
+    # (Ensure hyperparameters like learning rate are the same.)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4)
+
+    # Specify the path to the checkpoint file you want to load.
+    checkpoint_path = "./checkpoints/model_00010.pt"  # Update the filename as needed.
+
+    # Load the checkpoint.
+    checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
+
+    print(
+        f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
     try:
         model_for_eval = model.module if hasattr(model, "module") else model
     except NameError:
