@@ -508,8 +508,8 @@ if __name__ == "__main__":
     base_lr = 6e-4
 
     # Create an optimizer that matches the one used during training.
-    # (Ensure hyperparameters like learning rate are the same.)
-    optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
+    # Using model.configure_optimizer(...) so that parameter groups match.
+    optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
     # Specify the path to the checkpoint file you want to load.
     checkpoint_path = "./checkpoints/model_06000.pt"  # Update the filename as needed.
@@ -527,11 +527,8 @@ if __name__ == "__main__":
 
     print(f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
 
-    # If using DDP, unwrap the model.
-    try:
-        model_for_eval = model.module if hasattr(model, "module") else model
-    except NameError:
-        raise RuntimeError("The GPT model is not defined. Make sure you have trained/loaded your model.")
+    # If using DDP, unwrap the model (for now, we assume a non-DDP setting).
+    model_for_eval = model  # or model.module if using DDP
 
     # Set the model to evaluation mode.
     model_for_eval.eval()
