@@ -599,17 +599,14 @@ model.eval()
 # Example: Evaluate over 10 epochs using three shards.
 accs = []
 epochs = 10
+shard_paths = glob.glob("local_shards_val/*.pt")
 for epoch in range(epochs):
     print(f"\n=== Epoch {epoch+1}/{epochs} ===")
     acc = evaluate_multiclass_with_channels(
         model=model,
-        shard_paths=[
-            "local_shards_val/mydata_train_0.pt",
-            "local_shards_val/mydata_train_9.pt",
-            "local_shards_val/mydata_train_18.pt"
-        ],
+        shard_paths=sorted(shard_paths),
         device=d,
-        segment_size=1032//2  # candidate continuation remains 512 tokens total
+        segment_size=1032//2
     )
     accs.append(acc)
 
