@@ -152,7 +152,8 @@ def generate_quantized_files_local(csv_file: str,
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
     try:
         df = pd.read_csv(csv_file)
-        all_columns = list(df.columns).str.lower()
+        df.columns = df.columns.str.lower()
+        all_columns = list(df.columns)
         instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
         if instructions.get("action") == "skip":
             print(f"Skipping dataset '{base_name}' as instructed by GPT.")
