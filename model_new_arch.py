@@ -241,79 +241,69 @@ class GPT(nn.Module):
         """
         Args:
             idx: [B, num_channels, time_steps] token IDs.
-            targets: [B, num_channels, time_steps] with different target tokens for each channel.
+            targets: [B, num_channels] with the target token for each channel
+                     (the token immediately following the input sequence).
         Returns:
-            logits: [B, num_channels, time_steps, vocab_size]
+            logits: [B, num_channels, vocab_size] — prediction for the next token per channel.
             loss: cross-entropy loss if targets is provided, else None.
         """
-        # Unpack dimensions. Here, C should equal self.config.num_channels.
+        # Unpack dimensions.
         B, C, T = idx.size()
         assert C == self.config.num_channels, f"Expected {self.config.num_channels} channels, but got {C}"
-        time_steps = T  # now T is the number of time steps per channel
+        time_steps = T  # number of time steps per channel
 
-        # 1. Token Embeddings and Reshape:
-        # The embedding layer now accepts [B, num_channels, time_steps] and returns [B, num_channels, time_steps, n_embd].
-        tok_emb = self.transformer.wte(idx)  # shape: [B, num_channels, time_steps, n_embd]
-        # Transpose to get time as the second dimension: [B, time_steps, num_channels, n_embd]
-        tok_emb = tok_emb.transpose(1, 2)
+        # 1. Token Embedding and Reshape:
+        # The embedding layer now expects [B, num_channels, time_steps] and returns [B, num_channels, time_steps, n_embd]
+        tok_emb = self.transformer.wte(idx)  # [B, num_channels, time_steps, n_embd]
+        tok_emb = tok_emb.transpose(1, 2)  # -> [B, time_steps, num_channels, n_embd]
         x = tok_emb  # [B, time_steps, num_channels, n_embd]
 
-        # 2. Add Positional Embeddings (applied along the time dimension):
-        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # shape: [1, time_steps]
-        pos_emb = self.transformer.wpe(pos)  # shape: [1, time_steps, n_embd]
-        # Broadcast positional embeddings across channels:
-        x = x + pos_emb.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
+        # 2. Add Positional Embeddings (along the time dimension):
+        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # [1, time_steps]
+        pos_emb = self.transformer.wpe(pos)  # [1, time_steps, n_embd]
+        x = x + pos_emb.unsqueeze(2)  # broadcast -> [B, time_steps, num_channels, n_embd]
 
-        # (Optional) Add a learnable channel embedding if desired.
+        # (Optional) Add channel embeddings if desired.
         # For example:
         # channel_ids = torch.arange(self.config.num_channels, device=x.device).unsqueeze(0).unsqueeze(0)
         # channel_emb = self.channel_embedding(channel_ids)  # [1, 1, num_channels, n_embd]
         # x = x + channel_emb
 
         # 3. Per-Channel Encoding:
-        # Process each channel independently via its dedicated encoder.
         channel_outs = []
         for c in range(self.config.num_channels):
-            # Extract channel c: [B, time_steps, n_embd]
-            x_c = x[:, :, c, :]
-            # Process with the per-channel encoder (a sequence of blocks)
-            x_c = self.channel_encoder[c](x_c)
+            x_c = x[:, :, c, :]  # Extract channel c: [B, time_steps, n_embd]
+            x_c = self.channel_encoder[c](x_c)  # Process with that channel's encoder (3 blocks)
             channel_outs.append(x_c)
-        # Stack the processed channels back: [B, time_steps, num_channels, n_embd]
+        # Stack channels back: [B, time_steps, num_channels, n_embd]
         x = torch.stack(channel_outs, dim=2)
 
         # 4. Cross-Channel Fusion:
-        # This module expects input [B, time_steps, num_channels, n_embd] and outputs fused features per time step.
-        fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
-
-        # Add the fused representation back to the per-channel features.
-        # Broadcast fused (which is [B, time_steps, n_embd]) along the channel dimension.
+        # This module expects input of shape [B, time_steps, num_channels, n_embd]
+        # and outputs a fused representation per time step: [B, time_steps, n_embd]
+        fused = self.cross_channel_fusion(x)
+        # Broadcast the fused representation across channels and add it.
         x = x + fused.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
 
-        # 5. Final Transformer Blocks with Causal Masking Per Channel:
-        # Transpose to separate channels: [B, num_channels, time_steps, n_embd]
-        x = x.transpose(1, 2)
-        # Get new dimensions and merge B and channels:
-        B, C, T, E = x.size()  # Here, C == num_channels
-        x = x.reshape(B * C, T, E)  # Each channel is processed independently.
-
-        # Process with the final transformer blocks.
+        # 5. Final Transformer Blocks with Causal Masking (process each channel separately):
+        # Rearrange to process each channel's time sequence independently.
+        x = x.transpose(1, 2)  # -> [B, num_channels, time_steps, n_embd]
+        B, C, T, E = x.size()
+        x = x.reshape(B * C, T, E)  # -> [B * num_channels, time_steps, n_embd]
         for block in self.transformer.h:
             x = block(x)
-        x = self.transformer.ln_f(x)
+        x = self.transformer.ln_f(x)  # -> [B * num_channels, time_steps, n_embd]
 
-        # 6. Compute Language Modeling Logits:
-        logits = self.lm_head(x)  # [B * num_channels, time_steps, vocab_size]
-        # Reshape back to [B, num_channels, time_steps, vocab_size]
-        logits = logits.view(B, C, T, -1)
+        # 6. Use only the last time step's representation for next-token prediction.
+        x_last = x[:, -1, :]  # [B * num_channels, n_embd]
+        logits = self.lm_head(x_last)  # [B * num_channels, vocab_size]
+        logits = logits.view(B, C, -1)  # Reshape to [B, num_channels, vocab_size]
 
-        # 7. Compute Loss if Targets are Provided:
+        # 7. Compute Loss:
+        loss = None
         if targets is not None:
-            # Expecting targets of shape [B, num_channels, time_steps]
+            # targets should be of shape [B, num_channels]
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        else:
-            loss = None
-
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
