@@ -359,15 +359,6 @@ class GPT(nn.Module):
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 
-import os
-import glob
-import random
-import torch
-
-# For this example, we assume that REGIONS is defined globally.
-# It lists the names of the channels present in each shard.
-REGIONS = ["channel1", "channel2", "channel3"]
-
 class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
