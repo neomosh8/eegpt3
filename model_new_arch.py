@@ -410,8 +410,21 @@ class DataLoaderLiteAllInMemory:
         for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu")
             for region in REGIONS:
+                # Instead of raising an error, handle the missing region gracefully.
                 if region not in loaded:
-                    raise ValueError(f"Shard {shard_path} is missing channel {region}")
+                    available_regions = list(loaded.keys())
+                    if available_regions:
+                        # Choose the first available region as a substitute.
+                        alternative_region = available_regions[0]
+                        print(
+                            f"Warning: Shard {shard_path} is missing channel {region}. Using channel {alternative_region} as a replacement.")
+                        # Copy the data from the available region.
+                        loaded[region] = loaded[alternative_region]
+                    else:
+                        # If no region is available at all, then raise an error.
+                        raise ValueError(
+                            f"Shard {shard_path} does not contain any channels to copy from for missing channel {region}")
+
                 self.tokens[region].append(loaded[region])
         # Concatenate tokens for each channel along dimension 0.
         for region in REGIONS:
