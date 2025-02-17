@@ -491,7 +491,7 @@ class DataLoaderLiteAllInMemory:
         self.ptr = self.start_ptr
 
     @property
-    def total_tokens(self):
+    def total_len(self):
         """
         Returns the total number of tokens for one channel.
         Assumes all channels have the same length.
