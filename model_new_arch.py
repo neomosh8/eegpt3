@@ -352,7 +352,12 @@ class DataLoaderLiteAllInMemory:
     then extracts contiguous blocks per channel (of length per_channel_length)
     and interleaves them so that the final tensor has shape [B, T_total],
     where T_total (e.g., 1032) is divisible by the number of channels.
+
+    Incorporates multi–process logic:
+      - Each process starts at an offset: B * per_channel_length * process_rank.
+      - After producing a batch, the pointer advances by B * per_channel_length * num_processes.
     """
+
     def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
                  local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
                  split: str = "train", shuffle_shards: bool = False):
@@ -370,7 +375,9 @@ class DataLoaderLiteAllInMemory:
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
         self.shard_files = sorted(glob.glob(pattern))
         if not self.shard_files:
-            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
+            raise ValueError(
+                f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_"
+            )
         if shuffle_shards:
             random.shuffle(self.shard_files)
 
@@ -387,18 +394,22 @@ class DataLoaderLiteAllInMemory:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
         # Assume all channels have the same total length.
-        self.total_len =  len(self.tokens[REGIONS[0]])
-        # Starting position is offset by process_rank.
-        self.current_position = self.B * self.per_channel_length * self.process_rank
+        self.total_len = len(self.tokens[REGIONS[0]])
+        self.reset()
 
     @property
     def total_length(self):
         """Return the total number of tokens per channel."""
         return self.total_len
 
+    def reset(self):
+        # Start at an offset that depends on the process rank.
+        self.current_position = self.B * self.per_channel_length * self.process_rank
+
     def next_batch(self):
         """
         For each channel, extract a contiguous block of tokens and then interleave them.
+
         Returns:
             x: tensor of shape [B, T_total] with tokens arranged as:
                [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
@@ -406,40 +417,44 @@ class DataLoaderLiteAllInMemory:
         """
         B = self.B
         L = self.per_channel_length  # tokens per channel
-        needed = B * L + 1  # extra token for shifting.
-        x_dict, y_dict = {}, {}
+        batch_tokens_needed = B * L + 1  # extra token for shifting
 
+        # Check if the next batch would exceed the available tokens for a channel.
+        # Using the multi–process stride, we need B * L * num_processes tokens (plus 1)
+        if self.current_position + (B * L * self.num_processes + 1) > self.total_len:
+            self.current_position = self.B * self.per_channel_length * self.process_rank
+
+        x_dict, y_dict = {}, {}
         # Extract tokens for each channel separately.
         for region in REGIONS:
             tokens_region = self.tokens[region]
-            if self.current_position + needed <= self.total_len:
-                buf_tokens = tokens_region[self.current_position: self.current_position + needed]
+            if self.current_position + batch_tokens_needed <= self.total_len:
+                buf_tokens = tokens_region[self.current_position: self.current_position + batch_tokens_needed]
             else:
+                # Wrap-around: concatenate the tail and the beginning.
                 leftover = self.total_len - self.current_position
-                wrap_amount = needed - leftover
-                part1_toks = tokens_region[self.current_position:]
-                part2_toks = tokens_region[:wrap_amount]
-                buf_tokens = torch.cat([part1_toks, part2_toks], dim=0)
-            if len(buf_tokens) != needed:
-                raise RuntimeError(f"Unexpected length for channel {region}. Expected {needed}, got {len(buf_tokens)}")
-            # x: all tokens except the last; y: shifted by one.
+                wrap_amount = batch_tokens_needed - leftover
+                buf_tokens = torch.cat([tokens_region[self.current_position:], tokens_region[:wrap_amount]], dim=0)
+            if len(buf_tokens) != batch_tokens_needed:
+                raise RuntimeError(
+                    f"Unexpected length for channel {region}. Expected {batch_tokens_needed}, got {len(buf_tokens)}"
+                )
+            # Create input (x) and target (y) sequences.
             x_dict[region] = buf_tokens[:-1].view(B, L)
             y_dict[region] = buf_tokens[1:].view(B, L)
 
-        self.current_position = (self.current_position + needed) % self.total_len
+        # Advance the pointer by the total tokens used by ALL processes.
+        self.current_position = (self.current_position + B * L * self.num_processes) % self.total_len
 
-        # Stack the tokens from all channels along a new dimension.
-        # Shape becomes [B, L, num_channels]
+        # Interleave tokens from all channels.
+        # First, stack tokens to get shape [B, L, num_channels].
         x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
         y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
-
-
+        # Then reshape to interleave the channels: [B, num_channels * L].
         x_combined = x_stacked.reshape(B, self.num_channels * L)
         y_combined = y_stacked.reshape(B, self.num_channels * L)
 
         return x_combined, y_combined
-    def reset(self):
-        self.current_position = self.B * self.per_channel_length * self.process_rank
 
 
 #########################
