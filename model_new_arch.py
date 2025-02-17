@@ -279,23 +279,38 @@ class GPT(nn.Module):
         # and output a fused representation of shape [B, time_steps, n_embd].
         fused = self.cross_channel_fusion(x)  # [B, time_steps, n_embd]
 
-        # 5. Combine the Fused Representation with the Original Per-Channel Features:
-        # Broadcast the fused representation over the channel dimension and add it.
-        x = x + fused.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
+        # === MODIFIED PART: Process each channel's time sequence independently ===
 
-        # 6. Flatten the (time, channel) dimensions to get a sequence of length T:
-        x = x.view(B, T, self.config.n_embd)  # [B, T, n_embd]
+        # Instead of flattening time and channel together, first transpose:
+        # Now x becomes [B, num_channels, time_steps, n_embd]
+        x = x.transpose(1, 2)
 
-        # 7. Process with the Final GPT Transformer Blocks:
+        # Get dimensions: B = batch, C = num_channels, T = time_steps, E = embedding dim
+        B, C, T, E = x.size()
+
+        # Reshape so that each channel’s time sequence is separate:
+        # New shape: [B * num_channels, time_steps, n_embd]
+        x = x.reshape(B * C, T, E)
+
+        # Process with the causal transformer blocks; now the causal mask only sees previous time steps within the same channel.
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)  # [B, T, vocab_size]
 
-        loss = None
+        # Compute logits for language modeling:
+        logits = self.lm_head(x)  # [B * num_channels, time_steps, vocab_size]
+
+        # Reshape logits back to [B, num_channels, time_steps, vocab_size] for clarity:
+        logits = logits.view(B, C, T, -1)
+
+        # Adjust targets similarly (if provided)
         if targets is not None:
-            # Now targets have shape [B, T] (with T = time_steps * num_channels)
+            # Ensure targets are reshaped from [B, T] to [B, num_channels, time_steps]
+            targets = targets.view(B, C, T)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        else:
+            loss = None
+
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
@@ -344,16 +359,25 @@ class GPT(nn.Module):
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 
+import os
+import glob
+import random
+import torch
+
+# For this example, we assume that REGIONS is defined globally.
+# It lists the names of the channels present in each shard.
+REGIONS = ["channel1", "channel2", "channel3"]
+
 class DataLoaderLiteAllInMemory:
     """
     Loads all .pt shard files from a local directory.
     Each shard contains separate token tensors for each channel.
     This dataloader concatenates tokens per channel across shards,
     then extracts contiguous blocks per channel (of length per_channel_length)
-    and interleaves them so that the final tensor has shape [B, T_total],
-    where T_total (e.g., 1032) is divisible by the number of channels.
+    and interleaves them so that the final tensor has shape [B, num_channels, per_channel_length],
+    where per_channel_length = T_total / num_channels.
 
-    Incorporates multi–process logic:
+    Multi–process logic:
       - Each process starts at an offset: B * per_channel_length * process_rank.
       - After producing a batch, the pointer advances by B * per_channel_length * num_processes.
     """
@@ -389,73 +413,93 @@ class DataLoaderLiteAllInMemory:
                 if region not in loaded:
                     raise ValueError(f"Shard {shard_path} is missing channel {region}")
                 self.tokens[region].append(loaded[region])
-        # Concatenate tokens for each channel along the 0-dimension.
+        # Concatenate tokens for each channel along dimension 0.
         for region in REGIONS:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
-        # Assume all channels have the same total length.
-        self.total_len = len(self.tokens[REGIONS[0]])
-        self.reset()
+        # Initialize the pointer using the multi-process start offset.
+        self.start_ptr = self.B * self.per_channel_length * self.process_rank
+        self.ptr = self.start_ptr
 
-    @property
-    def total_length(self):
-        """Return the total number of tokens per channel."""
-        return self.total_len
-
-    def reset(self):
-        # Start at an offset that depends on the process rank.
-        self.current_position = self.B * self.per_channel_length * self.process_rank
+    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int) -> torch.Tensor:
+        """
+        Returns a slice of `length` tokens from token_tensor starting at `start`.
+        If the slice extends past the end, it wraps around.
+        """
+        total_length = token_tensor.size(0)
+        if start + length <= total_length:
+            return token_tensor[start: start + length]
+        else:
+            # Wrap-around: take remainder from the beginning.
+            first_part = token_tensor[start:]
+            remaining = length - (total_length - start)
+            second_part = token_tensor[:remaining]
+            return torch.cat((first_part, second_part), dim=0)
 
     def next_batch(self):
         """
-        For each channel, extract a contiguous block of tokens and then interleave them.
+        Produces a batch for the current process.
 
         Returns:
-            x: tensor of shape [B, T_total] with tokens arranged as:
-               [ch0_time0, ch1_time0, ch2_time0, ch0_time1, ch1_time1, ch2_time1, ...]
-            y: similarly structured target tensor.
+            A tuple (inputs, targets) where:
+              - inputs is a tensor of shape [B, num_channels, per_channel_length]
+              - targets is a tensor of shape [B, num_channels], where each target token
+                is the token that immediately follows the corresponding input sequence
+                in that channel.
         """
-        B = self.B
-        L = self.per_channel_length  # tokens per channel
-        batch_tokens_needed = B * L + 1  # extra token for shifting
+        inputs_list = []   # To collect per-channel inputs
+        targets_list = []  # To collect per-channel targets
 
-        # Check if the next batch would exceed the available tokens for a channel.
-        # Using the multi–process stride, we need B * L * num_processes tokens (plus 1)
-        if self.current_position + (B * L * self.num_processes + 1) > self.total_len:
-            self.current_position = self.B * self.per_channel_length * self.process_rank
-
-        x_dict, y_dict = {}, {}
-        # Extract tokens for each channel separately.
+        # For each channel, for each batch sample, extract a sequence and its target.
         for region in REGIONS:
-            tokens_region = self.tokens[region]
-            if self.current_position + batch_tokens_needed <= self.total_len:
-                buf_tokens = tokens_region[self.current_position: self.current_position + batch_tokens_needed]
-            else:
-                # Wrap-around: concatenate the tail and the beginning.
-                leftover = self.total_len - self.current_position
-                wrap_amount = batch_tokens_needed - leftover
-                buf_tokens = torch.cat([tokens_region[self.current_position:], tokens_region[:wrap_amount]], dim=0)
-            if len(buf_tokens) != batch_tokens_needed:
-                raise RuntimeError(
-                    f"Unexpected length for channel {region}. Expected {batch_tokens_needed}, got {len(buf_tokens)}"
-                )
-            # Create input (x) and target (y) sequences.
-            x_dict[region] = buf_tokens[:-1].view(B, L)
-            y_dict[region] = buf_tokens[1:].view(B, L)
+            token_tensor = self.tokens[region]
+            channel_inputs = []
+            channel_targets = []
+            for b in range(self.B):
+                start = self.ptr + b * self.per_channel_length
+                # Extract input sequence of length per_channel_length.
+                seq = self._get_slice(token_tensor, start, self.per_channel_length)
+                channel_inputs.append(seq.unsqueeze(0))  # shape: [1, per_channel_length]
+                # Extract the target token (the token immediately after the sequence).
+                target = self._get_slice(token_tensor, start + self.per_channel_length, 1)
+                channel_targets.append(target)
+            # Stack along the batch dimension.
+            channel_inputs = torch.cat(channel_inputs, dim=0)   # shape: [B, per_channel_length]
+            channel_targets = torch.cat(channel_targets, dim=0)   # shape: [B]
+            # Add a channel dimension.
+            inputs_list.append(channel_inputs.unsqueeze(1))   # shape: [B, 1, per_channel_length]
+            targets_list.append(channel_targets.unsqueeze(1))   # shape: [B, 1]
 
-        # Advance the pointer by the total tokens used by ALL processes.
-        self.current_position = (self.current_position + B * L * self.num_processes) % self.total_len
+        # Concatenate the channels: resulting shape [B, num_channels, per_channel_length]
+        inputs = torch.cat(inputs_list, dim=1)
+        # Concatenate targets: resulting shape [B, num_channels]
+        targets = torch.cat(targets_list, dim=1)
 
-        # Interleave tokens from all channels.
-        # First, stack tokens to get shape [B, L, num_channels].
-        x_stacked = torch.stack([x_dict[r] for r in REGIONS], dim=2)
-        y_stacked = torch.stack([y_dict[r] for r in REGIONS], dim=2)
-        # Then reshape to interleave the channels: [B, num_channels * L].
-        x_combined = x_stacked.reshape(B, self.num_channels * L)
-        y_combined = y_stacked.reshape(B, self.num_channels * L)
+        # Advance the pointer by B * per_channel_length * num_processes.
+        self.ptr += self.B * self.per_channel_length * self.num_processes
 
-        return x_combined, y_combined
+        return inputs, targets
 
+    def reset(self):
+        """
+        Resets the dataloader pointer to its initial start position.
+        """
+        self.ptr = self.start_ptr
+
+    @property
+    def total_tokens(self):
+        """
+        Returns the total number of tokens for one channel.
+        Assumes all channels have the same length.
+        """
+        # Using the first region as representative.
+        return self.tokens[REGIONS[0]].size(0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next_batch()
 
 #########################
 # Training Setup & Loop (No Epochs)
