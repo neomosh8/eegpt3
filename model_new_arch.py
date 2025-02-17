@@ -243,7 +243,7 @@ class GPT(nn.Module):
             idx: [B, T] token IDs, where T = time_steps * num_channels.
             targets: [B, T] with different target tokens for each channel.
         """
-        B, T = idx.size()
+        B, C, T = idx.size()
         # Ensure T is divisible by the number of channels.
         assert T % self.config.num_channels == 0, "T must be divisible by num_channels"
         time_steps = T // self.config.num_channels
