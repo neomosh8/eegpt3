@@ -217,7 +217,7 @@ class ShardDataset(Dataset):
 def train_classifier(model, dataloader, num_epochs, device):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.classifier.parameters(), lr=4e-6)
 
     for epoch in range(num_epochs):
         model.train()
@@ -309,7 +309,7 @@ def main():
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
     from collections import Counter
     print("Label distribution:", Counter(dataset.labels))  # Check class balance
-    dataloader = DataLoader(dataset, batch_size=40, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
     evaluate_performance(model_random, dataloader, device, desc="Random GPT")
 
     # Step 2: Pretrained GPT
