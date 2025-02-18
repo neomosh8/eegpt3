@@ -253,11 +253,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load GPT from checkpoint
-    checkpoint_path = "./checkpoints/model_00300.pt"  # Adjust step number
+    checkpoint_path = "./checkpoints/model_00300.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
     gpt_model = GPT(config)
-    gpt_model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Remove '_orig_mod.' prefix from state_dict keys
+    state_dict = checkpoint['model_state_dict']
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("_orig_mod.", "")  # Strip the prefix
+        new_state_dict[new_key] = value
+
+    # Load the adjusted state_dict
+    gpt_model.load_state_dict(new_state_dict)
     gpt_model.eval()
 
     # Attach classifier (3 classes: 0, 1, 2)
