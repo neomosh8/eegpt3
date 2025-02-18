@@ -53,7 +53,7 @@ if torch.cuda.is_available():
 # Model Components
 #########################
 class MultiScaleCrossChannelFusion(nn.Module):
-    def __init__(self, n_embd, num_heads=1, scales=[1, 2]):
+    def __init__(self, n_embd, num_heads=6, scales=[1, 2]):
         """
         Args:
             n_embd: hidden size.
@@ -193,8 +193,11 @@ class GPTConfig:
     vocab_size: int = 10799
     # Small model configuration
     n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    # n_head: int = 12
+    # n_embd: int = 768
+
+    n_head: int = 16
+    n_embd: int = 1024
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -222,7 +225,7 @@ class GPT(nn.Module):
         ])
 
         # Use the new multi-scale cross-channel fusion.
-        self.cross_channel_fusion = MultiScaleCrossChannelFusion(config.n_embd, num_heads=1, scales=[1, 2, 4])
+        self.cross_channel_fusion = MultiScaleCrossChannelFusion(config.n_embd, num_heads=2, scales=[1, 2])
 
         self.apply(self._init_weights)
 
@@ -748,7 +751,7 @@ for step in range(max_steps):
                 loss_plotter.update_val(current_val_loss.item())
     if master_process:
         loss_plotter.maybe_plot(step)
-    if step % 3000 == 0 and master_process and step>0:
+    if step % 1000 == 0 and master_process and step>0:
         save_checkpoint(
             model=raw_model,
             optimizer=optimizer,
