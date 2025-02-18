@@ -502,27 +502,83 @@ def main():
     import os
     import random
     import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
     import torch.optim as optim
     from torch.utils.data import DataLoader, random_split
+    # Assume your checkpoint manager functions are available:
+    from checkpoint_manager import load_checkpoint, save_checkpoint
 
-    # Hyperparameters.
+    # --- Corrected GPTForClassification definition ---
+    class GPTForClassification(nn.Module):
+        def __init__(self, config, num_classes):
+            super().__init__()
+            # Instantiate the raw GPT model.
+            self.gpt = GPT(config)
+            # Classification head.
+            self.classifier = nn.Linear(config.n_embd, num_classes)
+            nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
+            if self.classifier.bias is not None:
+                nn.init.zeros_(self.classifier.bias)
+
+        def forward(self, idx, labels=None):
+            # idx: [B, num_channels, T]
+            B, C, T = idx.size()
+            # Use the raw GPT embedding.
+            if hasattr(self.gpt, 'wte'):
+                tok_emb = self.gpt.wte(idx)  # Expecting shape: [B, C, T, n_embd]
+            else:
+                # Fallback if your raw model stores embeddings under transformer.
+                tok_emb = self.gpt.transformer.wte(idx)
+            tok_emb = tok_emb.transpose(1, 2)  # Now shape: [B, T, C, n_embd]
+            x = tok_emb
+            # Get positional embeddings.
+            if hasattr(self.gpt, 'wpe'):
+                pos_emb = self.gpt.wpe(torch.arange(T, device=x.device).unsqueeze(0))
+            else:
+                pos_emb = self.gpt.transformer.wpe(torch.arange(T, device=x.device).unsqueeze(0))
+            x = x + pos_emb.unsqueeze(2)
+            # Process per-channel.
+            channel_outs = []
+            for c in range(self.gpt.config.num_channels):
+                x_c = x[:, :, c, :]
+                x_c = self.gpt.channel_encoder[c](x_c)
+                channel_outs.append(x_c)
+            x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
+            fused = self.gpt.cross_channel_fusion(x)  # [B, T, n_embd]
+            x = x + fused.unsqueeze(2)
+            x = x.transpose(1, 2)  # [B, C, T, n_embd]
+            B, C, T, E = x.size()
+            x = x.reshape(B * C, T, E)
+            for block in self.gpt.h:
+                x = block(x)
+            x = self.gpt.ln_f(x)
+            x_last = x[:, -1, :].view(B, C, -1)  # [B, C, n_embd]
+            pooled = x_last.mean(dim=1)  # [B, n_embd]
+            logits = self.classifier(pooled)  # [B, num_classes]
+            loss = None
+            if labels is not None:
+                loss = F.cross_entropy(logits, labels)
+            return logits, loss
+
+    # --- Hyperparameters ---
     num_classes = 3
-    T = 1024             # Sequence length per sample.
+    T = 1024  # Sequence length per sample.
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
-    val_pct = 0.1     # 20% holdout for validation.
+    val_pct = 0.1  # 10% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Shard file paths (update these paths to match your folder structure).
+    # --- Shard file paths (update these paths to match your folder structure) ---
     shard_paths = [
         "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
         "./local_shards_val/mydata_train_2.pt"
     ]
 
-    # Load the full dataset from shards.
+    # --- Build full dataset from shards ---
     full_dataset = ShardClassificationDataset(shard_paths, T=T, stride=T)
     total_samples = len(full_dataset)
     train_size = int((1 - val_pct) * total_samples)
@@ -531,17 +587,16 @@ def main():
     print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # Create GPT configuration.
-    config = GPTConfig()
-
-    # Instantiate the classification model (which wraps a raw GPT model).
+    # --- Create GPT configuration ---
+    config = GPTConfig()  # Use your default or customized configuration.
+    # --- Instantiate the classification model (wrapping raw GPT) ---
     model = GPTForClassification(config, num_classes=num_classes)
     model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
-    # --- Load raw GPT checkpoint into the classification model's gpt submodule ---
+    # --- Load raw GPT checkpoint into model.gpt (ignore optimizer state) ---
     checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -551,21 +606,22 @@ def main():
             new_key = k.replace("_orig_mod.", "")
             fixed_sd[new_key] = v
         model.gpt.load_state_dict(fixed_sd, strict=True)
-        print(f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint.get('step', 'N/A')} with val loss {checkpoint.get('val_loss', 'N/A')}")
+        print(
+            f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint.get('step', 'N/A')} with val loss {checkpoint.get('val_loss', 'N/A')}")
 
-    # Fine-tuning loop.
+    # --- Fine-tuning loop ---
     for epoch in range(num_epochs):
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_acc = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        # Save checkpoint after each epoch.
-        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
+        print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
+        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc,
+                        log_dir="./checkpoints")
 
-    # Save the final fine-tuned classification model.
+    # --- Save the final fine-tuned classification model ---
     torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # Testing: Run the model on one validation batch.
+    # --- Testing: Run the model on one validation batch ---
     model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
@@ -574,7 +630,9 @@ def main():
     print("Test Batch - True Labels:", labels)
     print("Test Batch - Predicted:", preds.cpu().numpy())
 
+
 if __name__ == "__main__":
     main()
+
 
 
