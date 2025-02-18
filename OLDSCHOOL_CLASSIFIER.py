@@ -303,7 +303,7 @@ def main():
     shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
                    "./local_shards_val/mydata_train_2.pt"]
     train_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=0.95, is_train=True)
-    val_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=0, is_train=False)
+    val_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=.95, is_train=False)
     print("Train label distribution:", Counter(train_dataset.labels.tolist()))
     print("Val label distribution:", Counter(val_dataset.labels.tolist()))
 
