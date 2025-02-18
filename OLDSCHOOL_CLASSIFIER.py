@@ -213,25 +213,12 @@ class ShardDataset(Dataset):
         label = self.labels[start]
         return inputs, label
 
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha  # Optional class weights
-        self.reduction = reduction
 
-    def forward(self, logits, targets):
-        ce_loss = F.cross_entropy(logits, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_loss = (1 - pt) ** self.gamma * ce_loss
-        if self.alpha is not None:
-            focal_loss = self.alpha[targets] * focal_loss
-        return focal_loss.mean() if self.reduction == 'mean' else focal_loss.sum()
-
+# Training function
 def train_classifier(model, dataloader, num_epochs, device):
     model = model.to(device)
-    criterion = FocalLoss(gamma=2.0)  # gamma=2 emphasizes hard examples
-    optimizer = optim.Adam(model.classifier.parameters(), lr=1e-6)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.classifier.parameters(), lr=4e-6)
 
     for epoch in range(num_epochs):
         model.train()
