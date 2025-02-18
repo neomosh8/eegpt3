@@ -536,16 +536,20 @@ def main():
 
     # --- Load Checkpoint if available ---
     checkpoint_path = "./checkpoints/model_01000.pt"  # Update the filename as needed.
-    if os.path.exists(checkpoint_path):
-        checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
-        orig_sd = checkpoint['model_state_dict']
-        fixed_sd = {}
-        for k, v in orig_sd.items():
-            new_key = k.replace("_orig_mod.", "")
-            fixed_sd[new_key] = v
-        model.load_state_dict(fixed_sd, strict=True)
-        print(
-            f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+    checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
+    orig_sd = checkpoint['model_state_dict']
+    fixed_sd = {}
+    for k, v in orig_sd.items():
+        # Remove any _orig_mod. prefix.
+        new_key = k.replace("_orig_mod.", "")
+        # Add the "gpt." prefix if it’s missing.
+        if not new_key.startswith("gpt."):
+            new_key = "gpt." + new_key
+        fixed_sd[new_key] = v
+    model.load_state_dict(fixed_sd, strict=True)
+
+    print(
+        f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
 
     # Fine-tuning loop.
     for epoch in range(num_epochs):
