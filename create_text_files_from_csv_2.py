@@ -289,7 +289,7 @@ def generate_quantized_files_local(csv_file: str,
 def process_csv_file_s3(csv_key: str,
                         bucket: str = "dataframes--use1-az6--x-s3",
                         local_dir: str = "/tmp",
-                        output_prefix: str = "output"):
+                        output_prefix: str = "output_emotiv"):
     """
     Downloads the CSV file from S3, processes it locally, and (if not skipped)
     uploads the resulting token files back to S3.
