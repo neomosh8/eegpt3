@@ -157,10 +157,10 @@ class GPTWithClassifier(nn.Module):
         for param in self.gpt.parameters():
             param.requires_grad = False
         self.classifier = nn.Sequential(
-            nn.Linear(gpt_model.config.n_embd, 256),
+            nn.Linear(gpt_model.config.n_embd, 32),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(256, num_classes)
+            nn.Linear(32, num_classes)
         )
 
     def forward(self, idx):
@@ -326,8 +326,8 @@ def main():
 
     # Step 3: Train
     print("\nStep 3: Starting classifier training with pretrained GPT")
-    train_classifier(model_random, dataloader, num_epochs=30, device=device)
-    train_classifier(model_pretrained, dataloader, num_epochs=30, device=device)
+    train_classifier(model_random, dataloader, num_epochs=10, device=device)
+    train_classifier(model_pretrained, dataloader, num_epochs=200, device=device)
 
 
 if __name__ == "__main__":
