@@ -312,21 +312,21 @@ def main():
     print("Label distribution:", Counter(dataset.labels))  # Check class balance
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
     evaluate_performance(model_random, dataloader, device, desc="Random GPT")
-
-    # Step 2: Pretrained GPT
-    print("\nStep 2: Loading pretrained weights and evaluating")
-    gpt_model_pretrained = GPT(config)
-    state_dict = checkpoint['model_state_dict']
-    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-    gpt_model_pretrained.load_state_dict(new_state_dict)
-    gpt_model_pretrained.eval()
-    model_pretrained = GPTWithClassifier(gpt_model_pretrained, num_classes=3)
-    model_pretrained = model_pretrained.to(device)
-    evaluate_performance(model_pretrained, dataloader, device, desc="Pretrained GPT")
+    #
+    # # Step 2: Pretrained GPT
+    # print("\nStep 2: Loading pretrained weights and evaluating")
+    # gpt_model_pretrained = GPT(config)
+    # state_dict = checkpoint['model_state_dict']
+    # new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    # gpt_model_pretrained.load_state_dict(new_state_dict)
+    # gpt_model_pretrained.eval()
+    # model_pretrained = GPTWithClassifier(gpt_model_pretrained, num_classes=3)
+    # model_pretrained = model_pretrained.to(device)
+    # evaluate_performance(model_pretrained, dataloader, device, desc="Pretrained GPT")
 
     # Step 3: Train
     print("\nStep 3: Starting classifier training with pretrained GPT")
-    train_classifier(model_pretrained, dataloader, num_epochs=30, device=device)
+    train_classifier(model_random, dataloader, num_epochs=30, device=device)
 
 
 if __name__ == "__main__":
