@@ -395,7 +395,7 @@ class DataLoaderLiteAllInMemory:
         # Load and concatenate tokens separately for each channel.
         self.tokens = {region: [] for region in REGIONS}
         for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu")
+            loaded = torch.load(shard_path, map_location="cpu",weights_only=False)
             for region in REGIONS:
                 # Instead of raising an error, handle the missing region gracefully.
                 if region not in loaded:
