@@ -530,7 +530,7 @@ def main():
     print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Create model configuration.
     config = GPTConfig()
@@ -542,12 +542,20 @@ def main():
     checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
         try:
-            # Try loading with your checkpoint manager.
             checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
         except ValueError as e:
             print("Warning: Optimizer state dict mismatch. Loading only the model state manually.")
             checkpoint = torch.load(checkpoint_path, map_location=device)
-        raw_gpt.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        print(f"Model state loaded from {checkpoint_path}")
+        orig_sd = checkpoint['model_state_dict']
+        fixed_sd = {}
+        # Remap keys: Remove any "_orig_mod." prefix and then remove the "transformer." prefix.
+        for k, v in orig_sd.items():
+            new_k = k.replace("_orig_mod.", "").replace("module.", "")
+            if new_k.startswith("transformer."):
+                new_k = new_k[len("transformer."):]
+            fixed_sd[new_k] = v
+        raw_gpt.load_state_dict(fixed_sd, strict=True)
         print(f"Raw GPT model state loaded from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
     else:
         print("Checkpoint not found; training from scratch.")
@@ -558,7 +566,7 @@ def main():
     # Replace the internal GPT module with our loaded raw_gpt.
     classification_model.gpt = raw_gpt
 
-    # Create optimizer for classification model.
+    # Create optimizer for the classification model.
     optimizer = optim.AdamW(classification_model.parameters(), lr=learning_rate)
 
     # --------- Fine-tuning loop -----------
@@ -566,7 +574,6 @@ def main():
         train_loss = train_epoch(classification_model, train_loader, optimizer, device)
         val_acc = evaluate(classification_model, val_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        # Save checkpoint after each epoch.
         save_checkpoint(model=classification_model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
 
     # Save the final fine-tuned classification model.
