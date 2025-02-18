@@ -477,26 +477,39 @@ def main():
     import torch.optim as optim
     from torch.utils.data import DataLoader, random_split
 
-    # --- GPTForClassification wrapper with a debug flag ---
+    # --- Define a more sophisticated classification head ---
+    class ClassificationHead(nn.Module):
+        def __init__(self, in_dim, num_classes, hidden_dim=None, dropout=0.1):
+            super().__init__()
+            if hidden_dim is None:
+                hidden_dim = in_dim // 2
+            self.net = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, num_classes)
+            )
+            # Initialize the linear layers
+            for m in self.net.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=0.02)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        def forward(self, x):
+            return self.net(x)
+
+    # --- GPTForClassification wrapper using the new classifier head ---
     class GPTForClassification(nn.Module):
         def __init__(self, config, num_classes, debug=False):
             super().__init__()
             self.debug = debug
-            # Instantiate the raw GPT model.
             self.gpt = GPT(config)
-            # Classification head.
-            self.classifier = nn.Sequential(
-                nn.Linear(config.n_embd, config.n_embd // 2),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(config.n_embd // 2, num_classes)
-            )
-            nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
-            if self.classifier.bias is not None:
-                nn.init.zeros_(self.classifier.bias)
+            # Replace simple linear classifier with our sophisticated head.
+            self.classifier = ClassificationHead(config.n_embd, num_classes, dropout=0.1)
 
         def forward(self, idx, labels=None):
-            # idx shape: [B, num_channels, T]
+            # idx: [B, num_channels, T]
             B, C, T = idx.size()
             # Token embeddings.
             if hasattr(self.gpt, 'wte'):
@@ -528,7 +541,7 @@ def main():
             # Per-channel encoding.
             channel_outs = []
             for c in range(self.gpt.config.num_channels):
-                x_c = x[:, :, c, :]  # [B, T, n_embd]
+                x_c = x[:, :, c, :]
                 x_c = self.gpt.channel_encoder[c](x_c)
                 channel_outs.append(x_c)
             x = torch.stack(channel_outs, dim=2)  # [B, T, num_channels, n_embd]
@@ -569,7 +582,6 @@ def main():
             logits = self.classifier(pooled)  # [B, num_classes]
             loss = F.cross_entropy(logits, labels) if labels is not None else None
             return logits, loss
-
 
     # --- Hyperparameters ---
     num_classes = 3
