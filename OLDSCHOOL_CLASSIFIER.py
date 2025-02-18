@@ -602,7 +602,7 @@ def main():
     T = 1024  # Sequence length per sample.
     batch_size = 16
     learning_rate = 1e-4
-    num_epochs = 5
+    num_epochs = 100
     val_pct = 0.1  # 10% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -651,12 +651,11 @@ def main():
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_acc = evaluate(model, val_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc,
-                        log_dir="./checkpoints")
+        # No checkpoint saving here
 
-    # --- Save final fine-tuned classification model ---
     torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
+
 
     # --- Testing on one validation batch ---
     model.eval()
