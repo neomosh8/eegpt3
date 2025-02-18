@@ -415,51 +415,22 @@ class GPT(nn.Module):
         )
         return optimizer
 
+class ClassificationHead(nn.Module):
+        def __init__(self, in_dim, num_classes, hidden_dim=None, dropout=0.1):
+            super().__init__()
+            if hidden_dim is None:
+                hidden_dim = in_dim // 2
+            self.net = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, num_classes)
+            )
+
+        def forward(self, x):
+            return self.net(x)
 
 
-class GPTForClassification(nn.Module):
-    def __init__(self, config, num_classes):
-        super().__init__()
-        self.gpt = GPT(config)
-        self.classifier = nn.Linear(config.n_embd, num_classes)
-        nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
-        if self.classifier.bias is not None:
-            nn.init.zeros_(self.classifier.bias)
-
-    def forward(self, idx, labels=None):
-        """
-        idx: [B, num_channels, T]
-        labels: [B] (class indices)
-        """
-        B, C, T = idx.size()
-        tok_emb = self.gpt.wte(idx)  # [B, C, T, n_embd]
-        tok_emb = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
-        x = tok_emb
-        pos = torch.arange(T, device=x.device).unsqueeze(0)
-        pos_emb = self.gpt.wpe(pos)
-        x = x + pos_emb.unsqueeze(2)
-        channel_outs = []
-        for c in range(self.gpt.config.num_channels):
-            x_c = x[:, :, c, :]
-            x_c = self.gpt.channel_encoder[c](x_c)
-            channel_outs.append(x_c)
-        x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
-        fused = self.gpt.cross_channel_fusion(x)  # [B, T, n_embd]
-        x = x + fused.unsqueeze(2)
-        x = x.transpose(1, 2)  # [B, C, T, n_embd]
-        B, C, T, E = x.size()
-        x = x.reshape(B * C, T, E)
-        for block in self.gpt.h:
-            x = block(x)
-        x = self.gpt.ln_f(x)
-        x_last = x[:, -1, :]  # [B * C, n_embd]
-        x_last = x_last.view(B, C, -1)  # [B, C, n_embd]
-        pooled = x_last.mean(dim=1)  # [B, n_embd]
-        logits = self.classifier(pooled)  # [B, num_classes]
-        loss = None
-        if labels is not None:
-            loss = F.cross_entropy(logits, labels)
-        return logits, loss
 
 
 #############################################
@@ -514,7 +485,7 @@ def main():
             # Instantiate the raw GPT model.
             self.gpt = GPT(config)
             # Classification head.
-            self.classifier = nn.Linear(config.n_embd, num_classes)
+            self.classifier = ClassificationHead(config.n_embd, num_classes, dropout=0.1)
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
@@ -594,6 +565,7 @@ def main():
             loss = F.cross_entropy(logits, labels) if labels is not None else None
             return logits, loss
 
+
     # --- Hyperparameters ---
     num_classes = 3
     T = 1024  # Sequence length per sample.
@@ -628,7 +600,7 @@ def main():
     # --- Instantiate the classification model (with debug off) ---
     model = GPTForClassification(config, num_classes=num_classes, debug=False)
     model.to(device)
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into model.gpt (ignoring optimizer state) ---
     checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
