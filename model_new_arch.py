@@ -196,13 +196,13 @@ class GPTConfig:
     # # n_head: int = 12
     # # n_embd: int = 768
 
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    # n_layer: int = 6
+    # n_head: int = 6
+    # n_embd: int = 384
 
-    # n_layer: int = 12
-    # n_head: int = 16
-    # n_embd: int = 1024
+    n_layer: int = 12
+    n_head: int = 16
+    n_embd: int = 1024
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -510,9 +510,9 @@ class DataLoaderLiteAllInMemory:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 16  # micro-batch size (sequences per mini-batch)
+B = 4  # micro-batch size (sequences per mini-batch)
 T = 1024  # sequence length (tokens per sequence)
-desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 32*4  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
