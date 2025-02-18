@@ -284,6 +284,7 @@ def main():
 
     # Attach classifier (3 classes: 0, 1, 2)
     model = GPTWithClassifier(gpt_model, num_classes=3)
+    model = model.to(device)  # Ensure model is on the correct device
 
     # Dataloader
     shard_paths = [
