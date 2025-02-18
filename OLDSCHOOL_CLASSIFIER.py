@@ -500,28 +500,29 @@ def evaluate(model, dataloader, device):
 
 def main():
     import os
+    import random
     import torch
     import torch.optim as optim
     from torch.utils.data import DataLoader, random_split
 
     # Hyperparameters.
     num_classes = 3
-    T = 1024  # Sequence length.
+    T = 128             # Sequence length per sample.
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
-    val_pct = 0.2  # 20% holdout for validation.
+    val_pct = 0.2       # 20% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Shard file paths (one per class).
+    # Shard file paths (update these paths to match your folder structure).
     shard_paths = [
         "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
         "./local_shards_val/mydata_train_2.pt"
     ]
 
-    # Load the entire dataset from shards.
+    # Load the full dataset from shards.
     full_dataset = ShardClassificationDataset(shard_paths, T=T, stride=T)
     total_samples = len(full_dataset)
     train_size = int((1 - val_pct) * total_samples)
@@ -532,63 +533,58 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # Create model configuration.
-    config = GPTConfig()
+    # Create GPT configuration.
+    config = GPTConfig(
+        block_size=T,
+        vocab_size=10799,
+        n_layer=4,     # Reduced for demonstration.
+        n_head=4,
+        n_embd=128,
+        num_channels=len(REGIONS),
+        mlp_dropout=0.05,
+        attn_dropout=0.05,
+        resid_dropout=0.05
+    )
 
-    # --------- Step 1: Load raw GPT model from checkpoint -----------
-    raw_gpt = GPT(config)
-    raw_gpt.to(device)
-    optimizer_raw = optim.AdamW(raw_gpt.parameters(), lr=learning_rate)
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
+    # Instantiate the classification model (which wraps a raw GPT model).
+    model = GPTForClassification(config, num_classes=num_classes)
+    model.to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+
+    # --- Load raw GPT checkpoint into the classification model's gpt submodule ---
+    checkpoint_path = "./checkpoints/model_06000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
-        try:
-            checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
-        except ValueError as e:
-            print("Warning: Optimizer state dict mismatch. Loading only the model state manually.")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-        print(f"Model state loaded from {checkpoint_path}")
+        checkpoint = load_checkpoint(checkpoint_path, model=model.gpt, optimizer=optimizer, device=device)
         orig_sd = checkpoint['model_state_dict']
         fixed_sd = {}
-        # Remap keys: Remove any "_orig_mod." prefix and then remove the "transformer." prefix.
         for k, v in orig_sd.items():
-            new_k = k.replace("_orig_mod.", "").replace("module.", "")
-            if new_k.startswith("transformer."):
-                new_k = new_k[len("transformer."):]
-            fixed_sd[new_k] = v
-        raw_gpt.load_state_dict(fixed_sd, strict=True)
-        print(f"Raw GPT model state loaded from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
-    else:
-        print("Checkpoint not found; training from scratch.")
+            new_key = k.replace("_orig_mod.", "")
+            fixed_sd[new_key] = v
+        model.gpt.load_state_dict(fixed_sd, strict=True)
+        print(f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint.get('step', 'N/A')} with val loss {checkpoint.get('val_loss', 'N/A')}")
 
-    # --------- Step 2: Wrap the pretrained GPT into the classification model -----------
-    classification_model = GPTForClassification(config, num_classes=num_classes)
-    classification_model.to(device)
-    # Replace the internal GPT module with our loaded raw_gpt.
-    classification_model.gpt = raw_gpt
-
-    # Create optimizer for the classification model.
-    optimizer = optim.AdamW(classification_model.parameters(), lr=learning_rate)
-
-    # --------- Fine-tuning loop -----------
+    # Fine-tuning loop.
     for epoch in range(num_epochs):
-        train_loss = train_epoch(classification_model, train_loader, optimizer, device)
-        val_acc = evaluate(classification_model, val_loader, device)
-        print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        save_checkpoint(model=classification_model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        val_acc = evaluate(model, val_loader, device)
+        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
+        # Save checkpoint after each epoch.
+        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
 
     # Save the final fine-tuned classification model.
-    torch.save(classification_model.state_dict(), "gpt_classification_finetuned.pth")
+    torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # --------- Testing: Run the model on one validation batch -----------
-    classification_model.eval()
+    # Testing: Run the model on one validation batch.
+    model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
-    logits, _ = classification_model(x)
+    logits, _ = model(x)
     preds = logits.argmax(dim=1)
     print("Test Batch - True Labels:", labels)
     print("Test Batch - Predicted:", preds.cpu().numpy())
 
-
 if __name__ == "__main__":
     main()
+
+
