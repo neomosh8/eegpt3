@@ -508,7 +508,7 @@ def main():
     # Import your checkpoint manager functions.
     from checkpoint_manager import load_checkpoint, save_checkpoint
 
-    # --- Define GPTForClassification with debug prints ---
+    # --- Corrected GPTForClassification definition with fallback for ln_f ---
     class GPTForClassification(nn.Module):
         def __init__(self, config, num_classes):
             super().__init__()
@@ -523,7 +523,7 @@ def main():
         def forward(self, idx, labels=None):
             # idx: [B, num_channels, T]
             B, C, T = idx.size()
-            # Check for embedding attributes.
+            # Token embeddings.
             if hasattr(self.gpt, 'wte'):
                 print("Debug: using self.gpt.wte for token embeddings.")
                 tok_emb = self.gpt.wte(idx)  # [B, C, T, n_embd]
@@ -531,7 +531,7 @@ def main():
                 print("Debug: using self.gpt.transformer.wte for token embeddings.")
                 tok_emb = self.gpt.transformer.wte(idx)
             else:
-                print("Debug: GPT model missing token embedding. Keys:", self.gpt.__dict__.keys())
+                print("Debug: GPT model missing token embeddings. Keys:", self.gpt.__dict__.keys())
                 raise AttributeError("GPT model missing token embedding layer.")
             tok_emb = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
             x = tok_emb
@@ -544,7 +544,7 @@ def main():
                 print("Debug: using self.gpt.transformer.wpe for positional embeddings.")
                 pos_emb = self.gpt.transformer.wpe(torch.arange(T, device=x.device).unsqueeze(0))
             else:
-                print("Debug: GPT model missing positional embedding. Keys:", self.gpt.__dict__.keys())
+                print("Debug: GPT model missing positional embeddings. Keys:", self.gpt.__dict__.keys())
                 raise AttributeError("GPT model missing positional embedding layer.")
             x = x + pos_emb.unsqueeze(2)
 
@@ -561,7 +561,7 @@ def main():
             B, C, T, E = x.size()
             x = x.reshape(B * C, T, E)
 
-            # Debug: Check which transformer block attribute exists.
+            # Process transformer blocks.
             if hasattr(self.gpt, 'h'):
                 print("Debug: using self.gpt.h for transformer blocks.")
                 blocks = self.gpt.h
@@ -573,7 +573,18 @@ def main():
                 raise AttributeError("GPT model missing transformer blocks (h).")
             for block in blocks:
                 x = block(x)
-            x = self.gpt.ln_f(x)
+
+            # Apply final layer norm.
+            if hasattr(self.gpt, 'ln_f'):
+                print("Debug: using self.gpt.ln_f for final layer norm.")
+                x = self.gpt.ln_f(x)
+            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'ln_f'):
+                print("Debug: using self.gpt.transformer.ln_f for final layer norm.")
+                x = self.gpt.transformer.ln_f(x)
+            else:
+                print("Debug: GPT model missing ln_f. Keys:", self.gpt.__dict__.keys())
+                raise AttributeError("GPT model missing ln_f.")
+
             x_last = x[:, -1, :].view(B, C, -1)  # [B, C, n_embd]
             pooled = x_last.mean(dim=1)  # [B, n_embd]
             logits = self.classifier(pooled)  # [B, num_classes]
@@ -610,8 +621,8 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # --- Create GPT configuration (using your existing defaults) ---
-    config = GPTConfig()  # Adjust or customize as needed.
+    # --- Create GPT configuration (use your defaults or custom settings) ---
+    config = GPTConfig()
 
     # --- Instantiate the classification model (which wraps a raw GPT model) ---
     model = GPTForClassification(config, num_classes=num_classes)
@@ -619,7 +630,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into model.gpt (ignore optimizer state) ---
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Update as needed.
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         orig_sd = checkpoint['model_state_dict']
