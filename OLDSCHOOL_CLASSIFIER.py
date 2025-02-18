@@ -518,7 +518,6 @@ def main():
 
     # Load the entire dataset from shards.
     full_dataset = ShardClassificationDataset(shard_paths, T=T, stride=T)
-    # Split the dataset into training and validation sets.
     total_samples = len(full_dataset)
     train_size = int((1 - val_pct) * total_samples)
     val_size = total_samples - train_size
@@ -526,49 +525,50 @@ def main():
     print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Create model configuration.
     config = GPTConfig()
-    model = GPTForClassification(config, num_classes=num_classes)
-    model.to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
-    # --- Load Checkpoint if available ---
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Update the filename as needed.
-    checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
-    orig_sd = checkpoint['model_state_dict']
-    fixed_sd = {}
-    for k, v in orig_sd.items():
-        # Remove any DDP wrappers
-        new_k = k.replace("module.", "").replace("_orig_mod.", "")
-        # Force the key to be in the "gpt." namespace.
-        if not new_k.startswith("gpt."):
-            new_k = "gpt." + new_k
-        fixed_sd[new_k] = v
+    # --- Step 1: Create and load raw GPT model ---
+    raw_gpt = GPT(config)
+    raw_gpt.to(device)
+    # Use a temporary optimizer for loading (it won’t be used further)
+    optimizer_raw = optim.AdamW(raw_gpt.parameters(), lr=learning_rate)
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
+    if os.path.exists(checkpoint_path):
+        checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
+        raw_gpt.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        print(f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+    else:
+        print("Raw GPT checkpoint not found; starting from scratch.")
 
-    model.load_state_dict(fixed_sd, strict=True)
-    print(
-        f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+    # --- Step 2: Wrap raw GPT into a classification model ---
+    classification_model = GPTForClassification(config, num_classes=num_classes)
+    classification_model.to(device)
+    # Replace the GPT submodule with our pretrained raw_gpt.
+    classification_model.gpt = raw_gpt
 
-    # Fine-tuning loop.
+    # Create an optimizer for fine-tuning the classification model.
+    optimizer = optim.AdamW(classification_model.parameters(), lr=learning_rate)
+
+    # --- Fine-tuning loop ---
     for epoch in range(num_epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
-        val_acc = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        # Save checkpoint after each epoch.
-        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc,
-                        log_dir="./checkpoints")
+        train_loss = train_epoch(classification_model, train_loader, optimizer, device)
+        val_acc = evaluate(classification_model, val_loader, device)
+        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
+        save_checkpoint(model=classification_model, optimizer=optimizer, config=config,
+                        step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
 
-    # Save the final fine-tuned model.
-    torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
+    # Save the final fine-tuned classification model.
+    torch.save(classification_model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # Testing: Run the model on one validation batch.
-    model.eval()
+    # --- Testing on one validation batch ---
+    classification_model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
-    logits, _ = model(x)
+    logits, _ = classification_model(x)
     preds = logits.argmax(dim=1)
     print("Test Batch - True Labels:", labels)
     print("Test Batch - Predicted:", preds.cpu().numpy())
