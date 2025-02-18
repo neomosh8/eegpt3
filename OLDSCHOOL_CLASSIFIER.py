@@ -541,15 +541,14 @@ def main():
     optimizer_raw = optim.AdamW(raw_gpt.parameters(), lr=learning_rate)
     checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
-        # Load checkpoint into raw_gpt
-        checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
-        raw_gpt.load_state_dict(checkpoint['model_state_dict'], strict=True)
-        print(
-            f"Raw GPT model state loaded from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
         try:
-            optimizer_raw.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Try loading with your checkpoint manager.
+            checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
         except ValueError as e:
-            print("Warning: Optimizer state dict mismatch, skipping optimizer state load.")
+            print("Warning: Optimizer state dict mismatch. Loading only the model state manually.")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        raw_gpt.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        print(f"Raw GPT model state loaded from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
     else:
         print("Checkpoint not found; training from scratch.")
 
@@ -568,8 +567,7 @@ def main():
         val_acc = evaluate(classification_model, val_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
         # Save checkpoint after each epoch.
-        save_checkpoint(model=classification_model, optimizer=optimizer, config=config, step=epoch,
-                        val_loss=1 - val_acc, log_dir="./checkpoints")
+        save_checkpoint(model=classification_model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
 
     # Save the final fine-tuned classification model.
     torch.save(classification_model.state_dict(), "gpt_classification_finetuned.pth")
