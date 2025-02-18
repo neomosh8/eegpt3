@@ -542,7 +542,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into the classification model's gpt submodule ---
-    checkpoint_path = "./checkpoints/model_06000.pt"  # Update filename as needed.
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
         checkpoint = load_checkpoint(checkpoint_path, model=model.gpt, optimizer=optimizer, device=device)
         orig_sd = checkpoint['model_state_dict']
