@@ -601,7 +601,7 @@ def main():
     num_classes = 3
     T = 1024  # Sequence length per sample.
     batch_size = 16
-    learning_rate = 4e-6
+    learning_rate = 1e-6
     num_epochs = 20
     val_pct = 0.1  # 10% holdout for validation.
 
