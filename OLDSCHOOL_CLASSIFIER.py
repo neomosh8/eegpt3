@@ -293,7 +293,7 @@ def evaluate_performance(model, dataloader, device, desc="Evaluation"):
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = "./checkpoints/model_00300.pt"
+    checkpoint_path = "./checkpoints/model_00600.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
 
