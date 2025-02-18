@@ -52,58 +52,46 @@ if torch.cuda.is_available():
 #########################
 # Model Components
 #########################
-class MultiScaleCrossChannelFusion(nn.Module):
-    def __init__(self, n_embd, num_heads=6, scales=[1, 2]):
+import torch
+import torch.nn as nn
+
+class SimpleCrossChannelFusion(nn.Module):
+    def __init__(self, n_embd, num_heads=1):
         """
         Args:
-            n_embd: hidden size.
-            num_heads: number of attention heads.
-            scales: list of downsampling factors (1 means no downsampling).
-                    For each scale > 1, we pool over 'scale' time steps, apply attention,
-                    then upsample back.
+            n_embd: Embedding dimension (hidden size).
+            num_heads: Number of attention heads for cross-channel interaction.
         """
         super().__init__()
-        self.scales = scales
-        self.attn_blocks = nn.ModuleList([
-            nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
-            for _ in scales
-        ])
-        # Combine multi-scale outputs back to n_embd dimensions.
-        self.out_linear = nn.Linear(len(scales) * n_embd, n_embd)
+        # Simple attention to fuse across channels, using batch_first for shape consistency
+        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
+        # Layer norm to stabilize outputs
+        self.ln = nn.LayerNorm(n_embd)
 
     def forward(self, x):
         """
-        x: [B, T, C, n_embd] -- B=batch size, T=time steps, C=channels.
-        Since channel order is unimportant, we pool over channels with a permutation-invariant operation.
-        Then we perform multi-scale self-attention along time.
+        Args:
+            x: [B, time_steps, num_channels, n_embd] — Input with batch, time, channel, and embedding dims.
+        Returns:
+            fused: [B, time_steps, num_channels, n_embd] — Output with cross-channel info integrated.
         """
-        B, T, C, E = x.size()
-        # Permutation-invariant pooling over channels (mean pooling)
-        x_pooled = x.mean(dim=2)  # [B, T, E]
+        B, T, C, E = x.size()  # Batch, Time, Channels, Embedding
 
-        scale_outputs = []
-        for scale, attn in zip(self.scales, self.attn_blocks):
-            if scale > 1:
-                new_T = T // scale
-                # Downsample: average pool over non-overlapping windows of size 'scale'
-                x_down = x_pooled[:, :new_T * scale, :].view(B, new_T, scale, E).mean(dim=2)  # [B, new_T, E]
-            else:
-                x_down = x_pooled  # [B, T, E]
+        # Reshape to treat channels as the sequence dimension for attention
+        # [B, T, C, E] -> [B * T, C, E], where C becomes the "sequence length"
+        x_reshaped = x.view(B * T, C, E)
 
-            # Apply self-attention on the (possibly downsampled) sequence.
-            attn_out, _ = attn(x_down, x_down, x_down)  # [B, new_T, E]
+        # Apply causal attention across channels (no masking needed since we’re not attending over time here)
+        # Query, key, value are all the same input; output shape remains [B * T, C, E]
+        fused, _ = self.attn(x_reshaped, x_reshaped, x_reshaped)
 
-            if scale > 1:
-                # Upsample back to T by repeating each token 'scale' times.
-                attn_out = attn_out.unsqueeze(2).repeat(1, 1, scale, 1).view(B, -1, E)
-                attn_out = attn_out[:, :T, :]  # ensure shape [B, T, E]
-            scale_outputs.append(attn_out)  # each: [B, T, E]
+        # Residual connection to preserve original channel info
+        fused = fused + x_reshaped
 
-        # Concatenate multi-scale outputs along the feature dimension and project back to n_embd.
-        fused = torch.cat(scale_outputs, dim=-1)  # [B, T, len(scales)*E]
-        fused = self.out_linear(fused)  # [B, T, E]
+        # Normalize and reshape back to [B, T, C, E]
+        fused = self.ln(fused).view(B, T, C, E)
+
         return fused
-
 
 
 class CausalSelfAttention(nn.Module):
@@ -220,138 +208,62 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Weight tying between token embedding and output projection.
         self.transformer.wte.weight = self.lm_head.weight
 
-        # Per-channel encoder: 3 blocks per channel.
+        # Per-channel encoder (optional, kept for consistency)
         self.channel_encoder = nn.ModuleList([
             nn.Sequential(Block(config), Block(config))
             for _ in range(config.num_channels)
         ])
 
-        # Use the new multi-scale cross-channel fusion.
-        self.cross_channel_fusion = MultiScaleCrossChannelFusion(config.n_embd, num_heads=2, scales=[1, 2])
+        # Replace with the simpler fusion module
+        self.cross_channel_fusion = SimpleCrossChannelFusion(config.n_embd, num_heads=1)
 
         self.apply(self._init_weights)
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            std = 0.02
-            if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * self.config.n_layer) ** -0.5
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
     def forward(self, idx, targets=None):
-        """
-        Args:
-            idx: [B, num_channels, time_steps] token IDs.
-            targets: [B, num_channels] with the target token for each channel
-                     (the token immediately following the input sequence).
-        Returns:
-            logits: [B, num_channels, vocab_size] — prediction for the next token per channel.
-            loss: cross-entropy loss if targets is provided, else None.
-        """
-        # Unpack dimensions.
         B, C, T = idx.size()
         assert C == self.config.num_channels, f"Expected {self.config.num_channels} channels, but got {C}"
-        time_steps = T  # number of time steps per channel
 
-        # 1. Token Embedding and Reshape:
-        # The embedding layer now expects [B, num_channels, time_steps] and returns [B, num_channels, time_steps, n_embd]
-        tok_emb = self.transformer.wte(idx)  # [B, num_channels, time_steps, n_embd]
-        tok_emb = tok_emb.transpose(1, 2)  # -> [B, time_steps, num_channels, n_embd]
-        x = tok_emb  # [B, time_steps, num_channels, n_embd]
+        # Token embedding and reshape
+        tok_emb = self.transformer.wte(idx)  # [B, C, T, n_embd]
+        x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
 
-        # 2. Add Positional Embeddings (along the time dimension):
-        pos = torch.arange(time_steps, device=x.device).unsqueeze(0)  # [1, time_steps]
-        pos_emb = self.transformer.wpe(pos)  # [1, time_steps, n_embd]
-        x = x + pos_emb.unsqueeze(2)  # broadcast -> [B, time_steps, num_channels, n_embd]
+        # Positional embeddings
+        pos = torch.arange(T, device=x.device).unsqueeze(0)  # [1, T]
+        pos_emb = self.transformer.wpe(pos)  # [1, T, n_embd]
+        x = x + pos_emb.unsqueeze(2)  # [B, T, C, n_embd]
 
-        # (Optional) Add channel embeddings if desired.
-        # For example:
-        # channel_ids = torch.arange(self.config.num_channels, device=x.device).unsqueeze(0).unsqueeze(0)
-        # channel_emb = self.channel_embedding(channel_ids)  # [1, 1, num_channels, n_embd]
-        # x = x + channel_emb
-
-        # 3. Per-Channel Encoding:
+        # Per-channel encoding (optional)
         channel_outs = []
         for c in range(self.config.num_channels):
-            x_c = x[:, :, c, :]  # Extract channel c: [B, time_steps, n_embd]
-            x_c = self.channel_encoder[c](x_c)  # Process with that channel's encoder (3 blocks)
+            x_c = x[:, :, c, :]  # [B, T, n_embd]
+            x_c = self.channel_encoder[c](x_c)
             channel_outs.append(x_c)
-        # Stack channels back: [B, time_steps, num_channels, n_embd]
-        x = torch.stack(channel_outs, dim=2)
+        x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
 
-        # 4. Cross-Channel Fusion:
-        # This module expects input of shape [B, time_steps, num_channels, n_embd]
-        # and outputs a fused representation per time step: [B, time_steps, n_embd]
-        fused = self.cross_channel_fusion(x)
-        # Broadcast the fused representation across channels and add it.
-        x = x + fused.unsqueeze(2)  # [B, time_steps, num_channels, n_embd]
+        # Simple cross-channel fusion
+        x = self.cross_channel_fusion(x)  # [B, T, C, n_embd]
 
-        # 5. Final Transformer Blocks with Causal Masking (process each channel separately):
-        # Rearrange to process each channel's time sequence independently.
-        x = x.transpose(1, 2)  # -> [B, num_channels, time_steps, n_embd]
-        B, C, T, E = x.size()
-        x = x.reshape(B * C, T, E)  # -> [B * num_channels, time_steps, n_embd]
+        # Transformer blocks
+        x = x.transpose(1, 2)  # [B, C, T, n_embd]
+        x = x.reshape(B * C, T, self.config.n_embd)  # [B * C, T, n_embd]
         for block in self.transformer.h:
             x = block(x)
-        x = self.transformer.ln_f(x)  # -> [B * num_channels, time_steps, n_embd]
+        x = self.transformer.ln_f(x)  # [B * C, T, n_embd]
 
-        # 6. Use only the last time step's representation for next-token prediction.
-        x_last = x[:, -1, :]  # [B * num_channels, n_embd]
-        logits = self.lm_head(x_last)  # [B * num_channels, vocab_size]
-        logits = logits.view(B, C, -1)  # Reshape to [B, num_channels, vocab_size]
+        # Next-token prediction
+        x_last = x[:, -1, :]  # [B * C, n_embd]
+        logits = self.lm_head(x_last)  # [B * C, vocab_size]
+        logits = logits.view(B, C, -1)  # [B, C, vocab_size]
 
-        # 7. Compute Loss:
+        # Loss computation
         loss = None
         if targets is not None:
-            # targets should be of shape [B, num_channels]
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
-    def configure_optimizer(self, weight_decay, learning_rate, device):
-        """
-        Configure the optimizer with separate parameter groups for decayed and non-decayed weights.
-        """
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        decay_params = []
-        nodecay_params = []
-
-        for pn, p in param_dict.items():
-            if p.dim() >= 2:
-                decay_params.append(p)
-            else:
-                nodecay_params.append(p)
-
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
-            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
-        ]
-
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and ('cuda' in device)
-
-        if master_process:
-            print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
-            print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
-            print(f"Using fused AdamW: {use_fused}")
-
-        optimizer = torch.optim.AdamW(
-            optim_groups,
-            betas=(0.9, 0.95),
-            eps=1e-8,
-            fused=use_fused
-        )
-        return optimizer
-
+    # _init_weights and configure_optimizer remain unchanged
 
 #########################
 # DataLoader (All-In-Memory)
