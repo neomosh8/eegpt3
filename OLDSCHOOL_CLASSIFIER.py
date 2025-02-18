@@ -501,7 +501,7 @@ def evaluate(model, dataloader, device):
 def main():
     # Hyperparameters.
     num_classes = 3
-    T = 128  # Sequence length.
+    T = 1024  # Sequence length.
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
@@ -511,9 +511,9 @@ def main():
 
     # Shard file paths (one per class).
     shard_paths = [
-        "./local_shards/class0.pt",
-        "./local_shards/class1.pt",
-        "./local_shards/class2.pt"
+        "./local_shards_val/mydata.pt",
+        "./local_shards_val/mydata.pt",
+        "./local_shards_val/mydata.pt"
     ]
 
     # Load the entire dataset from shards.
