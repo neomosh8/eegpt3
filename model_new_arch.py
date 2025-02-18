@@ -412,7 +412,7 @@ class DataLoaderLiteAllInMemory:
 
     def __next__(self):
         return self.next_batch()
-    
+
 class DataLoaderLiteAllInMemory_old:
     """
     Loads all .pt shard files from a local directory.
@@ -771,7 +771,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # (Optional) Every so often, run a quick validation pass.
-    if ((step % 500 == 0)):
+    if ((step % 300 == 0)):
         model.eval()
         val_loader.reset()
         if master_process:
