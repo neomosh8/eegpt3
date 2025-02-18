@@ -295,9 +295,12 @@ def main():
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
     evaluate_random_performance(model, dataloader, device)
+    evaluate_random_performance(model, dataloader, device)
+    evaluate_random_performance(model, dataloader, device)
+    evaluate_random_performance(model, dataloader, device)
 
     # Train
-    train_classifier(model, dataloader, num_epochs=10, device=device)
+    # train_classifier(model, dataloader, num_epochs=10, device=device)
 
 
 if __name__ == "__main__":
