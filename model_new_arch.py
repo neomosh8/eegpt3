@@ -372,9 +372,9 @@ class DataLoaderLiteAllInMemory:
         self.B = B
         self.T_total = T
         self.num_channels = len(REGIONS)
-        if T % self.num_channels != 0:
-            raise ValueError("T_total must be divisible by the number of channels")
-        self.per_channel_length = T // self.num_channels
+        # if T % self.num_channels != 0:
+        #     raise ValueError("T_total must be divisible by the number of channels")
+        self.per_channel_length = T
 
         self.process_rank = process_rank
         self.num_processes = num_processes
