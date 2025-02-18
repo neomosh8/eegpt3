@@ -505,9 +505,6 @@ def main():
     import torch.nn.functional as F
     import torch.optim as optim
     from torch.utils.data import DataLoader, random_split
-    # Import your checkpoint manager functions.
-    from checkpoint_manager import load_checkpoint, save_checkpoint
-    # (Also assume that ShardClassificationDataset, train_epoch, and evaluate are defined/imported elsewhere.)
 
     # --- GPTForClassification wrapper with a debug flag ---
     class GPTForClassification(nn.Module):
@@ -517,7 +514,7 @@ def main():
             # Instantiate the raw GPT model.
             self.gpt = GPT(config)
             # Classification head.
-            self.classifier = nn.Linear(config.n_embd, num_classes)
+            self.classifier = nn.Linear(config.n_embd*2, num_classes)
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
@@ -601,7 +598,7 @@ def main():
     num_classes = 3
     T = 1024  # Sequence length per sample.
     batch_size = 16
-    learning_rate = 1e-6
+    learning_rate = 5e-6
     num_epochs = 20
     val_pct = 0.1  # 10% holdout for validation.
 
