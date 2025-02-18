@@ -319,8 +319,101 @@ class GPT(nn.Module):
 # Ensure these match the channels defined during preprocessing.
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
-
 class DataLoaderLiteAllInMemory:
+    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
+                 local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
+                 split: str = "train", shuffle_shards: bool = False, pad_token: int = 0):
+        self.B = B
+        self.per_channel_length = T  # Sequence length per channel
+        self.num_channels = len(REGIONS)
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.pad_token = pad_token  # Token to use for padding
+
+        # Locate shard files
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
+        self.shard_files = sorted(glob.glob(pattern))
+        if not self.shard_files:
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
+        if shuffle_shards:
+            random.shuffle(self.shard_files)
+
+        # Load and concatenate tokens
+        self.tokens = {region: [] for region in REGIONS}
+        for shard_path in self.shard_files:
+            loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+            for region in REGIONS:
+                if region not in loaded:
+                    available_regions = list(loaded.keys())
+                    if available_regions:
+                        loaded[region] = loaded[available_regions[0]]
+                        print(f"Warning: Shard {shard_path} missing {region}, using {available_regions[0]}.")
+                    else:
+                        raise ValueError(f"Shard {shard_path} has no channels for {region}.")
+                self.tokens[region].append(loaded[region])
+        for region in REGIONS:
+            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
+
+        # Check minimum length
+        min_length = min(t.size(0) for t in self.tokens.values())
+        required_length = self.B * self.per_channel_length * self.num_processes
+        if min_length < required_length:
+            print(f"Warning: Shortest channel has {min_length} tokens, less than required {required_length}. Padding will be used.")
+
+        self.start_ptr = self.B * self.per_channel_length * self.process_rank
+        self.ptr = self.start_ptr
+
+    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int) -> torch.Tensor:
+        total_length = token_tensor.size(0)
+        end = start + length
+        if end <= total_length:
+            return token_tensor[start:end]
+        else:
+            # Take what’s available and pad the rest
+            available = token_tensor[start:] if start < total_length else torch.tensor([], dtype=token_tensor.dtype)
+            padding_needed = length - available.size(0)
+            padding = torch.full((padding_needed,), self.pad_token, dtype=token_tensor.dtype)
+            return torch.cat((available, padding), dim=0)
+
+    def next_batch(self):
+        inputs_list = []
+        targets_list = []
+
+        for region in REGIONS:
+            token_tensor = self.tokens[region]
+            channel_inputs = []
+            channel_targets = []
+            for b in range(self.B):
+                start = self.ptr + b * self.per_channel_length
+                seq = self._get_slice(token_tensor, start, self.per_channel_length)
+                channel_inputs.append(seq.unsqueeze(0))  # [1, per_channel_length]
+                target = self._get_slice(token_tensor, start + self.per_channel_length, 1)
+                channel_targets.append(target)
+            channel_inputs = torch.cat(channel_inputs, dim=0)  # [B, per_channel_length]
+            channel_targets = torch.cat(channel_targets, dim=0)  # [B]
+            inputs_list.append(channel_inputs.unsqueeze(1))  # [B, 1, per_channel_length]
+            targets_list.append(channel_targets.unsqueeze(1))  # [B, 1]
+
+        inputs = torch.cat(inputs_list, dim=1)  # [B, num_channels, per_channel_length]
+        targets = torch.cat(targets_list, dim=1)  # [B, num_channels]
+
+        self.ptr += self.B * self.per_channel_length * self.num_processes
+        return inputs, targets
+
+    def reset(self):
+        self.ptr = self.start_ptr
+
+    @property
+    def total_len(self):
+        return self.tokens[REGIONS[0]].size(0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next_batch()
+    
+class DataLoaderLiteAllInMemory_old:
     """
     Loads all .pt shard files from a local directory.
     Each shard contains separate token tensors for each channel.
