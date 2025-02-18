@@ -511,7 +511,7 @@ def main():
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
-    val_pct = 0.2 1     # 20% holdout for validation.
+    val_pct = 0.1     # 20% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
