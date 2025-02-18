@@ -189,7 +189,7 @@ class CrossChannelFusion(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1032
+    block_size: int = 1024
     vocab_size: int = 10799
     # Small model configuration
     n_layer: int = 12
@@ -217,7 +217,7 @@ class GPT(nn.Module):
 
         # Per-channel encoder: 3 blocks per channel.
         self.channel_encoder = nn.ModuleList([
-            nn.Sequential(Block(config), Block(config), Block(config))
+            nn.Sequential(Block(config), Block(config))
             for _ in range(config.num_channels)
         ])
 
