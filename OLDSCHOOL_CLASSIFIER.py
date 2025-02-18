@@ -620,17 +620,17 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into model.gpt (ignoring optimizer state) ---
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        orig_sd = checkpoint['model_state_dict']
-        fixed_sd = {}
-        for k, v in orig_sd.items():
-            new_key = k.replace("_orig_mod.", "")
-            fixed_sd[new_key] = v
-        model.gpt.load_state_dict(fixed_sd, strict=True)
-        print(
-            f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint.get('step', 'N/A')} with val loss {checkpoint.get('val_loss', 'N/A')}")
+    # checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
+    # if os.path.exists(checkpoint_path):
+    #     checkpoint = torch.load(checkpoint_path, map_location=device)
+    #     orig_sd = checkpoint['model_state_dict']
+    #     fixed_sd = {}
+    #     for k, v in orig_sd.items():
+    #         new_key = k.replace("_orig_mod.", "")
+    #         fixed_sd[new_key] = v
+    #     model.gpt.load_state_dict(fixed_sd, strict=True)
+    #     print(
+    #         f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint.get('step', 'N/A')} with val loss {checkpoint.get('val_loss', 'N/A')}")
 
     # --- Fine-tuning loop ---
     for epoch in range(num_epochs):
