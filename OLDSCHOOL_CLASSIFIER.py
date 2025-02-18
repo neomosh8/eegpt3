@@ -253,7 +253,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load GPT from checkpoint
-    checkpoint_path = "./checkpoints/model_00001.pt"  # Adjust step number
+    checkpoint_path = "./checkpoints/model_00300.pt"  # Adjust step number
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
     gpt_model = GPT(config)
