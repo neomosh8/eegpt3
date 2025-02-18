@@ -185,11 +185,10 @@ class ShardDataset(Dataset):
             # Extract label from filename (e.g., 'mydata_train_2.pt' -> 2)
             label = int(os.path.basename(shard_path).split('_')[-1].replace('.pt', ''))
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+            token_count = min(loaded[REGIONS[0]].size(0), 39490)  # Cap at smallest class
             for region in REGIONS:
-                if region not in loaded:
-                    raise ValueError(f"Shard {shard_path} missing channel {region}")
-                self.tokens[region].append(loaded[region])
-            self.labels.extend([label] * loaded[REGIONS[0]].size(0))
+                self.tokens[region].append(loaded[region][:token_count])
+            self.labels.extend([label] * token_count)
 
         for region in REGIONS:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
