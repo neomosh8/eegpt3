@@ -332,8 +332,8 @@ def main():
     train_sampler = SubsetRandomSampler(train_indices)
     val_sampler = SubsetRandomSampler(val_indices)
 
-    train_loader = DataLoader(dataset, batch_size=64, sampler=train_sampler)
-    val_loader = DataLoader(dataset, batch_size=64, sampler=val_sampler)
+    train_loader = DataLoader(dataset, batch_size=32, sampler=train_sampler)
+    val_loader = DataLoader(dataset, batch_size=32, sampler=val_sampler)
 
     # Step 1: Random GPT
     print("Step 1: Evaluating with randomly initialized GPT model")
