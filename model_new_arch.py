@@ -637,10 +637,10 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
 val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
         B * T * ddp_world_size)  # Ceiling division
-val_steps_needed = 100
+# val_steps_needed = 100
 if master_process:
     print("Starting training...")
-    loss_plotter = LossPlotter(plot_interval=50, window=100)
+    loss_plotter = LossPlotter(plot_interval=10, window=50)
     print(f"validation steps: {val_steps_needed}")
 
 scaler = torch.amp.GradScaler(device='cuda')
@@ -716,7 +716,7 @@ for step in range(max_steps):
                 loss_plotter.update_val(current_val_loss.item())
     if master_process:
         loss_plotter.maybe_plot(step)
-    if step % 1000 == 0 and master_process and step>0:
+    if step % 300 == 0 and master_process and step>0:
         save_checkpoint(
             model=raw_model,
             optimizer=optimizer,
