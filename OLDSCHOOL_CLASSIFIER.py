@@ -507,11 +507,11 @@ def main():
 
     # Hyperparameters.
     num_classes = 3
-    T = 128             # Sequence length per sample.
+    T = 1024             # Sequence length per sample.
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
-    val_pct = 0.2       # 20% holdout for validation.
+    val_pct = 0.2 1     # 20% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -534,17 +534,7 @@ def main():
     val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Create GPT configuration.
-    config = GPTConfig(
-        block_size=T,
-        vocab_size=10799,
-        n_layer=4,     # Reduced for demonstration.
-        n_head=4,
-        n_embd=128,
-        num_channels=len(REGIONS),
-        mlp_dropout=0.05,
-        attn_dropout=0.05,
-        resid_dropout=0.05
-    )
+    config = GPTConfig()
 
     # Instantiate the classification model (which wraps a raw GPT model).
     model = GPTForClassification(config, num_classes=num_classes)
