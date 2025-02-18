@@ -507,11 +507,13 @@ def main():
     from torch.utils.data import DataLoader, random_split
     # Import your checkpoint manager functions.
     from checkpoint_manager import load_checkpoint, save_checkpoint
+    # (Also assume that ShardClassificationDataset, train_epoch, and evaluate are defined/imported elsewhere.)
 
-    # --- Corrected GPTForClassification definition with fallback for ln_f ---
+    # --- GPTForClassification wrapper with a debug flag ---
     class GPTForClassification(nn.Module):
-        def __init__(self, config, num_classes):
+        def __init__(self, config, num_classes, debug=False):
             super().__init__()
+            self.debug = debug
             # Instantiate the raw GPT model.
             self.gpt = GPT(config)
             # Classification head.
@@ -521,76 +523,78 @@ def main():
                 nn.init.zeros_(self.classifier.bias)
 
         def forward(self, idx, labels=None):
-            # idx: [B, num_channels, T]
+            # idx shape: [B, num_channels, T]
             B, C, T = idx.size()
             # Token embeddings.
             if hasattr(self.gpt, 'wte'):
-                print("Debug: using self.gpt.wte for token embeddings.")
-                tok_emb = self.gpt.wte(idx)  # [B, C, T, n_embd]
-            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'wte'):
-                print("Debug: using self.gpt.transformer.wte for token embeddings.")
-                tok_emb = self.gpt.transformer.wte(idx)
+                if self.debug:
+                    print("Debug: using self.gpt.wte for token embeddings.")
+                tok_emb = self.gpt.wte(idx)
+            elif hasattr(self.gpt, 'transformer') and ("wte" in self.gpt.transformer):
+                if self.debug:
+                    print("Debug: using self.gpt.transformer['wte'] for token embeddings.")
+                tok_emb = self.gpt.transformer["wte"](idx)
             else:
-                print("Debug: GPT model missing token embeddings. Keys:", self.gpt.__dict__.keys())
-                raise AttributeError("GPT model missing token embedding layer.")
-            tok_emb = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
+                raise AttributeError("GPT model missing token embeddings.")
+            tok_emb = tok_emb.transpose(1, 2)  # [B, T, num_channels, n_embd]
             x = tok_emb
 
             # Positional embeddings.
             if hasattr(self.gpt, 'wpe'):
-                print("Debug: using self.gpt.wpe for positional embeddings.")
+                if self.debug:
+                    print("Debug: using self.gpt.wpe for positional embeddings.")
                 pos_emb = self.gpt.wpe(torch.arange(T, device=x.device).unsqueeze(0))
-            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'wpe'):
-                print("Debug: using self.gpt.transformer.wpe for positional embeddings.")
-                pos_emb = self.gpt.transformer.wpe(torch.arange(T, device=x.device).unsqueeze(0))
+            elif hasattr(self.gpt, 'transformer') and ("wpe" in self.gpt.transformer):
+                if self.debug:
+                    print("Debug: using self.gpt.transformer['wpe'] for positional embeddings.")
+                pos_emb = self.gpt.transformer["wpe"](torch.arange(T, device=x.device).unsqueeze(0))
             else:
-                print("Debug: GPT model missing positional embeddings. Keys:", self.gpt.__dict__.keys())
-                raise AttributeError("GPT model missing positional embedding layer.")
+                raise AttributeError("GPT model missing positional embeddings.")
             x = x + pos_emb.unsqueeze(2)
 
-            # Process each channel with its encoder.
+            # Per-channel encoding.
             channel_outs = []
             for c in range(self.gpt.config.num_channels):
-                x_c = x[:, :, c, :]
+                x_c = x[:, :, c, :]  # [B, T, n_embd]
                 x_c = self.gpt.channel_encoder[c](x_c)
                 channel_outs.append(x_c)
-            x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
+            x = torch.stack(channel_outs, dim=2)  # [B, T, num_channels, n_embd]
             fused = self.gpt.cross_channel_fusion(x)  # [B, T, n_embd]
             x = x + fused.unsqueeze(2)
-            x = x.transpose(1, 2)  # [B, C, T, n_embd]
+            x = x.transpose(1, 2)  # [B, num_channels, T, n_embd]
             B, C, T, E = x.size()
             x = x.reshape(B * C, T, E)
 
-            # Process transformer blocks.
+            # Transformer blocks.
             if hasattr(self.gpt, 'h'):
-                print("Debug: using self.gpt.h for transformer blocks.")
+                if self.debug:
+                    print("Debug: using self.gpt.h for transformer blocks.")
                 blocks = self.gpt.h
-            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'h'):
-                print("Debug: using self.gpt.transformer.h for transformer blocks.")
-                blocks = self.gpt.transformer.h
+            elif hasattr(self.gpt, 'transformer') and ("h" in self.gpt.transformer):
+                if self.debug:
+                    print("Debug: using self.gpt.transformer['h'] for transformer blocks.")
+                blocks = self.gpt.transformer["h"]
             else:
-                print("Debug: GPT model missing transformer blocks. Available keys:", self.gpt.__dict__.keys())
                 raise AttributeError("GPT model missing transformer blocks (h).")
             for block in blocks:
                 x = block(x)
 
-            # Apply final layer norm.
+            # Final layer norm.
             if hasattr(self.gpt, 'ln_f'):
-                print("Debug: using self.gpt.ln_f for final layer norm.")
+                if self.debug:
+                    print("Debug: using self.gpt.ln_f for final layer norm.")
                 x = self.gpt.ln_f(x)
-            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'ln_f'):
-                print("Debug: using self.gpt.transformer.ln_f for final layer norm.")
-                x = self.gpt.transformer.ln_f(x)
+            elif hasattr(self.gpt, 'transformer') and ("ln_f" in self.gpt.transformer):
+                if self.debug:
+                    print("Debug: using self.gpt.transformer['ln_f'] for final layer norm.")
+                x = self.gpt.transformer["ln_f"](x)
             else:
-                print("Debug: GPT model missing ln_f. Keys:", self.gpt.__dict__.keys())
                 raise AttributeError("GPT model missing ln_f.")
 
-            x_last = x[:, -1, :].view(B, C, -1)  # [B, C, n_embd]
+            x_last = x[:, -1, :].view(B, C, -1)  # [B, num_channels, n_embd]
             pooled = x_last.mean(dim=1)  # [B, n_embd]
             logits = self.classifier(pooled)  # [B, num_classes]
-            loss = None
-            if labels is not None:
-                loss = F.cross_entropy(logits, labels)
+            loss = F.cross_entropy(logits, labels) if labels is not None else None
             return logits, loss
 
     # --- Hyperparameters ---
@@ -603,7 +607,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Shard file paths (update these paths as needed) ---
+    # --- Shard file paths (adjust as needed) ---
     shard_paths = [
         "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
@@ -621,16 +625,16 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # --- Create GPT configuration (use your defaults or custom settings) ---
+    # --- Create GPT configuration (using your trained model settings) ---
     config = GPTConfig()
 
-    # --- Instantiate the classification model (which wraps a raw GPT model) ---
-    model = GPTForClassification(config, num_classes=num_classes)
+    # --- Instantiate the classification model (with debug off) ---
+    model = GPTForClassification(config, num_classes=num_classes, debug=False)
     model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
-    # --- Load raw GPT checkpoint into model.gpt (ignore optimizer state) ---
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
+    # --- Load raw GPT checkpoint into model.gpt (ignoring optimizer state) ---
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         orig_sd = checkpoint['model_state_dict']
@@ -650,11 +654,11 @@ def main():
         save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc,
                         log_dir="./checkpoints")
 
-    # --- Save the final fine-tuned classification model ---
+    # --- Save final fine-tuned classification model ---
     torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # --- Testing: Run the model on one validation batch ---
+    # --- Testing on one validation batch ---
     model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
@@ -666,6 +670,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
