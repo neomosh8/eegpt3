@@ -270,44 +270,61 @@ def evaluate_performance(model, dataloader, device, desc="Evaluation"):
     print(f"{desc} - Final Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
     return final_accuracy# Main
 # Updated main function
+# [Your existing imports and model definitions remain unchanged]
+
+def evaluate_performance(model, dataloader, device, desc="Evaluation"):
+    model.eval()
+    correct = 0
+    total = 0
+    batch_count = 0
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            batch_count += 1
+            inputs, labels = inputs.to(device), labels.to(device)
+            logits = model(inputs)
+            preds = torch.argmax(logits, dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+            running_accuracy = correct / total
+            print(f"{desc} - Batch {batch_count}, Samples: {total}, Running Accuracy: {running_accuracy:.4f}")
+    final_accuracy = correct / total
+    print(f"{desc} - Final Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
+    return final_accuracy
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load config from checkpoint
     checkpoint_path = "./checkpoints/model_00300.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
 
-    # Step 1: Create GPT model with random weights and evaluate
+    # Step 1: Random GPT
     print("Step 1: Evaluating with randomly initialized GPT model")
-    gpt_model_random = GPT(config)  # Randomly initialized
+    gpt_model_random = GPT(config)
     gpt_model_random.eval()
     model_random = GPTWithClassifier(gpt_model_random, num_classes=3)
     model_random = model_random.to(device)
 
-    shard_paths = [
-        "./local_shards_val/mydata_train_0.pt",
-        "./local_shards_val/mydata_train_1.pt",
-        "./local_shards_val/mydata_train_2.pt"
-    ]
+    shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
+                   "./local_shards_val/mydata_train_2.pt"]
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
+    from collections import Counter
+    print("Label distribution:", Counter(dataset.labels))  # Check class balance
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-
     evaluate_performance(model_random, dataloader, device, desc="Random GPT")
 
-    # Step 2: Load pretrained weights into GPT and evaluate
+    # Step 2: Pretrained GPT
     print("\nStep 2: Loading pretrained weights and evaluating")
-    gpt_model_pretrained = GPT(config)  # Create a fresh model
+    gpt_model_pretrained = GPT(config)
     state_dict = checkpoint['model_state_dict']
-    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}  # Adjust keys
+    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     gpt_model_pretrained.load_state_dict(new_state_dict)
     gpt_model_pretrained.eval()
     model_pretrained = GPTWithClassifier(gpt_model_pretrained, num_classes=3)
     model_pretrained = model_pretrained.to(device)
-
     evaluate_performance(model_pretrained, dataloader, device, desc="Pretrained GPT")
 
-    # Step 3: Train the classifier
+    # Step 3: Train
     print("\nStep 3: Starting classifier training with pretrained GPT")
     train_classifier(model_pretrained, dataloader, num_epochs=10, device=device)
 
