@@ -6,6 +6,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import os
 import torch.nn.functional as F  # Add this import
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 
 # Model definitions (condensed from earlier)
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
@@ -172,7 +173,6 @@ class GPTWithClassifier(nn.Module):
         return logits
 
 
-# Dataloader for specific shard paths
 class ShardDataset(Dataset):
     def __init__(self, shard_paths, sequence_length):
         self.shard_paths = shard_paths
@@ -183,7 +183,6 @@ class ShardDataset(Dataset):
         self.labels = []
 
         for shard_path in shard_paths:
-            # Extract label from filename (e.g., 'mydata_train_2.pt' -> 2)
             label = int(os.path.basename(shard_path).split('_')[-1].replace('.pt', ''))
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
             token_count = min(loaded[REGIONS[0]].size(0), 39490)  # Cap at smallest class
@@ -214,35 +213,51 @@ class ShardDataset(Dataset):
         return inputs, label
 
 
-# Training function
-def train_classifier(model, dataloader, num_epochs, device):
+# Updated training function with validation
+def train_classifier(model, train_loader, val_loader, num_epochs, device):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.classifier.parameters(), lr=4e-4)
 
     for epoch in range(num_epochs):
+        # Training phase
         model.train()
-        total_loss = 0
-        correct = 0
-        total = 0
+        total_train_loss = 0
+        train_correct = 0
+        train_total = 0
 
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)  # [B, C, T], [B]
-
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
             logits = model(inputs)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+            total_train_loss += loss.item()
             preds = torch.argmax(logits, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            train_correct += (preds == labels).sum().item()
+            train_total += labels.size(0)
 
-        avg_loss = total_loss / len(dataloader)
-        accuracy = correct / total
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_accuracy = train_correct / train_total
+
+        # Validation phase
+        model.eval()
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                logits = model(inputs)
+                preds = torch.argmax(logits, dim=1)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
+        val_accuracy = val_correct / val_total
+
+        print(f"Epoch {epoch + 1}/{num_epochs}, "
+              f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
+              f"Val Acc: {val_accuracy:.4f}")
 
     torch.save(model.state_dict(), "gpt_with_classifier.pt")
     print("Model saved to gpt_with_classifier.pt")
@@ -292,11 +307,32 @@ def evaluate_performance(model, dataloader, device, desc="Evaluation"):
     return final_accuracy
 
 
+# Updated main function with holdout validation
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = "./checkpoints/model_00300.pt"
-    checkpoint = torch.load(checkpoint_path, map_location=device,weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
+
+    # Load dataset
+    shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
+                   "./local_shards_val/mydata_train_2.pt"]
+    dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
+    print("Label distribution:", Counter(dataset.labels))  # Check class balance
+
+    # Split dataset into training and validation
+    dataset_size = len(dataset)
+    indices = list(range(dataset_size))
+    split = int(0.2 * dataset_size)  # 20% for validation
+    torch.manual_seed(42)  # For reproducibility
+    torch.randperm(dataset_size)  # Shuffle indices
+    train_indices, val_indices = indices[split:], indices[:split]
+
+    train_sampler = SubsetRandomSampler(train_indices)
+    val_sampler = SubsetRandomSampler(val_indices)
+
+    train_loader = DataLoader(dataset, batch_size=64, sampler=train_sampler)
+    val_loader = DataLoader(dataset, batch_size=64, sampler=val_sampler)
 
     # Step 1: Random GPT
     print("Step 1: Evaluating with randomly initialized GPT model")
@@ -304,15 +340,8 @@ def main():
     gpt_model_random.eval()
     model_random = GPTWithClassifier(gpt_model_random, num_classes=3)
     model_random = model_random.to(device)
+    evaluate_performance(model_random, val_loader, device, desc="Random GPT (Validation)")
 
-    shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
-                   "./local_shards_val/mydata_train_2.pt"]
-    dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
-    from collections import Counter
-    print("Label distribution:", Counter(dataset.labels))  # Check class balance
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
-    evaluate_performance(model_random, dataloader, device, desc="Random GPT")
-    #
     # Step 2: Pretrained GPT
     print("\nStep 2: Loading pretrained weights and evaluating")
     gpt_model_pretrained = GPT(config)
@@ -322,13 +351,13 @@ def main():
     gpt_model_pretrained.eval()
     model_pretrained = GPTWithClassifier(gpt_model_pretrained, num_classes=3)
     model_pretrained = model_pretrained.to(device)
-    evaluate_performance(model_pretrained, dataloader, device, desc="Pretrained GPT")
+    evaluate_performance(model_pretrained, val_loader, device, desc="Pretrained GPT (Validation)")
 
-    # Step 3: Train
+    # Step 3: Train with validation
     print("\nStep 3: Starting classifier training with pretrained GPT")
-    train_classifier(model_random, dataloader, num_epochs=100, device=device)
-    train_classifier(model_pretrained, dataloader, num_epochs=200, device=device)
-
+    train_classifier(model_random, train_loader, val_loader, num_epochs=100, device=device)
+    print("\nTraining pretrained model with validation")
+    train_classifier(model_pretrained, train_loader, val_loader, num_epochs=200, device=device)
 
 if __name__ == "__main__":
     main()
