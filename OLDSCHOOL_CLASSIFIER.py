@@ -511,9 +511,9 @@ def main():
 
     # Shard file paths (one per class).
     shard_paths = [
-        "./local_shards_val/mydata.pt",
-        "./local_shards_val/mydata.pt",
-        "./local_shards_val/mydata.pt"
+        "./local_shards_val/mydata_train_0.pt",
+        "./local_shards_val/mydata_train_1.pt",
+        "./local_shards_val/mydata_train_2.pt"
     ]
 
     # Load the entire dataset from shards.
