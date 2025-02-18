@@ -497,7 +497,6 @@ def evaluate(model, dataloader, device):
 #############################################
 # Main: Fine-Tune & Test
 #############################################
-
 def main():
     import os
     import random
@@ -506,10 +505,10 @@ def main():
     import torch.nn.functional as F
     import torch.optim as optim
     from torch.utils.data import DataLoader, random_split
-    # Assume your checkpoint manager functions are available:
+    # Import your checkpoint manager functions.
     from checkpoint_manager import load_checkpoint, save_checkpoint
 
-    # --- Corrected GPTForClassification definition ---
+    # --- Define GPTForClassification with debug prints ---
     class GPTForClassification(nn.Module):
         def __init__(self, config, num_classes):
             super().__init__()
@@ -524,21 +523,32 @@ def main():
         def forward(self, idx, labels=None):
             # idx: [B, num_channels, T]
             B, C, T = idx.size()
-            # Use the raw GPT embedding.
+            # Check for embedding attributes.
             if hasattr(self.gpt, 'wte'):
-                tok_emb = self.gpt.wte(idx)  # Expecting shape: [B, C, T, n_embd]
-            else:
-                # Fallback if your raw model stores embeddings under transformer.
+                print("Debug: using self.gpt.wte for token embeddings.")
+                tok_emb = self.gpt.wte(idx)  # [B, C, T, n_embd]
+            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'wte'):
+                print("Debug: using self.gpt.transformer.wte for token embeddings.")
                 tok_emb = self.gpt.transformer.wte(idx)
-            tok_emb = tok_emb.transpose(1, 2)  # Now shape: [B, T, C, n_embd]
-            x = tok_emb
-            # Get positional embeddings.
-            if hasattr(self.gpt, 'wpe'):
-                pos_emb = self.gpt.wpe(torch.arange(T, device=x.device).unsqueeze(0))
             else:
+                print("Debug: GPT model missing token embedding. Keys:", self.gpt.__dict__.keys())
+                raise AttributeError("GPT model missing token embedding layer.")
+            tok_emb = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
+            x = tok_emb
+
+            # Positional embeddings.
+            if hasattr(self.gpt, 'wpe'):
+                print("Debug: using self.gpt.wpe for positional embeddings.")
+                pos_emb = self.gpt.wpe(torch.arange(T, device=x.device).unsqueeze(0))
+            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'wpe'):
+                print("Debug: using self.gpt.transformer.wpe for positional embeddings.")
                 pos_emb = self.gpt.transformer.wpe(torch.arange(T, device=x.device).unsqueeze(0))
+            else:
+                print("Debug: GPT model missing positional embedding. Keys:", self.gpt.__dict__.keys())
+                raise AttributeError("GPT model missing positional embedding layer.")
             x = x + pos_emb.unsqueeze(2)
-            # Process per-channel.
+
+            # Process each channel with its encoder.
             channel_outs = []
             for c in range(self.gpt.config.num_channels):
                 x_c = x[:, :, c, :]
@@ -550,7 +560,18 @@ def main():
             x = x.transpose(1, 2)  # [B, C, T, n_embd]
             B, C, T, E = x.size()
             x = x.reshape(B * C, T, E)
-            for block in self.gpt.h:
+
+            # Debug: Check which transformer block attribute exists.
+            if hasattr(self.gpt, 'h'):
+                print("Debug: using self.gpt.h for transformer blocks.")
+                blocks = self.gpt.h
+            elif hasattr(self.gpt, 'transformer') and hasattr(self.gpt.transformer, 'h'):
+                print("Debug: using self.gpt.transformer.h for transformer blocks.")
+                blocks = self.gpt.transformer.h
+            else:
+                print("Debug: GPT model missing transformer blocks. Available keys:", self.gpt.__dict__.keys())
+                raise AttributeError("GPT model missing transformer blocks (h).")
+            for block in blocks:
                 x = block(x)
             x = self.gpt.ln_f(x)
             x_last = x[:, -1, :].view(B, C, -1)  # [B, C, n_embd]
@@ -571,7 +592,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Shard file paths (update these paths to match your folder structure) ---
+    # --- Shard file paths (update these paths as needed) ---
     shard_paths = [
         "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
@@ -589,15 +610,16 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # --- Create GPT configuration ---
-    config = GPTConfig()  # Use your default or customized configuration.
-    # --- Instantiate the classification model (wrapping raw GPT) ---
+    # --- Create GPT configuration (using your existing defaults) ---
+    config = GPTConfig()  # Adjust or customize as needed.
+
+    # --- Instantiate the classification model (which wraps a raw GPT model) ---
     model = GPTForClassification(config, num_classes=num_classes)
     model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into model.gpt (ignore optimizer state) ---
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Update as needed.
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         orig_sd = checkpoint['model_state_dict']
