@@ -309,7 +309,7 @@ def main():
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
     from collections import Counter
     print("Label distribution:", Counter(dataset.labels))  # Check class balance
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=48, shuffle=True)
     evaluate_performance(model_random, dataloader, device, desc="Random GPT")
 
     # Step 2: Pretrained GPT
@@ -325,7 +325,7 @@ def main():
 
     # Step 3: Train
     print("\nStep 3: Starting classifier training with pretrained GPT")
-    train_classifier(model_pretrained, dataloader, num_epochs=10, device=device)
+    train_classifier(model_pretrained, dataloader, num_epochs=30, device=device)
 
 
 if __name__ == "__main__":
