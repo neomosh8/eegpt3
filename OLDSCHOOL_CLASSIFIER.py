@@ -514,7 +514,7 @@ def main():
             # Instantiate the raw GPT model.
             self.gpt = GPT(config)
             # Classification head.
-            self.classifier = nn.Linear(config.n_embd*2, num_classes)
+            self.classifier = nn.Linear(config.n_embd, num_classes)
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
@@ -628,7 +628,7 @@ def main():
     # --- Instantiate the classification model (with debug off) ---
     model = GPTForClassification(config, num_classes=num_classes, debug=False)
     model.to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
 
     # --- Load raw GPT checkpoint into model.gpt (ignoring optimizer state) ---
     checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
