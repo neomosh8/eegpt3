@@ -272,14 +272,14 @@ def main():
     gpt_model = GPT(config)
 
     # Remove '_orig_mod.' prefix from state_dict keys
-    # state_dict = checkpoint['model_state_dict']
-    # new_state_dict = {}
-    # for key, value in state_dict.items():
-    #     new_key = key.replace("_orig_mod.", "")  # Strip the prefix
-    #     new_state_dict[new_key] = value
+    state_dict = checkpoint['model_state_dict']
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("_orig_mod.", "")  # Strip the prefix
+        new_state_dict[new_key] = value
 
     # Load the adjusted state_dict
-    # gpt_model.load_state_dict(new_state_dict)
+    gpt_model.load_state_dict(new_state_dict)
     gpt_model.eval()
 
     # Attach classifier (3 classes: 0, 1, 2)
