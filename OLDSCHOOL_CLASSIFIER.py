@@ -310,7 +310,7 @@ def main():
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
     from collections import Counter
     print("Label distribution:", Counter(dataset.labels))  # Check class balance
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
     evaluate_performance(model_random, dataloader, device, desc="Random GPT")
 
     # Step 2: Pretrained GPT
