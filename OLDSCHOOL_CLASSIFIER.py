@@ -538,15 +538,30 @@ def main():
     checkpoint_path = "./checkpoints/model_01000.pt"  # Update the filename as needed.
     checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
     orig_sd = checkpoint['model_state_dict']
+
     fixed_sd = {}
     for k, v in orig_sd.items():
-        # Remove the '_orig_mod.' prefix if present.
-        k = k.replace("_orig_mod.", "")
-        # If the key does not start with 'gpt.', prepend it.
-        if not k.startswith("gpt."):
-            k = "gpt." + k
-        fixed_sd[k] = v
+        # 1) Remove any leftover prefixes like "_orig_mod." or "module."
+        new_k = k.replace("_orig_mod.", "")
+        new_k = new_k.replace("module.", "")
 
+        # 2) Rename top-level keys to have "gpt." prefix if needed.
+        #    e.g. "transformer.wte.weight" => "gpt.transformer.wte.weight"
+        #         "channel_encoder.0.0..." => "gpt.channel_encoder.0.0..."
+        #         "cross_channel_fusion..." => "gpt.cross_channel_fusion..."
+        #         "lm_head.weight" => "gpt.lm_head.weight"
+        if new_k.startswith("transformer."):
+            new_k = "gpt." + new_k
+        elif new_k.startswith("channel_encoder."):
+            new_k = "gpt." + new_k
+        elif new_k.startswith("cross_channel_fusion."):
+            new_k = "gpt." + new_k
+        elif new_k.startswith("lm_head."):
+            new_k = "gpt." + new_k
+
+        fixed_sd[new_k] = v
+
+    # Now load the fixed state dict.
     model.load_state_dict(fixed_sd, strict=True)
     print(
         f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
