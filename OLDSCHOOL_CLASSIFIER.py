@@ -183,58 +183,60 @@ class ShardDataset(Dataset):
         self.tokens = {region: [] for region in REGIONS}
         self.labels = []
 
+        # Load all data
         for shard_path in shard_paths:
             label = int(os.path.basename(shard_path).split('_')[-1].replace('.pt', ''))
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
-            token_count = min(loaded[REGIONS[0]].size(0), 39490)  # Cap at smallest class
+            token_count = min(loaded[REGIONS[0]].size(0), 39490)
             for region in REGIONS:
                 self.tokens[region].append(loaded[region][:token_count])
             self.labels.extend([label] * token_count)
 
         for region in REGIONS:
             self.tokens[region] = torch.cat(self.tokens[region], dim=0)
+        self.labels = torch.tensor(self.labels)
 
         self.total_length = self.tokens[REGIONS[0]].size(0)
         assert all(self.tokens[r].size(0) == self.total_length for r in REGIONS)
         assert len(self.labels) == self.total_length
 
-        # Split into train and validation
+        # Randomly shuffle indices and split
+        indices = torch.randperm(self.total_length)
         split_idx = int(self.total_length * split_ratio)
         if is_train:
-            for region in REGIONS:
-                self.tokens[region] = self.tokens[region][:split_idx]
-            self.labels = self.labels[:split_idx]
+            indices = indices[:split_idx]
         else:
-            for region in REGIONS:
-                self.tokens[region] = self.tokens[region][split_idx:]
-            self.labels = self.labels[split_idx:]
+            indices = indices[split_idx:]
 
-        self.total_length = self.tokens[REGIONS[0]].size(0)
+        # Apply split
+        for region in REGIONS:
+            self.tokens[region] = self.tokens[region][indices]
+        self.labels = self.labels[indices]
+        self.total_length = len(self.labels)
 
     def __len__(self):
         return self.total_length // self.sequence_length
 
     def __getitem__(self, idx):
         start = idx * self.sequence_length
+        end = start + self.sequence_length
         channel_inputs = []
         for region in REGIONS:
-            seq = self.tokens[region][start:start + self.sequence_length]
-            if seq.size(0) < self.sequence_length:  # Pad if needed
-                seq = torch.nn.functional.pad(seq, (0, self.sequence_length - seq.size(0)))
+            seq = self.tokens[region][start:end]
+            if seq.size(0) < self.sequence_length:
+                seq = F.pad(seq, (0, self.sequence_length - seq.size(0)))
             channel_inputs.append(seq.unsqueeze(0))
-        inputs = torch.cat(channel_inputs, dim=0)  # [num_channels, sequence_length]
+        inputs = torch.cat(channel_inputs, dim=0)
         label = self.labels[start]
         return inputs, label
 
-
-# Training function
+# Updated training function with validation
 def train_classifier(model, train_loader, val_loader, num_epochs, device):
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.classifier.parameters(), lr=4e-4)
 
     for epoch in range(num_epochs):
-        # Training phase
         model.train()
         total_loss = 0
         correct = 0
@@ -253,7 +255,7 @@ def train_classifier(model, train_loader, val_loader, num_epochs, device):
         avg_loss = total_loss / len(train_loader)
         train_accuracy = correct / total
 
-        # Validation phase
+        # Validation
         model.eval()
         val_correct = 0
         val_total = 0
@@ -272,30 +274,7 @@ def train_classifier(model, train_loader, val_loader, num_epochs, device):
     torch.save(model.state_dict(), "gpt_with_classifier.pt")
     print("Model saved to gpt_with_classifier.pt")
 
-# Evaluation function (unchanged)
-def evaluate_performance(model, dataloader, device, desc="Evaluation"):
-    model.eval()
-    correct = 0
-    total = 0
-    batch_count = 0
-
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            batch_count += 1
-            inputs, labels = inputs.to(device), labels.to(device)
-            logits = model(inputs)
-            preds = torch.argmax(logits, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-            running_accuracy = correct / total
-            print(f"{desc} - Batch {batch_count}, Samples processed: {total}, Running Accuracy: {running_accuracy:.4f}")
-
-    final_accuracy = correct / total
-    print(f"{desc} - Final Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
-    return final_accuracy# Main
-# Updated main function
-# [Your existing imports and model definitions remain unchanged]
-
+# Evaluation function
 def evaluate_performance(model, dataloader, device, desc="Evaluation"):
     model.eval()
     correct = 0
@@ -315,21 +294,18 @@ def evaluate_performance(model, dataloader, device, desc="Evaluation"):
     print(f"{desc} - Final Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
     return final_accuracy
 
-
-# Updated main function with holdout validation
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = "./checkpoints/model_00300.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
 
-    # Load datasets
     shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
                    "./local_shards_val/mydata_train_2.pt"]
     train_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=0.8, is_train=True)
     val_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=0.8, is_train=False)
-    print("Train label distribution:", Counter(train_dataset.labels))
-    print("Val label distribution:", Counter(val_dataset.labels))
+    print("Train label distribution:", Counter(train_dataset.labels.tolist()))
+    print("Val label distribution:", Counter(val_dataset.labels.tolist()))
 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
@@ -353,12 +329,12 @@ def main():
     model_pretrained = model_pretrained.to(device)
     evaluate_performance(model_pretrained, val_loader, device, desc="Pretrained GPT (Validation)")
 
-    # Step 3: Train with validation
+    # Step 3: Train
     print("\nStep 3: Starting classifier training")
     print("Training random GPT model")
-    train_classifier(model_random, train_loader, val_loader, num_epochs=100, device=device)
+    train_classifier(model_random, train_loader, val_loader, num_epochs=10, device=device)  # Reduced for testing
     print("\nTraining pretrained GPT model")
-    train_classifier(model_pretrained, train_loader, val_loader, num_epochs=200, device=device)
+    train_classifier(model_pretrained, train_loader, val_loader, num_epochs=10, device=device)
 
 if __name__ == "__main__":
     main()
