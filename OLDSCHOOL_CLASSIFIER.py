@@ -158,10 +158,10 @@ class GPTWithClassifier(nn.Module):
         for param in self.gpt.parameters():
             param.requires_grad = False
         self.classifier = nn.Sequential(
-            nn.Linear(gpt_model.config.n_embd, 8),
+            nn.Linear(gpt_model.config.n_embd, 32),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(8, num_classes)
+            nn.Linear(32, num_classes)
         )
 
     def forward(self, idx):
