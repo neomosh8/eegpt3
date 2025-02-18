@@ -247,20 +247,27 @@ def train_classifier(model, dataloader, num_epochs, device):
     torch.save(model.state_dict(), "gpt_with_classifier.pt")
     print("Model saved to gpt_with_classifier.pt")
 
+
 def evaluate_random_performance(model, dataloader, device):
     model.eval()
     correct = 0
     total = 0
+    batch_count = 0
+
     with torch.no_grad():
         for inputs, labels in dataloader:
+            batch_count += 1
             inputs, labels = inputs.to(device), labels.to(device)
             logits = model(inputs)
             preds = torch.argmax(logits, dim=1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
-    accuracy = correct / total
-    print(f"Initial Random Accuracy: {accuracy:.4f}")
-    return accuracy
+            running_accuracy = correct / total
+            print(f"Batch {batch_count}, Samples processed: {total}, Running Accuracy: {running_accuracy:.4f}")
+
+    final_accuracy = correct / total
+    print(f"Initial Random Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
+    return final_accuracy
 # Main
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
