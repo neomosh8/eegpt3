@@ -6,31 +6,31 @@ import matplotlib.pyplot as plt
 
 # Full list of channel names as per EMOTIV documentation
 EMOTIV_CHANNEL_NAMES = [
-    'ED_COUNTER',  # 1
-    'ED_INTERPOLATED',  # 2
-    'ED_RAW_CQ',  # 3
-    'ED_AF3',  # 4
-    'ED_F7',  # 5
-    'ED_F3',  # 6
-    'ED_FC5',  # 7
-    'ED_T7',  # 8
-    'ED_P7',  # 9
-    'ED_O1',  # 10
-    'ED_O2',  # 11
-    'ED_P8',  # 12
-    'ED_T8',  # 13
-    'ED_FC6',  # 14
-    'ED_F4',  # 15
-    'ED_F8',  # 16
-    'ED_AF4',  # 17
-    'ED_GYROX',  # 18
-    'ED_GYROY',  # 19
-    'ED_TIMESTAMP',  # 20
-    'ED_ES_TIMESTAMP',  # 21
-    'ED_FUNC_ID',  # 22
-    'ED_FUNC_VALUE',  # 23
-    'ED_MARKER',  # 24
-    'ED_SYNC_SIGNAL'  # 25
+    'ED_COUNTER',      # 1
+    'ED_INTERPOLATED', # 2
+    'ED_RAW_CQ',       # 3
+    'ED_AF3',          # 4
+    'ED_F7',           # 5
+    'ED_F3',           # 6
+    'ED_FC5',          # 7
+    'ED_T7',           # 8
+    'ED_P7',           # 9
+    'ED_O1',           # 10
+    'ED_O2',           # 11
+    'ED_P8',           # 12
+    'ED_T8',           # 13
+    'ED_FC6',          # 14
+    'ED_F4',           # 15
+    'ED_F8',           # 16
+    'ED_AF4',          # 17
+    'ED_GYROX',        # 18
+    'ED_GYROY',        # 19
+    'ED_TIMESTAMP',    # 20
+    'ED_ES_TIMESTAMP', # 21
+    'ED_FUNC_ID',      # 22
+    'ED_FUNC_VALUE',   # 23
+    'ED_MARKER',       # 24
+    'ED_SYNC_SIGNAL'   # 25
 ]
 
 # For EEG, we only need channels 4 to 17 (MATLAB indexing).
@@ -40,7 +40,6 @@ EEG_CHANNEL_NAMES = EMOTIV_CHANNEL_NAMES[3:17]
 # Convert to conventional EEG channel names by dropping the "ED_" prefix.
 CONVENTIONAL_CHANNEL_NAMES = [name.replace("ED_", "") for name in EEG_CHANNEL_NAMES]
 
-
 def process_emotiv_file(mat_file_path):
     """
     Loads an Emotiv .mat file and extracts the EEG data (channels 4–17).
@@ -49,7 +48,7 @@ def process_emotiv_file(mat_file_path):
         mat_file_path: Path to the .mat file.
 
     Returns:
-        df: Pandas DataFrame with columns "TimeStamp" and one column per EEG channel
+        df: Pandas DataFrame with a "TimeStamp" column and one column per EEG channel,
             using conventional channel names.
     """
     # Load the MATLAB file.
@@ -74,7 +73,6 @@ def process_emotiv_file(mat_file_path):
 
     return df
 
-
 def plot_emotiv_eeg(df, fs=128, title="Emotiv EEG Data"):
     """
     Plots all EEG channels from the DataFrame in separate subplots.
@@ -84,8 +82,8 @@ def plot_emotiv_eeg(df, fs=128, title="Emotiv EEG Data"):
         fs: Sampling frequency.
         title: Plot title.
     """
-    # Exclude the "TimeStamp" column for plotting.
-    channel_columns = df.columns[1:]
+    # Exclude the "TimeStamp" and "Label" columns for plotting.
+    channel_columns = [col for col in df.columns if col not in ["TimeStamp", "Label"]]
     n_channels = len(channel_columns)
     n_samples = len(df)
     time_axis = np.arange(n_samples) / fs
@@ -104,14 +102,18 @@ def plot_emotiv_eeg(df, fs=128, title="Emotiv EEG Data"):
     plt.tight_layout()
     plt.show()
 
-
 if __name__ == "__main__":
-    # Folder containing the 34 Emotiv experiment .mat files.
+    # Folder containing the Emotiv experiment .mat files.
     input_folder = "dataset/emotiv_experiments"  # <-- Update this path as needed.
 
-    # Output folder to save CSV files.
+    # Output folder to save aggregated CSV files.
     output_folder = "csv_emotiv"
     os.makedirs(output_folder, exist_ok=True)
+
+    # Containers for aggregating data across all subjects by label.
+    focused_list = []
+    unfocused_list = []
+    sleep_list = []
 
     # List all .mat files in the input folder.
     mat_files = [f for f in os.listdir(input_folder) if f.endswith('.mat')]
@@ -123,10 +125,39 @@ if __name__ == "__main__":
         # Process the file to get a DataFrame.
         df = process_emotiv_file(mat_file_path)
 
-        # Save the DataFrame as a CSV file.
-        csv_filename = os.path.join(output_folder, f"{os.path.splitext(mat_file)[0]}.csv")
-        df.to_csv(csv_filename, index=False)
-        print(f"Saved CSV to: {csv_filename}")
+        # Create a "Label" column based on TimeStamp (in seconds).
+        # 0 - 10 minutes: focused; 10 - 20 minutes: unfocused; 20+ minutes: sleep.
+        conditions = [
+            (df["TimeStamp"] < 600),
+            (df["TimeStamp"] >= 600) & (df["TimeStamp"] < 1200),
+            (df["TimeStamp"] >= 1200)
+        ]
+        choices = ["focused", "unfocused", "sleep"]
+        df["Label"] = np.select(conditions, choices, default="unknown")
 
-        # Plot the EEG channels.
-        plot_emotiv_eeg(df, fs=128, title=f"Emotiv EEG Data: {mat_file}")
+        # Append rows to the aggregated lists for each label.
+        focused_list.append(df[df["Label"] == "focused"])
+        unfocused_list.append(df[df["Label"] == "unfocused"])
+        sleep_list.append(df[df["Label"] == "sleep"])
+
+        # Optionally, plot the EEG channels for this file.
+        # plot_emotiv_eeg(df, fs=128, title=f"Emotiv EEG Data: {mat_file}")
+
+    # After processing all files, aggregate data across subjects for each label.
+    focused_df = pd.concat(focused_list, ignore_index=True) if focused_list else pd.DataFrame()
+    unfocused_df = pd.concat(unfocused_list, ignore_index=True) if unfocused_list else pd.DataFrame()
+    sleep_df = pd.concat(sleep_list, ignore_index=True) if sleep_list else pd.DataFrame()
+
+    # Remove the "Label" column before saving the aggregated CSV files.
+    focused_csv = os.path.join(output_folder, "focused.csv")
+    unfocused_csv = os.path.join(output_folder, "unfocused.csv")
+    sleep_csv = os.path.join(output_folder, "sleep.csv")
+
+    focused_df.drop(columns=["Label"]).to_csv(focused_csv, index=False)
+    unfocused_df.drop(columns=["Label"]).to_csv(unfocused_csv, index=False)
+    sleep_df.drop(columns=["Label"]).to_csv(sleep_csv, index=False)
+
+    print("Aggregated CSVs saved (without the 'Label' column):")
+    print(f" - Focused: {focused_csv}")
+    print(f" - Unfocused: {unfocused_csv}")
+    print(f" - Sleep: {sleep_csv}")

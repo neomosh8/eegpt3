@@ -415,7 +415,7 @@ def filter_band_pass_windows(ndarray, sps):
     # f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
     # filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # return filtered_data
-    f_b, f_a = signal.butter(N=5, Wn=80, btype='low', fs=sps)
+    f_b, f_a = signal.butter(N=5, Wn=60, btype='low', fs=sps)
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
