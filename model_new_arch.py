@@ -53,7 +53,7 @@ if torch.cuda.is_available():
 # Model Components
 #########################
 class MultiScaleCrossChannelFusion(nn.Module):
-    def __init__(self, n_embd, num_heads=1, scales=[1, 2, 4]):
+    def __init__(self, n_embd, num_heads=1, scales=[1, 2]):
         """
         Args:
             n_embd: hidden size.
