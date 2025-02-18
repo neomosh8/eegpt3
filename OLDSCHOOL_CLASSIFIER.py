@@ -326,7 +326,7 @@ def main():
 
     # Step 3: Train
     print("\nStep 3: Starting classifier training with pretrained GPT")
-    train_classifier(model_random, dataloader, num_epochs=10, device=device)
+    train_classifier(model_random, dataloader, num_epochs=100, device=device)
     train_classifier(model_pretrained, dataloader, num_epochs=200, device=device)
 
 
