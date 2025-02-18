@@ -260,13 +260,13 @@ class GPTConfig:
     # # n_head: int = 12
     # # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
-    n_layer: int = 12
-    n_head: int = 16
-    n_embd: int = 1024
+    # n_layer: int = 12
+    # n_head: int = 16
+    # n_embd: int = 1024
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
