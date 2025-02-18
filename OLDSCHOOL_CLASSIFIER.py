@@ -499,6 +499,11 @@ def evaluate(model, dataloader, device):
 #############################################
 
 def main():
+    import os
+    import torch
+    import torch.optim as optim
+    from torch.utils.data import DataLoader, random_split
+
     # Hyperparameters.
     num_classes = 3
     T = 1024  # Sequence length.
@@ -525,46 +530,52 @@ def main():
     print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Create model configuration.
     config = GPTConfig()
 
-    # --- Step 1: Create and load raw GPT model ---
+    # --------- Step 1: Load raw GPT model from checkpoint -----------
     raw_gpt = GPT(config)
     raw_gpt.to(device)
-    # Use a temporary optimizer for loading (it won’t be used further)
     optimizer_raw = optim.AdamW(raw_gpt.parameters(), lr=learning_rate)
-    checkpoint_path = "./checkpoints/model_01000.pt"  # Adjust filename as needed.
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Update filename as needed.
     if os.path.exists(checkpoint_path):
+        # Load checkpoint into raw_gpt
         checkpoint = load_checkpoint(checkpoint_path, model=raw_gpt, optimizer=optimizer_raw, device=device)
         raw_gpt.load_state_dict(checkpoint['model_state_dict'], strict=True)
-        print(f"Loaded raw GPT checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+        print(
+            f"Raw GPT model state loaded from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
+        try:
+            optimizer_raw.load_state_dict(checkpoint['optimizer_state_dict'])
+        except ValueError as e:
+            print("Warning: Optimizer state dict mismatch, skipping optimizer state load.")
     else:
-        print("Raw GPT checkpoint not found; starting from scratch.")
+        print("Checkpoint not found; training from scratch.")
 
-    # --- Step 2: Wrap raw GPT into a classification model ---
+    # --------- Step 2: Wrap the pretrained GPT into the classification model -----------
     classification_model = GPTForClassification(config, num_classes=num_classes)
     classification_model.to(device)
-    # Replace the GPT submodule with our pretrained raw_gpt.
+    # Replace the internal GPT module with our loaded raw_gpt.
     classification_model.gpt = raw_gpt
 
-    # Create an optimizer for fine-tuning the classification model.
+    # Create optimizer for classification model.
     optimizer = optim.AdamW(classification_model.parameters(), lr=learning_rate)
 
-    # --- Fine-tuning loop ---
+    # --------- Fine-tuning loop -----------
     for epoch in range(num_epochs):
         train_loss = train_epoch(classification_model, train_loader, optimizer, device)
         val_acc = evaluate(classification_model, val_loader, device)
-        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
-        save_checkpoint(model=classification_model, optimizer=optimizer, config=config,
-                        step=epoch, val_loss=1 - val_acc, log_dir="./checkpoints")
+        print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
+        # Save checkpoint after each epoch.
+        save_checkpoint(model=classification_model, optimizer=optimizer, config=config, step=epoch,
+                        val_loss=1 - val_acc, log_dir="./checkpoints")
 
     # Save the final fine-tuned classification model.
     torch.save(classification_model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # --- Testing on one validation batch ---
+    # --------- Testing: Run the model on one validation batch -----------
     classification_model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
