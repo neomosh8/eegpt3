@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import os
 import torch.nn.functional as F  # Add this import
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
+from collections import Counter
 
 # Model definitions (condensed from earlier)
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
