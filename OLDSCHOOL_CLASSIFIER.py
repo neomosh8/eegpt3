@@ -485,7 +485,12 @@ def main():
             # Instantiate the raw GPT model.
             self.gpt = GPT(config)
             # Classification head.
-            self.classifier = ClassificationHead(config.n_embd, num_classes, dropout=0.1)
+            self.classifier = nn.Sequential(
+                nn.Linear(config.n_embd, config.n_embd // 2),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(config.n_embd // 2, num_classes)
+            )
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
