@@ -540,8 +540,11 @@ def main():
     orig_sd = checkpoint['model_state_dict']
     fixed_sd = {}
     for k, v in orig_sd.items():
-        # If the key does not already start with "gpt.", add the prefix.
-        new_k = k if k.startswith("gpt.") else "gpt." + k
+        # Remove any DDP wrappers
+        new_k = k.replace("module.", "").replace("_orig_mod.", "")
+        # Force the key to be in the "gpt." namespace.
+        if not new_k.startswith("gpt."):
+            new_k = "gpt." + new_k
         fixed_sd[new_k] = v
 
     model.load_state_dict(fixed_sd, strict=True)
