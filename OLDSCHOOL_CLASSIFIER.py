@@ -7,13 +7,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
+
+# Import your checkpoint manager functions.
+from checkpoint_manager import load_checkpoint, save_checkpoint
 
 #############################################
 # Global Constants & Regions (Channels)
 #############################################
 
-# These are the channels (e.g., brain regions). Adjust if needed.
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
 
@@ -24,50 +26,40 @@ REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 class ShardClassificationDataset(Dataset):
     """
     Loads tokens from shard files.
+
     Each shard file corresponds to one class and contains a dictionary
     mapping region names to a 1D tensor of token IDs.
 
-    For each shard, contiguous segments of length T are extracted (with optional stride)
+    For each shard, contiguous segments of length T are extracted (using a given stride)
     and the shard’s index is used as the class label.
-    A validation split is created by holding out a percentage of samples.
+
+    The entire dataset is built here; later, we split it into training and validation sets.
     """
 
-    def __init__(self, shard_paths, T, split="train", val_pct=0.2, stride=None):
+    def __init__(self, shard_paths, T, stride=None):
         """
         Args:
-            shard_paths (list): List of paths to shard files (each for one class).
+            shard_paths (list): List of paths to shard files (one per class).
             T (int): Sequence length (number of tokens per sample).
-            split (str): "train" or "val" to select which split of data to use.
-            val_pct (float): Fraction of samples per shard reserved for validation.
             stride (int): Step size for sampling segments (default: T, i.e. non-overlapping).
         """
         self.T = T
         self.stride = stride if stride is not None else T
-        self.split = split
-        self.val_pct = val_pct
-        self.samples = []  # List of tuples: (shard_idx, start_index, label)
+        self.samples = []  # Each sample is a tuple: (shard_idx, start_index, label)
         self.shard_data = []  # Loaded shard data (one per class)
 
-        # Load each shard and compute sample start indices.
         for i, path in enumerate(shard_paths):
             data = torch.load(path, map_location="cpu")
-            # Ensure all required regions are present.
+            # Verify that each expected region exists.
             for region in REGIONS:
                 if region not in data:
                     raise ValueError(f"Shard {path} is missing region '{region}'")
             self.shard_data.append(data)
-            # Assume all regions have the same token length.
+            # Assume all regions in a shard have the same total length.
             total_length = self.shard_data[-1][REGIONS[0]].size(0)
-            # Compute all possible start indices (non-overlapping segments).
             indices = list(range(0, total_length - T, self.stride))
-            random.shuffle(indices)  # Shuffle to randomize order.
-            num_val = int(len(indices) * self.val_pct)
-            if self.split == "train":
-                selected = indices[num_val:]
-            else:
-                selected = indices[:num_val]
-            for start_idx in selected:
-                # For this shard, label is the shard index (i.e. class 0,1,2).
+            for start_idx in indices:
+                # Use the shard index as the class label.
                 self.samples.append((i, start_idx, i))
         random.shuffle(self.samples)
 
@@ -81,8 +73,8 @@ class ShardClassificationDataset(Dataset):
         for region in REGIONS:
             tokens = self.shard_data[shard_idx][region]
             segment = tokens[start_idx: start_idx + self.T]
-            channels.append(segment.unsqueeze(0))  # [1, T]
-        # Stack channels to get shape [num_channels, T]
+            channels.append(segment.unsqueeze(0))  # Shape: [1, T]
+        # Stack channels: final shape [num_channels, T]
         x = torch.cat(channels, dim=0)
         return x, label
 
@@ -90,6 +82,37 @@ class ShardClassificationDataset(Dataset):
 #############################################
 # Model Components
 #############################################
+
+
+
+#########################
+# DDP Setup
+#########################
+ddp = int(os.environ.get('RANK', -1)) != -1
+if ddp:
+    assert torch.cuda.is_available(), "CUDA is required for DDP"
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = (ddp_rank == 0)
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"using device: {device}")
+
+device_type = "cuda" if device.startswith("cuda") else "cpu"
+
+# Set manual seeds for reproducibility.
+torch.manual_seed(9259)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(9259)
+
+
 #########################
 # Model Components
 #########################
@@ -377,36 +400,27 @@ class GPT(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and ('cuda' in device)
+
 
         if master_process:
             print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
             print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
-            print(f"Using fused AdamW: {use_fused}")
+            print(f"Using fused AdamW: false")
 
         optimizer = torch.optim.AdamW(
             optim_groups,
             betas=(0.9, 0.95),
             eps=1e-8,
-            fused=use_fused
+            fused=False
         )
         return optimizer
 
 
 
-#############################################
-# GPT & GPTForClassification Definitions
-#############################################
-
 class GPTForClassification(nn.Module):
     def __init__(self, config, num_classes):
-        """
-        Wraps a pretrained GPT with a classification head.
-        """
         super().__init__()
         self.gpt = GPT(config)
-        # Classification head: maps pooled representation to class logits.
         self.classifier = nn.Linear(config.n_embd, num_classes)
         nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
         if self.classifier.bias is not None:
@@ -424,27 +438,22 @@ class GPTForClassification(nn.Module):
         pos = torch.arange(T, device=x.device).unsqueeze(0)
         pos_emb = self.gpt.wpe(pos)
         x = x + pos_emb.unsqueeze(2)
-        # Per-channel encoding.
         channel_outs = []
         for c in range(self.gpt.config.num_channels):
             x_c = x[:, :, c, :]
             x_c = self.gpt.channel_encoder[c](x_c)
             channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
-        # Cross-channel fusion.
         fused = self.gpt.cross_channel_fusion(x)  # [B, T, n_embd]
         x = x + fused.unsqueeze(2)
-        # Final transformer blocks.
         x = x.transpose(1, 2)  # [B, C, T, n_embd]
         B, C, T, E = x.size()
         x = x.reshape(B * C, T, E)
         for block in self.gpt.h:
             x = block(x)
         x = self.gpt.ln_f(x)
-        # Extract the last token representation from each channel.
         x_last = x[:, -1, :]  # [B * C, n_embd]
         x_last = x_last.view(B, C, -1)  # [B, C, n_embd]
-        # Pool across channels (average).
         pooled = x_last.mean(dim=1)  # [B, n_embd]
         logits = self.classifier(pooled)  # [B, num_classes]
         loss = None
@@ -473,8 +482,7 @@ def train_epoch(model, dataloader, optimizer, device):
 
 def evaluate(model, dataloader, device):
     model.eval()
-    correct = 0
-    total = 0
+    correct, total = 0, 0
     with torch.no_grad():
         for x, labels in dataloader:
             x = x.to(device)
@@ -493,24 +501,29 @@ def evaluate(model, dataloader, device):
 def main():
     # Hyperparameters.
     num_classes = 3
-    T = 1024  # Sequence length per sample.
+    T = 128  # Sequence length.
     batch_size = 16
     learning_rate = 1e-4
     num_epochs = 5
-    val_pct = 0.1  # 20% holdout for validation.
+    val_pct = 0.2  # 20% holdout for validation.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Shard file paths (one per class). Adjust the paths as needed.
+    # Shard file paths (one per class).
     shard_paths = [
-        "./local_shards_val/class0.pt",
-        "./local_shards_val/class1.pt",
-        "./local_shards_val/class2.pt"
+        "./local_shards/class0.pt",
+        "./local_shards/class1.pt",
+        "./local_shards/class2.pt"
     ]
 
-    # Create training and validation datasets.
-    train_dataset = ShardClassificationDataset(shard_paths, T=T, split="train", val_pct=val_pct)
-    val_dataset = ShardClassificationDataset(shard_paths, T=T, split="val", val_pct=val_pct)
+    # Load the entire dataset from shards.
+    full_dataset = ShardClassificationDataset(shard_paths, T=T, stride=T)
+    # Split the dataset into training and validation sets.
+    total_samples = len(full_dataset)
+    train_size = int((1 - val_pct) * total_samples)
+    val_size = total_samples - train_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -519,27 +532,35 @@ def main():
     config = GPTConfig()
     model = GPTForClassification(config, num_classes=num_classes)
     model.to(device)
-
-    # Optionally load pretrained GPT weights (if available) into the GPT part.
-    pretrained_path = "pretrained_gpt.pth"
-    if os.path.exists(pretrained_path):
-        state_dict = torch.load(pretrained_path, map_location=device)
-        model.gpt.load_state_dict(state_dict, strict=False)
-        print("Loaded pretrained GPT weights.")
-
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+
+    # --- Load Checkpoint if available ---
+    checkpoint_path = "./checkpoints/model_01000.pt"  # Update the filename as needed.
+    if os.path.exists(checkpoint_path):
+        checkpoint = load_checkpoint(checkpoint_path, model=model, optimizer=optimizer, device=device)
+        orig_sd = checkpoint['model_state_dict']
+        fixed_sd = {}
+        for k, v in orig_sd.items():
+            new_key = k.replace("_orig_mod.", "")
+            fixed_sd[new_key] = v
+        model.load_state_dict(fixed_sd, strict=True)
+        print(
+            f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
 
     # Fine-tuning loop.
     for epoch in range(num_epochs):
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_acc = evaluate(model, val_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}: Train Loss = {train_loss:.4f}, Val Accuracy = {val_acc:.4f}")
+        # Save checkpoint after each epoch.
+        save_checkpoint(model=model, optimizer=optimizer, config=config, step=epoch, val_loss=1 - val_acc,
+                        log_dir="./checkpoints")
 
-    # Save the fine-tuned classification model.
+    # Save the final fine-tuned model.
     torch.save(model.state_dict(), "gpt_classification_finetuned.pth")
     print("Saved fine-tuned classification model.")
 
-    # Testing: Run the model on a single validation batch.
+    # Testing: Run the model on one validation batch.
     model.eval()
     x, labels = next(iter(val_loader))
     x = x.to(device)
