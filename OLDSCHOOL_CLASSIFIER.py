@@ -300,7 +300,7 @@ def main():
         "./local_shards_val/mydata_train_2.pt"
     ]
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
     evaluate_random_performance(model, dataloader, device)
     evaluate_random_performance(model, dataloader, device)
     evaluate_random_performance(model, dataloader, device)
