@@ -540,14 +540,14 @@ def main():
     orig_sd = checkpoint['model_state_dict']
     fixed_sd = {}
     for k, v in orig_sd.items():
-        # Remove any _orig_mod. prefix.
-        new_key = k.replace("_orig_mod.", "")
-        # Add the "gpt." prefix if it’s missing.
-        if not new_key.startswith("gpt."):
-            new_key = "gpt." + new_key
-        fixed_sd[new_key] = v
-    model.load_state_dict(fixed_sd, strict=True)
+        # Remove the '_orig_mod.' prefix if present.
+        k = k.replace("_orig_mod.", "")
+        # If the key does not start with 'gpt.', prepend it.
+        if not k.startswith("gpt."):
+            k = "gpt." + k
+        fixed_sd[k] = v
 
+    model.load_state_dict(fixed_sd, strict=True)
     print(
         f"Loaded checkpoint from {checkpoint_path} at step {checkpoint['step']} with val loss {checkpoint['val_loss']}")
 
