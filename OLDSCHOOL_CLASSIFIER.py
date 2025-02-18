@@ -247,7 +247,20 @@ def train_classifier(model, dataloader, num_epochs, device):
     torch.save(model.state_dict(), "gpt_with_classifier.pt")
     print("Model saved to gpt_with_classifier.pt")
 
-
+def evaluate_random_performance(model, dataloader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            logits = model(inputs)
+            preds = torch.argmax(logits, dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    accuracy = correct / total
+    print(f"Initial Random Accuracy: {accuracy:.4f}")
+    return accuracy
 # Main
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -280,6 +293,7 @@ def main():
     ]
     dataset = ShardDataset(shard_paths, sequence_length=config.block_size)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    evaluate_random_performance(model, dataloader, device)
 
     # Train
     train_classifier(model, dataloader, num_epochs=10, device=device)
