@@ -365,15 +365,15 @@ class DataLoaderLiteAllInMemory:
 
     def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int, pad_value: int) -> torch.Tensor:
         total_length = token_tensor.size(0)
+        start = start % total_length  # Wrap around if exceeding length
         end = start + length
         if end <= total_length:
             return token_tensor[start:end]
         else:
-            available = token_tensor[start:] if start < total_length else torch.tensor([], dtype=token_tensor.dtype)
-            padding_needed = length - available.size(0)
-            padding = torch.full((padding_needed,), pad_value, dtype=token_tensor.dtype)
-            return torch.cat((available, padding), dim=0)
-
+            first_part = token_tensor[start:]
+            remaining = length - first_part.size(0)
+            second_part = token_tensor[:remaining]
+            return torch.cat((first_part, second_part), dim=0)
     def next_batch(self):
         inputs_list = []
         targets_list = []
@@ -584,8 +584,8 @@ val_loader = DataLoaderLiteAllInMemory(
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
 num_passes = 5
-tokens_per_optim = B * T * grad_accum_steps * ddp_world_size  # tokens processed per optimizer step
-steps_per_pass = (train_loader.total_len - 1) // tokens_per_optim
+tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
+steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
 max_steps = num_passes * steps_per_pass
 print(f"Total tokens in training set for {ddp_local_rank}: {train_loader.total_len}")
 
@@ -760,6 +760,11 @@ for step in range(max_steps):
         ddp=ddp,
         scaler=scaler
     )
+    # Reset DataLoader at the end of each pass
+    if (step + 1) % steps_per_pass == 0:
+        train_loader.reset()
+        if master_process:
+            print(f"Completed pass {(step + 1) // steps_per_pass}, resetting DataLoader.")
 
     if master_process:
         loss_plotter.update_train(loss)
