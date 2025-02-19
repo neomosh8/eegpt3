@@ -55,44 +55,22 @@ if torch.cuda.is_available():
 import torch
 import torch.nn as nn
 
+
 class SimpleCrossChannelFusion(nn.Module):
-    def __init__(self, n_embd, num_heads=1):
-        """
-        Args:
-            n_embd: Embedding dimension (hidden size).
-            num_heads: Number of attention heads for cross-channel interaction.
-        """
+    def __init__(self, n_embd):
         super().__init__()
-        # Simple attention to fuse across channels, using batch_first for shape consistency
-        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
-        # Layer norm to stabilize outputs
+        self.proj = nn.Linear(n_embd, n_embd)
         self.ln = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        """
-        Args:
-            x: [B, time_steps, num_channels, n_embd] — Input with batch, time, channel, and embedding dims.
-        Returns:
-            fused: [B, time_steps, num_channels, n_embd] — Output with cross-channel info integrated.
-        """
-        B, T, C, E = x.size()  # Batch, Time, Channels, Embedding
-
-        # Reshape to treat channels as the sequence dimension for attention
-        # [B, T, C, E] -> [B * T, C, E], where C becomes the "sequence length"
-        x_reshaped = x.view(B * T, C, E)
-
-        # Apply causal attention across channels (no masking needed since we’re not attending over time here)
-        # Query, key, value are all the same input; output shape remains [B * T, C, E]
-        fused, _ = self.attn(x_reshaped, x_reshaped, x_reshaped)
-
-        # Residual connection to preserve original channel info
-        fused = fused + x_reshaped
-
-        # Normalize and reshape back to [B, T, C, E]
-        fused = self.ln(fused).view(B, T, C, E)
-
-        return fused
-
+        B, T, C, E = x.size()
+        # Average across channels
+        fused = x.mean(dim=2, keepdim=True)  # [B, T, 1, E]
+        # Apply projection
+        fused = self.proj(fused)  # [B, T, 1, E]
+        # Add back to original and normalize
+        x = x + fused.expand_as(x)  # [B, T, C, E]
+        return self.ln(x)
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -223,6 +201,7 @@ class GPTConfig:
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
     resid_dropout: float = 0.05
+    pad_token: int = 0  # Padding token for inputs
 
 
 class GPT(nn.Module):
@@ -238,11 +217,11 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
-        # Per-channel encoder (unchanged)
-        self.channel_encoder = nn.ModuleList([
-            nn.Sequential(Block(config), Block(config))
-            for _ in range(config.num_channels)
-        ])
+        # Shared intra-channel encoder (replaces per-channel encoder)
+        self.intra_channel_encoder = nn.Sequential(
+            Block(config),
+            Block(config)
+        )
 
         self.apply(self._init_weights)
     def _init_weights(self, module):
@@ -257,8 +236,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        B, C, T = idx.size()
-        assert C == self.config.num_channels, f"Expected {self.config.num_channels} channels, but got {C}"
+        B, C, T = idx.size()  # C can be 1 or more
 
         # Token embedding and reshape
         tok_emb = self.transformer.wte(idx)  # [B, C, T, n_embd]
@@ -269,15 +247,15 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos)  # [1, T, n_embd]
         x = x + pos_emb.unsqueeze(2)  # [B, T, C, n_embd]
 
-        # Per-channel encoding
+        # Apply shared intra-channel encoder to each channel
         channel_outs = []
-        for c in range(self.config.num_channels):
+        for c in range(C):
             x_c = x[:, :, c, :]  # [B, T, n_embd]
-            x_c = self.channel_encoder[c](x_c)
+            x_c = self.intra_channel_encoder(x_c)  # [B, T, n_embd]
             channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
 
-        # Transformer blocks with interleaved fusion
+        # Transformer blocks with fusion (works for any C)
         for block in self.transformer.h:
             x = block(x)  # [B, T, C, n_embd]
 
@@ -289,10 +267,10 @@ class GPT(nn.Module):
         logits = self.lm_head(x)  # [B * C, T, vocab_size]
         logits = logits.view(B, C, T, -1)  # [B, C, T, vocab_size]
 
-        # Loss computation
+        # Loss computation with padding ignored
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100)
         return logits, loss
 
 
@@ -385,16 +363,15 @@ class DataLoaderLiteAllInMemory:
         self.start_ptr = self.B * self.per_channel_length * self.process_rank
         self.ptr = self.start_ptr
 
-    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int) -> torch.Tensor:
+    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int, pad_value: int) -> torch.Tensor:
         total_length = token_tensor.size(0)
         end = start + length
         if end <= total_length:
             return token_tensor[start:end]
         else:
-            # Take what’s available and pad the rest
             available = token_tensor[start:] if start < total_length else torch.tensor([], dtype=token_tensor.dtype)
             padding_needed = length - available.size(0)
-            padding = torch.full((padding_needed,), self.pad_token, dtype=token_tensor.dtype)
+            padding = torch.full((padding_needed,), pad_value, dtype=token_tensor.dtype)
             return torch.cat((available, padding), dim=0)
 
     def next_batch(self):
@@ -407,11 +384,11 @@ class DataLoaderLiteAllInMemory:
             channel_targets = []
             for b in range(self.B):
                 start = self.ptr + b * self.per_channel_length
-                # Input: T tokens
-                seq = self._get_slice(token_tensor, start, self.per_channel_length)  # [T]
+                # Input: T tokens, pad with pad_token
+                seq = self._get_slice(token_tensor, start, self.per_channel_length, pad_value=self.pad_token)  # [T]
                 channel_inputs.append(seq.unsqueeze(0))  # [1, T]
-                # Target: Next T tokens (shifted by 1)
-                target = self._get_slice(token_tensor, start + 1, self.per_channel_length)  # [T]
+                # Target: Next T tokens, pad with -100
+                target = self._get_slice(token_tensor, start + 1, self.per_channel_length, pad_value=-100)  # [T]
                 channel_targets.append(target.unsqueeze(0))  # [1, T]
             channel_inputs = torch.cat(channel_inputs, dim=0)  # [B, T]
             channel_targets = torch.cat(channel_targets, dim=0)  # [B, T]
