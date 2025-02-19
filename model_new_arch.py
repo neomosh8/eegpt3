@@ -564,7 +564,7 @@ class DataLoaderLiteAllInMemory_old:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 16  # micro-batch size (sequences per mini-batch)
+B = 12  # micro-batch size (sequences per mini-batch)
 T = 1024  # sequence length (tokens per sequence)
 desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
