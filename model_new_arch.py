@@ -758,7 +758,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
 val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
         B * T * ddp_world_size)  # Ceiling division
-# val_steps_needed = 100
+val_steps_needed = 200
 if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=10, window=50)
@@ -802,7 +802,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if step % 300 == 0:
+    if step % 50 == 0:
         model.eval()
         val_loader.reset()
         if master_process:
@@ -832,7 +832,7 @@ for step in range(max_steps):
 
     if master_process:
         loss_plotter.maybe_plot(step)
-    if step % 300 == 0 and master_process and step > 0:
+    if step % 100 == 0 and master_process and step > 0:
         save_checkpoint(
             model=raw_model,
             optimizer=optimizer,
