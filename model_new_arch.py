@@ -186,13 +186,13 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 10799
     # Small model configuration
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    # n_layer: int = 12
+    # n_head: int = 12
+    # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
     # n_layer: int = 12
     # n_head: int = 16
