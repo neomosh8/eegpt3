@@ -136,7 +136,7 @@ class BlockWithFusion(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)  # Within-channel temporal attention
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.fusion = SimpleCrossChannelFusion(config.n_embd, num_heads=1)  # Cross-channel fusion
+        self.fusion = SimpleCrossChannelFusion(config.n_embd)  # Cross-channel fusion
         self.ln_3 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
