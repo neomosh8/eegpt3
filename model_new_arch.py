@@ -183,7 +183,7 @@ class CrossChannelFusion(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 1032
     vocab_size: int = 10799
     # Small model configuration
     # n_layer: int = 12
@@ -565,7 +565,7 @@ class DataLoaderLiteAllInMemory_old:
 #########################
 # Training hyperparameters
 B = 9  # micro-batch size (sequences per mini-batch)
-T = 1024  # sequence length (tokens per sequence)
+T = 1032  # sequence length (tokens per sequence)
 desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
