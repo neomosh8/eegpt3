@@ -333,7 +333,7 @@ class DataLoaderLiteAllInMemory:
 
         # Locate shard files
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))
+        self.shard_files = sorted(glob.glob(pattern))[0:1000]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -703,14 +703,14 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 2e-5
+base_lr = 1e-6
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps//num_passes,  # total number of training steps
-    pct_start=0.01,  # fraction of steps for warmup
+    pct_start=0.1,  # fraction of steps for warmup
     anneal_strategy='cos',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
 )
