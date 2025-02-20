@@ -113,7 +113,7 @@ evaluate_fewshot(gpt_model_random, support_data, query_data, device)
 # Step 2: Pretrained GPT
 print("\nStep 2: Loading pretrained weights and evaluating")
 gpt_model_pretrained = Model_class.GPT(config).to(device)
-checkpoint = torch.load("/checkpoints/model_03400.pt", map_location=device)  # Adjust path
+checkpoint = torch.load("checkpoints/model_03400.pt", map_location=device)  # Adjust path
 state_dict = checkpoint['model_state_dict']
 new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 gpt_model_pretrained.load_state_dict(new_state_dict)
