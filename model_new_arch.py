@@ -238,7 +238,7 @@ class GPTConfig:
     # n_embd: int = 768
     num_channels: int = 3
     mlp_dropout: float = 0.01
-    attn_dropout: float = 0.01
+    attn_dropout: float = 0.00
     resid_dropout: float = 0.01
     pad_token: int = 0  # Padding token for inputs
 
