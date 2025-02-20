@@ -196,7 +196,7 @@ class GPTConfig:
 
     n_layer: int = 12
     n_head: int = 12
-    n_embd: int = 512
+    n_embd: int = 768
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
