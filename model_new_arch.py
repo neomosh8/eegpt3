@@ -581,6 +581,28 @@ val_loader = DataLoaderLiteAllInMemory(
     local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
 )
 
+if master_process:
+    import matplotlib.pyplot as plt
+    # Create a GPTConfig instance to get the vocab_size.
+    config_for_plot = GPTConfig()
+    vocab_size = config_for_plot.vocab_size
+    for region in REGIONS:
+        tokens = train_loader.tokens[region]
+        # Convert tokens to a numpy array.
+        tokens_np = tokens.cpu().numpy()
+        plt.figure(figsize=(10, 6))
+        # Use bins covering all possible token indices (0 to vocab_size)
+        plt.hist(tokens_np, bins=range(0, vocab_size + 1), color='blue', edgecolor='black', alpha=0.7)
+        plt.title(f"Token Distribution for {region} region")
+        plt.xlabel("Token Value")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.tight_layout()
+        # Save the figure to a file instead of showing it.
+        filename = f"token_distribution_{region}.png"
+        plt.savefig(filename)
+        plt.close()
+
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
 num_passes = 5
