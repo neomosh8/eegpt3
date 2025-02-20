@@ -711,7 +711,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     max_lr=base_lr,
     total_steps=max_steps//num_passes,  # total number of training steps
     pct_start=0.1,  # fraction of steps for warmup
-    anneal_strategy='cos',  # cosine annealing for decay
+    anneal_strategy='linear',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
 )
 
