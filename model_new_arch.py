@@ -190,13 +190,13 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    # n_layer: int = 6
+    # n_head: int = 6
+    # n_embd: int = 384
 
-    # n_layer: int = 8
-    # n_head: int = 8
-    # n_embd: int = 512
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 512
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -581,106 +581,106 @@ val_loader = DataLoaderLiteAllInMemory(
     local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
 )
 
-if master_process:
-    import torch
-    import numpy as np
-    from scipy.stats import pearsonr
-
-    # Configuration (adjust as needed)
-    REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
-    VOCAB_SIZE = 10799  # From your GPTConfig
-    PAD_TOKEN = 0  # Assuming padding token is 0
-    SAMPLE_SIZE_NGRAMS = 1000000  # Sample size for n-grams
-    SAMPLE_SIZE_CORR = 100000  # Sample size for correlations
-
-
-    # Token Frequency and Entropy Analysis
-    def analyze_token_distribution(tokens, region):
-        print(f"Analyzing token distribution for {region}...")
-        unique, counts = torch.unique(tokens, return_counts=True)
-        total_tokens = tokens.numel()
-        counts = counts.float()
-        probs = counts / total_tokens
-        entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
-        top_10 = torch.topk(counts, 10).indices
-        print(f"\n=== {region.upper()} Token Distribution ===")
-        print(f"Total unique tokens: {len(unique)}")
-        for token in top_10:
-            count = counts[token].item()
-            percentage = (count / total_tokens) * 100
-            print(f"Token {unique[token].item()}: {count} occurrences ({percentage:.2f}%)")
-        print(f"Entropy (bits): {entropy:.4f}")
-
-
-    # Padding Analysis
-    def analyze_padding(tokens, region, pad_token=PAD_TOKEN):
-        print(f"Analyzing padding for {region}...")
-        padded_count = (tokens == pad_token).sum().item()
-        total_count = tokens.numel()
-        padded_fraction = padded_count / total_count
-        print(f"\n=== {region.upper()} Padding Analysis ===")
-        print(f"Total tokens: {total_count}")
-        print(f"Padded tokens (token {pad_token}): {padded_count}")
-        print(f"Fraction padded: {padded_fraction:.4f}")
-
-
-    # Efficient N-Gram Analysis
-    def analyze_ngrams(tokens, region, window_size=3, sample_size=SAMPLE_SIZE_NGRAMS):
-        print(f"Analyzing n-grams for {region} (sample size: {sample_size})...")
-        if tokens.numel() > sample_size:
-            tokens = tokens[:sample_size]  # Subsample for speed
-        tokens = tokens.unfold(0, window_size, 1)  # Sliding windows
-        ngrams, counts = torch.unique(tokens, dim=0, return_counts=True)
-        top_5 = torch.topk(counts, min(5, len(counts))).indices
-        print(f"\n=== {region.upper()} Top 5 {window_size}-grams ===")
-        for idx in top_5:
-            ngram = tuple(ngrams[idx].tolist())
-            count = counts[idx].item()
-            percentage = (count / len(tokens)) * 100
-            print(f"Sequence {ngram}: {count} occurrences ({percentage:.4f}%)")
-
-
-    # Perplexity Calculation
-    def calculate_perplexity(tokens, region, vocab_size=VOCAB_SIZE):
-        print(f"Calculating perplexity for {region}...")
-        unique, counts = torch.unique(tokens, return_counts=True)
-        total_tokens = tokens.numel()
-        probs = counts.float() / total_tokens
-        cross_entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
-        perplexity = 2 ** cross_entropy
-        print(f"\n=== {region.upper()} Perplexity ===")
-        print(f"Cross-entropy (bits): {cross_entropy:.4f}")
-        print(f"Perplexity: {perplexity:.4f}")
-
-
-    # Cross-Channel Correlation
-    def calculate_cross_channel_correlation(tokens1, tokens2, region1, region2, sample_size=SAMPLE_SIZE_CORR):
-        print(f"Calculating correlation between {region1} and {region2} (sample size: {sample_size})...")
-        tokens1_sample = tokens1[:sample_size].cpu().numpy()
-        tokens2_sample = tokens2[:sample_size].cpu().numpy()
-        correlation, _ = pearsonr(tokens1_sample, tokens2_sample)
-        print(f"Correlation between {region1} and {region2}: {correlation:.4f}")
-
-
-    # Main Analysis Loop
-    print("\n===== Training Data Token Quality Analysis =====")
-    for region in REGIONS:
-        tokens = train_loader.tokens[region]  # Replace with your data access method
-        analyze_token_distribution(tokens, region)
-        analyze_padding(tokens, region)
-        analyze_ngrams(tokens, region)
-        calculate_perplexity(tokens, region)
-
-    # Cross-Channel Correlations
-    print("\n=== Cross-Channel Correlations ===")
-    for i, region1 in enumerate(REGIONS):
-        for region2 in REGIONS[i + 1:]:
-            calculate_cross_channel_correlation(
-                train_loader.tokens[region1],
-                train_loader.tokens[region2],
-                region1,
-                region2
-            )
+# if master_process:
+#     import torch
+#     import numpy as np
+#     from scipy.stats import pearsonr
+#
+#     # Configuration (adjust as needed)
+#     REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+#     VOCAB_SIZE = 10799  # From your GPTConfig
+#     PAD_TOKEN = 0  # Assuming padding token is 0
+#     SAMPLE_SIZE_NGRAMS = 1000000  # Sample size for n-grams
+#     SAMPLE_SIZE_CORR = 100000  # Sample size for correlations
+#
+#
+#     # Token Frequency and Entropy Analysis
+#     def analyze_token_distribution(tokens, region):
+#         print(f"Analyzing token distribution for {region}...")
+#         unique, counts = torch.unique(tokens, return_counts=True)
+#         total_tokens = tokens.numel()
+#         counts = counts.float()
+#         probs = counts / total_tokens
+#         entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
+#         top_10 = torch.topk(counts, 10).indices
+#         print(f"\n=== {region.upper()} Token Distribution ===")
+#         print(f"Total unique tokens: {len(unique)}")
+#         for token in top_10:
+#             count = counts[token].item()
+#             percentage = (count / total_tokens) * 100
+#             print(f"Token {unique[token].item()}: {count} occurrences ({percentage:.2f}%)")
+#         print(f"Entropy (bits): {entropy:.4f}")
+#
+#
+#     # Padding Analysis
+#     def analyze_padding(tokens, region, pad_token=PAD_TOKEN):
+#         print(f"Analyzing padding for {region}...")
+#         padded_count = (tokens == pad_token).sum().item()
+#         total_count = tokens.numel()
+#         padded_fraction = padded_count / total_count
+#         print(f"\n=== {region.upper()} Padding Analysis ===")
+#         print(f"Total tokens: {total_count}")
+#         print(f"Padded tokens (token {pad_token}): {padded_count}")
+#         print(f"Fraction padded: {padded_fraction:.4f}")
+#
+#
+#     # Efficient N-Gram Analysis
+#     def analyze_ngrams(tokens, region, window_size=3, sample_size=SAMPLE_SIZE_NGRAMS):
+#         print(f"Analyzing n-grams for {region} (sample size: {sample_size})...")
+#         if tokens.numel() > sample_size:
+#             tokens = tokens[:sample_size]  # Subsample for speed
+#         tokens = tokens.unfold(0, window_size, 1)  # Sliding windows
+#         ngrams, counts = torch.unique(tokens, dim=0, return_counts=True)
+#         top_5 = torch.topk(counts, min(5, len(counts))).indices
+#         print(f"\n=== {region.upper()} Top 5 {window_size}-grams ===")
+#         for idx in top_5:
+#             ngram = tuple(ngrams[idx].tolist())
+#             count = counts[idx].item()
+#             percentage = (count / len(tokens)) * 100
+#             print(f"Sequence {ngram}: {count} occurrences ({percentage:.4f}%)")
+#
+#
+#     # Perplexity Calculation
+#     def calculate_perplexity(tokens, region, vocab_size=VOCAB_SIZE):
+#         print(f"Calculating perplexity for {region}...")
+#         unique, counts = torch.unique(tokens, return_counts=True)
+#         total_tokens = tokens.numel()
+#         probs = counts.float() / total_tokens
+#         cross_entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
+#         perplexity = 2 ** cross_entropy
+#         print(f"\n=== {region.upper()} Perplexity ===")
+#         print(f"Cross-entropy (bits): {cross_entropy:.4f}")
+#         print(f"Perplexity: {perplexity:.4f}")
+#
+#
+#     # Cross-Channel Correlation
+#     def calculate_cross_channel_correlation(tokens1, tokens2, region1, region2, sample_size=SAMPLE_SIZE_CORR):
+#         print(f"Calculating correlation between {region1} and {region2} (sample size: {sample_size})...")
+#         tokens1_sample = tokens1[:sample_size].cpu().numpy()
+#         tokens2_sample = tokens2[:sample_size].cpu().numpy()
+#         correlation, _ = pearsonr(tokens1_sample, tokens2_sample)
+#         print(f"Correlation between {region1} and {region2}: {correlation:.4f}")
+#
+#
+#     # Main Analysis Loop
+#     print("\n===== Training Data Token Quality Analysis =====")
+#     for region in REGIONS:
+#         tokens = train_loader.tokens[region]  # Replace with your data access method
+#         analyze_token_distribution(tokens, region)
+#         analyze_padding(tokens, region)
+#         analyze_ngrams(tokens, region)
+#         calculate_perplexity(tokens, region)
+#
+#     # Cross-Channel Correlations
+#     print("\n=== Cross-Channel Correlations ===")
+#     for i, region1 in enumerate(REGIONS):
+#         for region2 in REGIONS[i + 1:]:
+#             calculate_cross_channel_correlation(
+#                 train_loader.tokens[region1],
+#                 train_loader.tokens[region2],
+#                 region1,
+#                 region2
+#             )
 num_passes = 5
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
