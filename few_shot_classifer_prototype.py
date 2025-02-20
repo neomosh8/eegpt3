@@ -3,7 +3,6 @@ import random
 
 
 import Model_class
-import model_new_arch
 
 # From the original code
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
