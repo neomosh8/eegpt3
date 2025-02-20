@@ -582,26 +582,118 @@ val_loader = DataLoaderLiteAllInMemory(
 )
 
 if master_process:
-    import matplotlib.pyplot as plt
-    # Create a GPTConfig instance to get the vocab_size.
-    config_for_plot = GPTConfig()
-    vocab_size = config_for_plot.vocab_size
+    import torch
+    import numpy as np
+    from collections import Counter
+    from scipy.stats import pearsonr
+
+    # Define regions (adjust if your region names differ)
+    REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+
+
+    # Function to analyze token frequency distribution and entropy
+    def analyze_token_distribution(tokens, region):
+        """Prints token frequency distribution and entropy for a given region's tokens."""
+        token_counts = Counter(tokens.numpy())
+        total_tokens = len(tokens)
+        top_10 = token_counts.most_common(10)
+        print(f"\n=== {region.upper()} Token Distribution ===")
+        print(f"Total unique tokens: {len(token_counts)}")
+        for token, count in top_10:
+            percentage = (count / total_tokens) * 100
+            print(f"Token {token}: {count} occurrences ({percentage:.2f}%)")
+        # Calculate entropy
+        probs = np.array([count / total_tokens for count in token_counts.values()])
+        entropy = -np.sum(probs * np.log2(probs + 1e-10))  # Add small epsilon to avoid log(0)
+        print(f"Entropy (bits): {entropy:.4f}")
+
+
+    # Function to analyze padding
+    def analyze_padding(tokens, region, pad_token=0):
+        """Prints padding statistics for a given region's tokens."""
+        padded_count = (tokens == pad_token).sum().item()
+        total_count = tokens.size(0)
+        padded_fraction = padded_count / total_count
+        print(f"\n=== {region.upper()} Padding Analysis ===")
+        print(f"Total tokens: {total_count}")
+        print(f"Padded tokens (token {pad_token}): {padded_count}")
+        print(f"Fraction padded: {padded_fraction:.4f}")
+
+
+    # Function to analyze n-grams
+    def analyze_ngrams(tokens, region, window_size=3):
+        """Prints top n-grams for a given region's tokens."""
+        tokens = tokens.numpy()
+        ngrams = [tuple(tokens[i:i + window_size]) for i in range(len(tokens) - window_size + 1)]
+        ngram_counts = Counter(ngrams)
+        total_ngrams = len(ngrams)
+        top_5 = ngram_counts.most_common(5)
+        print(f"\n=== {region.upper()} Top 5 {window_size}-grams ===")
+        for ngram, count in top_5:
+            percentage = (count / total_ngrams) * 100
+            print(f"Sequence {ngram}: {count} occurrences ({percentage:.4f}%)")
+
+
+    # Function to calculate perplexity
+    def calculate_perplexity(tokens, region, vocab_size):
+        """Calculates and prints perplexity based on unigram probabilities."""
+        token_counts = Counter(tokens.numpy())
+        total_tokens = len(tokens)
+        probs = np.array([count / total_tokens for count in token_counts.values()])
+        cross_entropy = -np.sum(probs * np.log2(probs + 1e-10))
+        perplexity = 2 ** cross_entropy
+        print(f"\n=== {region.upper()} Perplexity ===")
+        print(f"Cross-entropy (bits): {cross_entropy:.4f}")
+        print(f"Perplexity: {perplexity:.4f}")
+
+
+    # Function to calculate cross-channel correlations
+    def calculate_cross_channel_correlation(tokens1, tokens2, region1, region2, sample_size=100000):
+        """Computes and prints Pearson correlation between two channels' token sequences."""
+        # Subsample to reduce computation time
+        tokens1_sample = tokens1[:sample_size].numpy()
+        tokens2_sample = tokens2[:sample_size].numpy()
+        correlation, _ = pearsonr(tokens1_sample, tokens2_sample)
+        print(f"Correlation between {region1} and {region2}: {correlation:.4f}")
+
+
+    # Main analysis loop over regions
+    print("\n===== Training Data Token Quality Analysis =====")
     for region in REGIONS:
         tokens = train_loader.tokens[region]
-        # Convert tokens to a numpy array.
-        tokens_np = tokens.cpu().numpy()
-        plt.figure(figsize=(10, 6))
-        # Use bins covering all possible token indices (0 to vocab_size)
-        plt.hist(tokens_np, bins=range(0, vocab_size + 1), color='blue', edgecolor='black', alpha=0.7)
-        plt.title(f"Token Distribution for {region} region")
-        plt.xlabel("Token Value")
-        plt.ylabel("Frequency")
-        plt.grid(True)
-        plt.tight_layout()
-        # Save the figure to a file instead of showing it.
-        filename = f"token_distribution_{region}.png"
-        plt.savefig(filename)
-        plt.close()
+        analyze_token_distribution(tokens, region)
+        analyze_padding(tokens, region)
+        analyze_ngrams(tokens, region)
+        calculate_perplexity(tokens, region, vocab_size=10799)  # Adjust vocab_size if needed
+
+    # Cross-channel correlation analysis
+    print("\n=== Cross-Channel Correlations ===")
+    for i, region1 in enumerate(REGIONS):
+        for region2 in REGIONS[i + 1:]:
+            calculate_cross_channel_correlation(
+                train_loader.tokens[region1],
+                train_loader.tokens[region2],
+                region1,
+                region2
+            )
+
+    # Placeholder note for per-channel loss
+    print("\nNote: Per-channel loss analysis requires model predictions and validation data.")
+    print("Add the following code in your training loop during validation to compute it:")
+    print("""
+        # Example in training loop
+        if step % 50 == 0:
+            model.eval()
+            val_loader.reset()
+            for val_step_num in range(val_steps_needed):
+                x_val, y_val = val_loader.next_batch()
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                with torch.no_grad():
+                    logits, loss = model(x_val, y_val)
+                    for c, region in enumerate(REGIONS):
+                        channel_loss = F.cross_entropy(logits[:, c], y_val[:, c], ignore_index=-100)
+                        print(f"Val Step {val_step_num + 1} | {region} Loss: {channel_loss.item():.4f}")
+    """)
 
 # Calculate max_steps based on passes through all data.
 # For example, if you want to run 5 full passes over the training data:
