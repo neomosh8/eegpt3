@@ -565,7 +565,7 @@ class DataLoaderLiteAllInMemory_old:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 32  # micro-batch size (sequences per mini-batch)
+B = 16  # micro-batch size (sequences per mini-batch)
 T = 1024  # sequence length (tokens per sequence)
 desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
@@ -883,7 +883,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if (step % 1000 == 0):
+    if (step % 1000 == 0) and False:
         model.eval()
         val_loader.reset()
         if master_process:
