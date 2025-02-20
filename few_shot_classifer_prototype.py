@@ -332,7 +332,7 @@ print(f"Using device: {device}")
 # Assuming GPT and GPTConfig classes are defined as in the provided code
 # [Insert GPT, GPTConfig, and related classes like BlockWithFusion, CausalSelfAttention, etc., here]
 
-def load_fewshot_data(shard_paths, T=1024, K=5, pad_token=0):
+def load_fewshot_data(shard_paths, T=1024, K=1, pad_token=0):
     """
     Load few-shot data from shards, truncate to the same length across classes, and split into support and query sets.
 
