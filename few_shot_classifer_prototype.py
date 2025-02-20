@@ -1,7 +1,6 @@
 import torch
 import random
 
-from googleapiclient.model import Model
 
 import Model_class
 import model_new_arch
