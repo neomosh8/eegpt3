@@ -50,9 +50,11 @@ device_type = "cuda" if device.startswith("cuda") else "cpu"
 
 # Set manual seeds for reproducibility.
 torch.manual_seed(9259)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(9259)
+random.seed(42)
 
+if torch.cuda.is_available():
+    random.seed(42)
+    torch.cuda.manual_seed(9259)
 
 #########################
 # Model Components
