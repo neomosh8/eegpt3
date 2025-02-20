@@ -703,14 +703,14 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 1e-3
+base_lr = 4e-5
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps//num_passes,  # total number of training steps
-    pct_start=0.05,  # fraction of steps for warmup
+    pct_start=0.01,  # fraction of steps for warmup
     anneal_strategy='cos',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
 )
@@ -883,7 +883,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if step % 500 == 0:
+    if (step % 500 == 0) and False:
         model.eval()
         val_loader.reset()
         if master_process:
@@ -913,7 +913,7 @@ for step in range(max_steps):
 
     if master_process:
         loss_plotter.maybe_plot(step)
-    if step % 100 == 0 and master_process and step > 0:
+    if step % 1000 == 0 and master_process and step > 0:
         save_checkpoint(
             model=raw_model,
             optimizer=optimizer,
