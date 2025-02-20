@@ -16,7 +16,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     max_lr=base_lr,
     total_steps=total_steps,  # Use correct total_steps
     pct_start=0.1,
-    anneal_strategy='cos',
+    anneal_strategy='linear',
     cycle_momentum=False
 )
 
