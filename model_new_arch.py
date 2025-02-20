@@ -191,8 +191,8 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 6
-    n_head: int = 6
+    n_layer: int = 16
+    n_head: int = 16
     n_embd: int = 384
 
     # n_layer: int = 12
@@ -703,7 +703,7 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 4e-5
+base_lr = 2e-5
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -883,7 +883,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if (step % 500 == 0) and False:
+    if (step % 1000 == 0):
         model.eval()
         val_loader.reset()
         if master_process:
