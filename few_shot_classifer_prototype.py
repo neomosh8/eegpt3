@@ -191,19 +191,19 @@ class CrossChannelFusion(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 10799
+    vocab_size: int = 80
     # Small model configuration
-    # n_layer: int = 12
-    # n_head: int = 12
-    # n_embd: int = 768
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
 
     # n_layer: int = 6
     # n_head: int = 6
     # n_embd: int = 384
 
-    n_layer: int = 8
-    n_head: int = 8
-    n_embd: int = 512
+    # n_layer: int = 8
+    # n_head: int = 8
+    # n_embd: int = 512
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -464,7 +464,7 @@ evaluate_fewshot(gpt_model_random, support_data, query_data, device)
 # Step 2: Pretrained GPT
 print("\nStep 2: Loading pretrained weights and evaluating")
 gpt_model_pretrained = GPT(config).to(device)
-checkpoint = torch.load("checkpoints/model_02600.pt", map_location=device)  # Adjust path
+checkpoint = torch.load("checkpoints/model_00400.pt", map_location=device)  # Adjust path
 state_dict = checkpoint['model_state_dict']
 new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 gpt_model_pretrained.load_state_dict(new_state_dict)
