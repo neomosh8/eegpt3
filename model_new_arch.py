@@ -190,13 +190,13 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
-    n_layer: int = 8
-    n_head: int = 8
-    n_embd: int = 512
+    # n_layer: int = 8
+    # n_head: int = 8
+    # n_embd: int = 512
     num_channels: int = 3
     mlp_dropout: float = 0.05
     attn_dropout: float = 0.05
@@ -604,14 +604,14 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 6e-4
+base_lr = 1e-3
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
-    total_steps=max_steps,  # total number of training steps
-    pct_start=0.10,  # fraction of steps for warmup
+    total_steps=max_steps//num_passes,  # total number of training steps
+    pct_start=0.05,  # fraction of steps for warmup
     anneal_strategy='cos',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
 )
