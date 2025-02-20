@@ -584,35 +584,39 @@ val_loader = DataLoaderLiteAllInMemory(
 if master_process:
     import torch
     import numpy as np
-    from collections import Counter
     from scipy.stats import pearsonr
 
-    # Define regions (adjust if your region names differ)
+    # Configuration (adjust as needed)
     REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+    VOCAB_SIZE = 10799  # From your GPTConfig
+    PAD_TOKEN = 0  # Assuming padding token is 0
+    SAMPLE_SIZE_NGRAMS = 1000000  # Sample size for n-grams
+    SAMPLE_SIZE_CORR = 100000  # Sample size for correlations
 
 
-    # Function to analyze token frequency distribution and entropy
+    # Token Frequency and Entropy Analysis
     def analyze_token_distribution(tokens, region):
-        """Prints token frequency distribution and entropy for a given region's tokens."""
-        token_counts = Counter(tokens.numpy())
-        total_tokens = len(tokens)
-        top_10 = token_counts.most_common(10)
+        print(f"Analyzing token distribution for {region}...")
+        unique, counts = torch.unique(tokens, return_counts=True)
+        total_tokens = tokens.numel()
+        counts = counts.float()
+        probs = counts / total_tokens
+        entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
+        top_10 = torch.topk(counts, 10).indices
         print(f"\n=== {region.upper()} Token Distribution ===")
-        print(f"Total unique tokens: {len(token_counts)}")
-        for token, count in top_10:
+        print(f"Total unique tokens: {len(unique)}")
+        for token in top_10:
+            count = counts[token].item()
             percentage = (count / total_tokens) * 100
-            print(f"Token {token}: {count} occurrences ({percentage:.2f}%)")
-        # Calculate entropy
-        probs = np.array([count / total_tokens for count in token_counts.values()])
-        entropy = -np.sum(probs * np.log2(probs + 1e-10))  # Add small epsilon to avoid log(0)
+            print(f"Token {unique[token].item()}: {count} occurrences ({percentage:.2f}%)")
         print(f"Entropy (bits): {entropy:.4f}")
 
 
-    # Function to analyze padding
-    def analyze_padding(tokens, region, pad_token=0):
-        """Prints padding statistics for a given region's tokens."""
+    # Padding Analysis
+    def analyze_padding(tokens, region, pad_token=PAD_TOKEN):
+        print(f"Analyzing padding for {region}...")
         padded_count = (tokens == pad_token).sum().item()
-        total_count = tokens.size(0)
+        total_count = tokens.numel()
         padded_fraction = padded_count / total_count
         print(f"\n=== {region.upper()} Padding Analysis ===")
         print(f"Total tokens: {total_count}")
@@ -620,53 +624,54 @@ if master_process:
         print(f"Fraction padded: {padded_fraction:.4f}")
 
 
-    # Function to analyze n-grams
-    def analyze_ngrams(tokens, region, window_size=3):
-        """Prints top n-grams for a given region's tokens."""
-        tokens = tokens.numpy()
-        ngrams = [tuple(tokens[i:i + window_size]) for i in range(len(tokens) - window_size + 1)]
-        ngram_counts = Counter(ngrams)
-        total_ngrams = len(ngrams)
-        top_5 = ngram_counts.most_common(5)
+    # Efficient N-Gram Analysis
+    def analyze_ngrams(tokens, region, window_size=3, sample_size=SAMPLE_SIZE_NGRAMS):
+        print(f"Analyzing n-grams for {region} (sample size: {sample_size})...")
+        if tokens.numel() > sample_size:
+            tokens = tokens[:sample_size]  # Subsample for speed
+        tokens = tokens.unfold(0, window_size, 1)  # Sliding windows
+        ngrams, counts = torch.unique(tokens, dim=0, return_counts=True)
+        top_5 = torch.topk(counts, min(5, len(counts))).indices
         print(f"\n=== {region.upper()} Top 5 {window_size}-grams ===")
-        for ngram, count in top_5:
-            percentage = (count / total_ngrams) * 100
+        for idx in top_5:
+            ngram = tuple(ngrams[idx].tolist())
+            count = counts[idx].item()
+            percentage = (count / len(tokens)) * 100
             print(f"Sequence {ngram}: {count} occurrences ({percentage:.4f}%)")
 
 
-    # Function to calculate perplexity
-    def calculate_perplexity(tokens, region, vocab_size):
-        """Calculates and prints perplexity based on unigram probabilities."""
-        token_counts = Counter(tokens.numpy())
-        total_tokens = len(tokens)
-        probs = np.array([count / total_tokens for count in token_counts.values()])
-        cross_entropy = -np.sum(probs * np.log2(probs + 1e-10))
+    # Perplexity Calculation
+    def calculate_perplexity(tokens, region, vocab_size=VOCAB_SIZE):
+        print(f"Calculating perplexity for {region}...")
+        unique, counts = torch.unique(tokens, return_counts=True)
+        total_tokens = tokens.numel()
+        probs = counts.float() / total_tokens
+        cross_entropy = -torch.sum(probs * torch.log2(probs + 1e-10)).item()
         perplexity = 2 ** cross_entropy
         print(f"\n=== {region.upper()} Perplexity ===")
         print(f"Cross-entropy (bits): {cross_entropy:.4f}")
         print(f"Perplexity: {perplexity:.4f}")
 
 
-    # Function to calculate cross-channel correlations
-    def calculate_cross_channel_correlation(tokens1, tokens2, region1, region2, sample_size=100000):
-        """Computes and prints Pearson correlation between two channels' token sequences."""
-        # Subsample to reduce computation time
-        tokens1_sample = tokens1[:sample_size].numpy()
-        tokens2_sample = tokens2[:sample_size].numpy()
+    # Cross-Channel Correlation
+    def calculate_cross_channel_correlation(tokens1, tokens2, region1, region2, sample_size=SAMPLE_SIZE_CORR):
+        print(f"Calculating correlation between {region1} and {region2} (sample size: {sample_size})...")
+        tokens1_sample = tokens1[:sample_size].cpu().numpy()
+        tokens2_sample = tokens2[:sample_size].cpu().numpy()
         correlation, _ = pearsonr(tokens1_sample, tokens2_sample)
         print(f"Correlation between {region1} and {region2}: {correlation:.4f}")
 
 
-    # Main analysis loop over regions
+    # Main Analysis Loop
     print("\n===== Training Data Token Quality Analysis =====")
     for region in REGIONS:
-        tokens = train_loader.tokens[region]
+        tokens = train_loader.tokens[region]  # Replace with your data access method
         analyze_token_distribution(tokens, region)
         analyze_padding(tokens, region)
         analyze_ngrams(tokens, region)
-        calculate_perplexity(tokens, region, vocab_size=10799)  # Adjust vocab_size if needed
+        calculate_perplexity(tokens, region)
 
-    # Cross-channel correlation analysis
+    # Cross-Channel Correlations
     print("\n=== Cross-Channel Correlations ===")
     for i, region1 in enumerate(REGIONS):
         for region2 in REGIONS[i + 1:]:
@@ -676,27 +681,6 @@ if master_process:
                 region1,
                 region2
             )
-
-    # Placeholder note for per-channel loss
-    print("\nNote: Per-channel loss analysis requires model predictions and validation data.")
-    print("Add the following code in your training loop during validation to compute it:")
-    print("""
-        # Example in training loop
-        if step % 50 == 0:
-            model.eval()
-            val_loader.reset()
-            for val_step_num in range(val_steps_needed):
-                x_val, y_val = val_loader.next_batch()
-                x_val, y_val = x_val.to(device), y_val.to(device)
-                with torch.no_grad():
-                    logits, loss = model(x_val, y_val)
-                    for c, region in enumerate(REGIONS):
-                        channel_loss = F.cross_entropy(logits[:, c], y_val[:, c], ignore_index=-100)
-                        print(f"Val Step {val_step_num + 1} | {region} Loss: {channel_loss.item():.4f}")
-    """)
-
-# Calculate max_steps based on passes through all data.
-# For example, if you want to run 5 full passes over the training data:
 num_passes = 5
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
