@@ -806,7 +806,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if step % 50 == 0:
+    if step % 500 == 0:
         model.eval()
         val_loader.reset()
         if master_process:
