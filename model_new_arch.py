@@ -564,9 +564,9 @@ class DataLoaderLiteAllInMemory_old:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 4  # micro-batch size (sequences per mini-batch)
+B = 9  # micro-batch size (sequences per mini-batch)
 T = 1024  # sequence length (tokens per sequence)
-desired_B_eff = 32*2  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
