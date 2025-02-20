@@ -318,23 +318,45 @@ class GPT(nn.Module):
         return optimizer
 
 
+import torch
+import random
+
 # From the original code
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 
+# Assuming GPT and GPTConfig classes are defined as in the provided code
+# [Insert GPT, GPTConfig, and related classes like BlockWithFusion, CausalSelfAttention, etc., here]
 
 def load_fewshot_data(shard_paths, T=1024, K=5, pad_token=0):
-    support_data = []
-    query_data = []
+    """
+    Load few-shot data from shards, truncate to the same length across classes, and split into support and query sets.
+
+    Args:
+        shard_paths (list): List of paths to .pt files, one per class.
+        T (int): Sequence length per channel.
+        K (int): Number of support samples per class.
+        pad_token (int): Token to pad sequences if needed.
+
+    Returns:
+        support_data (list): List of (sequence, label) tuples for support set.
+        query_data (list): List of (sequence, label) tuples for query set.
+    """
+    all_sequences = []
+    min_num_sequences = float('inf')
+
+    # Step 1: Load and compute number of sequences per shard
     for label, shard_path in enumerate(shard_paths):
         loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
         min_length = min(loaded[region].size(0) for region in REGIONS)
-        num_sequences = (min_length - T) // T + 1
+        num_sequences = (min_length - T) // T + 1  # Non-overlapping sequences
+        min_num_sequences = min(min_num_sequences, num_sequences)
         if num_sequences < K:
             raise ValueError(f"Shard {shard_path} has too few sequences ({num_sequences}) for K={K}")
 
+        # Extract sequences
         sequences = []
         for i in range(num_sequences):
             start = i * T
@@ -345,13 +367,26 @@ def load_fewshot_data(shard_paths, T=1024, K=5, pad_token=0):
                 if channel_seq.size(0) < T:
                     padding = torch.full((T - channel_seq.size(0),), pad_token, dtype=channel_seq.dtype)
                     channel_seq = torch.cat((channel_seq, padding), dim=0)
-                seq.append(channel_seq.unsqueeze(0))
-            seq = torch.cat(seq, dim=0)
-            sequences.append(seq)
+                seq.append(channel_seq.unsqueeze(0))  # [1, T]
+            seq = torch.cat(seq, dim=0)  # [C, T]
+            sequences.append((seq, label))
+        all_sequences.append(sequences)
 
+    # Step 2: Truncate to the minimum number of sequences
+    support_data = []
+    query_data = []
+    for sequences in all_sequences:
+        sequences = sequences[:min_num_sequences]  # Truncate to smallest class size
         random.shuffle(sequences)
-        support_data.extend((seq, label) for seq in sequences[:K])
-        query_data.extend((seq, label) for seq in sequences[K:])
+        support_data.extend(sequences[:K])  # K support samples
+        query_data.extend(sequences[K:])  # Remaining as query
+
+    # Verify balance
+    query_counts = {}
+    for _, label in query_data:
+        query_counts[label] = query_counts.get(label, 0) + 1
+    print(f"Query set sizes per class: {query_counts}")
+    assert len(set(query_counts.values())) == 1, "Query set is not balanced across classes"
 
     return support_data, query_data
 
@@ -407,7 +442,7 @@ def evaluate_fewshot(model, support_data, query_data, device):
         if pred_label == true_label:
             correct += 1
     accuracy = correct / len(query_data)
-    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Accuracy: {accuracy:.4f} (Total query samples: {len(query_data)})")
 
 
 # Main execution
