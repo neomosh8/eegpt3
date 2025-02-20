@@ -191,7 +191,7 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         # Assumes x is [B, n_head, T, head_dim]
         head_dim = x.size(-1)
         freqs = torch.arange(0, head_dim, 2, device=x.device).float() / head_dim
-        theta = 10000.0 ** (-freqs)  # Frequency base
+        theta = 1000.0 ** (-freqs)  # Frequency base
         positions = torch.arange(seq_len, device=x.device).float()
         angles = positions[:, None] * theta[None, :]  # [T, head_dim/2]
         sin = angles.sin()
@@ -221,7 +221,7 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         return y
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 1024
     vocab_size: int = 82
     # vocab_size: int = 10799
     # Small model configuration
@@ -229,9 +229,9 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    n_layer: int = 8
+    n_head: int = 8
+    n_embd: int = 512
 
     # n_layer: int = 12
     # n_head: int = 12
