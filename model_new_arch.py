@@ -191,8 +191,8 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 16
-    n_head: int = 16
+    n_layer: int = 6
+    n_head: int = 6
     n_embd: int = 384
 
     # n_layer: int = 12
@@ -333,7 +333,7 @@ class DataLoaderLiteAllInMemory:
 
         # Locate shard files
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[0:100]
+        self.shard_files = sorted(glob.glob(pattern))[0:10]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -565,7 +565,7 @@ class DataLoaderLiteAllInMemory_old:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 8  # micro-batch size (sequences per mini-batch)
+B = 32  # micro-batch size (sequences per mini-batch)
 T = 1024  # sequence length (tokens per sequence)
 desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
@@ -709,7 +709,7 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_l
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
-    total_steps=max_steps//num_passes,  # total number of training steps
+    total_steps=max_steps,  # total number of training steps
     pct_start=0.1,  # fraction of steps for warmup
     anneal_strategy='linear',  # cosine annealing for decay
     cycle_momentum=False  # typically False for AdamW
