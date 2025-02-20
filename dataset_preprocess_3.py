@@ -5,6 +5,8 @@ import torch
 import concurrent.futures
 from pathlib import Path
 
+from very_simple_tokenizer import SimpleQuantizerTokenizer
+
 _GLOBAL_TOKENIZER = None
 def _get_tokenizer(resolution=80):
     global _GLOBAL_TOKENIZER
