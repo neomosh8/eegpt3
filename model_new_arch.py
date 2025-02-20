@@ -765,7 +765,7 @@ def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, devi
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
     # Clip gradients
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
 
     # Step optimizer and scheduler
     optimizer.step()
