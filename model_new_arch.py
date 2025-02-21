@@ -336,7 +336,7 @@ class GPT(nn.Module):
 
         optimizer = torch.optim.AdamW(
             optim_groups,
-            betas=(0.85, 0.999),
+            betas=(0.95, 0.999),
             eps=1e-8,
             fused=use_fused
         )
