@@ -581,7 +581,7 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 1e-2
+base_lr = 1e-3
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -649,7 +649,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
     # Unscale gradients before clipping
     scaler.unscale_(optimizer)
     # Clip gradients to prevent explosion
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
     # Optimizer step and scaler update
     scaler.step(optimizer)
@@ -756,10 +756,6 @@ for step in range(max_steps):
 if ddp:
     destroy_process_group()
 
-
-# Clean up DDP resources.
-if ddp:
-    destroy_process_group()
 
 # (Optional) Upload log files to S3.
 # if master_process:
