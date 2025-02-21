@@ -66,12 +66,15 @@ class SimpleCrossChannelFusion(nn.Module):
 
     def forward(self, x):
         B, T, C, E = x.size()
-        # Average across channels
+        # Average across channels to fuse inter-channel information
         fused = x.mean(dim=2, keepdim=True)  # [B, T, 1, E]
-        # Apply projection
-        fused = self.proj(fused)  # [B, T, 1, E]
-        # Add back to original and normalize
-        x = x + fused.expand_as(x)  # [B, T, C, E]
+        # Project to a lower-dimensional space
+        fused = self.proj_reduce(fused)  # [B, T, 1, reduced_dim]
+        # (Optional: you can add a non-linearity here)
+        # Project back to the original embedding dimension
+        fused = self.proj_expand(fused)  # [B, T, 1, E]
+        # Add the reduced fusion back to the original representation and normalize
+        x = x + fused.expand_as(x)
         return self.ln(x)
 
 class CausalSelfAttention(nn.Module):
