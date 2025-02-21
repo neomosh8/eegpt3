@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # Parameters
-base_lr = 1e-6
+base_lr = 4e-2
 max_steps = 153280  # Total training steps
 num_passes = 5
 total_steps = max_steps // num_passes  # Correct total steps
@@ -19,6 +19,8 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     anneal_strategy='linear',
     cycle_momentum=False
 )
+
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3730, gamma=0.005)
 
 # Track learning rate over steps
 lrs = []
