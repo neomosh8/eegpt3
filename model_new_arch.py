@@ -596,9 +596,10 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     total_steps=max_steps,  # Use correct total_steps
     pct_start=0.2,
     anneal_strategy='cos',
-    cycle_momentum=False,
-    div_factor = 0.10,
+    cycle_momentum=True,
+    div_factor = 10,
     three_phase=True,
+
 
 )
 # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=373, gamma=0.001)
