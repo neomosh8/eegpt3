@@ -59,7 +59,9 @@ import torch.nn as nn
 class SimpleCrossChannelFusion(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
-        self.proj = nn.Linear(n_embd, n_embd)
+        reduced_dim = 16
+        self.proj_reduce = nn.Linear(n_embd, reduced_dim)
+        self.proj_expand = nn.Linear(reduced_dim, n_embd)
         self.ln = nn.LayerNorm(n_embd)
 
     def forward(self, x):
@@ -219,7 +221,7 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         return y
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 1024
     vocab_size: int = 82
     # vocab_size: int = 10799
     # Small model configuration
@@ -256,7 +258,8 @@ class GPT(nn.Module):
         # Shared intra-channel encoder (replaces per-channel encoder)
         self.intra_channel_encoder = nn.Sequential(
             Block(config),
-            Block(config)
+            Block(config),
+            Block(config),
         )
 
         self.apply(self._init_weights)
