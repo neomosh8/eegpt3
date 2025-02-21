@@ -18,6 +18,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from checkpoint_manager import save_checkpoint
 # assumed available; replace or remove if not using S3 logging
 from handle_tokenized import upload_folder_to_s3
+from lr_test import CustomLRScheduler
 from plotter import LossPlotter
 
 #########################
@@ -602,7 +603,8 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
 
 
 )
-# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=373, gamma=0.001)
+
+scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=100, decay_rate=decay_rate)
 
 # Log file for training (will be appended at every optimizer step)
 log_file = "training.log"

@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # Parameters
-base_lr = 4e-3
+base_lr = 4e-4
 max_steps = 16200  # Total training steps
 
 # Dummy optimizer
