@@ -443,7 +443,7 @@ class DataLoaderLiteAllInMemory:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 4  # micro-batch size (sequences per mini-batch)
+B = 2  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
 desired_B_eff = 64 * 4 # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
