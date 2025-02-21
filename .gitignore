@@ -29,3 +29,4 @@ log.txt
 *.png
 /output_EMOTIV
 final_report.txt
+*.pt
