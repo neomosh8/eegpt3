@@ -227,17 +227,17 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    # n_layer: int = 12
+    # n_head: int = 12
+    # n_embd: int = 768
     num_channels: int = 3
-    mlp_dropout: float = 0.01
+    mlp_dropout: float = 0.00
     attn_dropout: float = 0.00
-    resid_dropout: float = 0.01
+    resid_dropout: float = 0.00
     pad_token: int = 0  # Padding token for inputs
 
 
@@ -443,9 +443,9 @@ class DataLoaderLiteAllInMemory:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 2  # micro-batch size (sequences per mini-batch)
+B = 16  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
-desired_B_eff = 64 * 4 # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 64  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
@@ -582,7 +582,7 @@ raw_model = model.module if ddp else model
 
 # Set up the optimizer.
 base_lr = 4e-3
-optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
+optimizer = raw_model.configure_optimizer(weight_decay=0.0, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
