@@ -603,7 +603,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
 
 
 )
-
+decay_rate = 0.995  # Adjustable decay rate (smaller value = faster decay)
 scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=100, decay_rate=decay_rate)
 
 # Log file for training (will be appended at every optimizer step)
