@@ -587,7 +587,7 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 4e-2
+base_lr = 4e-4
 optimizer = raw_model.configure_optimizer(weight_decay=0.0, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
