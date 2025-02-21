@@ -227,9 +227,9 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 8
-    n_head: int = 8
-    n_embd: int = 512
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
     # n_layer: int = 12
     # n_head: int = 12
@@ -649,12 +649,12 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
     # Unscale gradients before clipping
     scaler.unscale_(optimizer)
     # Clip gradients to prevent explosion
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
 
     # Optimizer step and scaler update
     scaler.step(optimizer)
     scaler.update()
-    scheduler.step()
+    # scheduler.step()
 
     # If using DDP, average the loss across processes for consistent reporting
     if ddp:
