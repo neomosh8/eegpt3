@@ -590,15 +590,15 @@ raw_model = model.module if ddp else model
 base_lr = 4e-2
 optimizer = raw_model.configure_optimizer(weight_decay=0.0, learning_rate=base_lr, device=device)
 
-# scheduler = torch.optim.lr_scheduler.OneCycleLR(
-#     optimizer,
-#     max_lr=base_lr,
-#     total_steps=max_steps,  # total number of training steps
-#     pct_start=0.1,  # fraction of steps for warmup
-#     anneal_strategy='linear',  # cosine annealing for decay
-#     cycle_momentum=False  # typically False for AdamW
-# )
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=373, gamma=0.001)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=base_lr,
+    total_steps=max_steps,  # total number of training steps
+    pct_start=0.1,  # fraction of steps for warmup
+    anneal_strategy='linear',  # cosine annealing for decay
+    cycle_momentum=False  # typically False for AdamW
+)
+# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=373, gamma=0.001)
 
 # Log file for training (will be appended at every optimizer step)
 log_file = "training.log"
