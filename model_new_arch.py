@@ -173,8 +173,6 @@ class CrossChannelFusion(nn.Module):
 
         return fused
 
-import math
-
 class CausalSelfAttentionWithRoPE(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -358,7 +356,7 @@ class DataLoaderLiteAllInMemory:
 
         # Locate shard files
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[0:10]
+        self.shard_files = sorted(glob.glob(pattern))[0:2]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
@@ -440,151 +438,6 @@ class DataLoaderLiteAllInMemory:
     def __next__(self):
         return self.next_batch()
 
-class DataLoaderLiteAllInMemory_old:
-    """
-    Loads all .pt shard files from a local directory.
-    Each shard contains separate token tensors for each channel.
-    This dataloader concatenates tokens per channel across shards,
-    then extracts contiguous blocks per channel (of length per_channel_length)
-    and interleaves them so that the final tensor has shape [B, num_channels, per_channel_length],
-    where per_channel_length = T_total / num_channels.
-
-    Multi–process logic:
-      - Each process starts at an offset: B * per_channel_length * process_rank.
-      - After producing a batch, the pointer advances by B * per_channel_length * num_processes.
-    """
-
-    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
-                 local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
-                 split: str = "train", shuffle_shards: bool = False):
-        self.B = B
-        self.T_total = T
-        self.num_channels = len(REGIONS)
-        # if T % self.num_channels != 0:
-        #     raise ValueError("T_total must be divisible by the number of channels")
-        self.per_channel_length = T
-
-        self.process_rank = process_rank
-        self.num_processes = num_processes
-
-        # Locate shard files.
-        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))
-        if not self.shard_files:
-            raise ValueError(
-                f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_"
-            )
-        if shuffle_shards:
-            random.shuffle(self.shard_files)
-
-        # Load and concatenate tokens separately for each channel.
-        self.tokens = {region: [] for region in REGIONS}
-        for shard_path in self.shard_files:
-            loaded = torch.load(shard_path, map_location="cpu",weights_only=False)
-            for region in REGIONS:
-                # Instead of raising an error, handle the missing region gracefully.
-                if region not in loaded:
-                    available_regions = list(loaded.keys())
-                    if available_regions:
-                        # Choose the first available region as a substitute.
-                        alternative_region = available_regions[0]
-                        print(
-                            f"Warning: Shard {shard_path} is missing channel {region}. Using channel {alternative_region} as a replacement.")
-                        # Copy the data from the available region.
-                        loaded[region] = loaded[alternative_region]
-                    else:
-                        # If no region is available at all, then raise an error.
-                        raise ValueError(
-                            f"Shard {shard_path} does not contain any channels to copy from for missing channel {region}")
-
-                self.tokens[region].append(loaded[region])
-        # Concatenate tokens for each channel along dimension 0.
-        for region in REGIONS:
-            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
-
-        # Initialize the pointer using the multi-process start offset.
-        self.start_ptr = self.B * self.per_channel_length * self.process_rank
-        self.ptr = self.start_ptr
-
-    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int) -> torch.Tensor:
-        """
-        Returns a slice of `length` tokens from token_tensor starting at `start`.
-        If the slice extends past the end, it wraps around.
-        """
-        total_length = token_tensor.size(0)
-        if start + length <= total_length:
-            return token_tensor[start: start + length]
-        else:
-            # Wrap-around: take remainder from the beginning.
-            first_part = token_tensor[start:]
-            remaining = length - (total_length - start)
-            second_part = token_tensor[:remaining]
-            return torch.cat((first_part, second_part), dim=0)
-
-    def next_batch(self):
-        """
-        Produces a batch for the current process.
-
-        Returns:
-            A tuple (inputs, targets) where:
-              - inputs is a tensor of shape [B, num_channels, per_channel_length]
-              - targets is a tensor of shape [B, num_channels], where each target token
-                is the token that immediately follows the corresponding input sequence
-                in that channel.
-        """
-        inputs_list = []   # To collect per-channel inputs
-        targets_list = []  # To collect per-channel targets
-
-        # For each channel, for each batch sample, extract a sequence and its target.
-        for region in REGIONS:
-            token_tensor = self.tokens[region]
-            channel_inputs = []
-            channel_targets = []
-            for b in range(self.B):
-                start = self.ptr + b * self.per_channel_length
-                # Extract input sequence of length per_channel_length.
-                seq = self._get_slice(token_tensor, start, self.per_channel_length)
-                channel_inputs.append(seq.unsqueeze(0))  # shape: [1, per_channel_length]
-                # Extract the target token (the token immediately after the sequence).
-                target = self._get_slice(token_tensor, start + self.per_channel_length, 1)
-                channel_targets.append(target)
-            # Stack along the batch dimension.
-            channel_inputs = torch.cat(channel_inputs, dim=0)   # shape: [B, per_channel_length]
-            channel_targets = torch.cat(channel_targets, dim=0)   # shape: [B]
-            # Add a channel dimension.
-            inputs_list.append(channel_inputs.unsqueeze(1))   # shape: [B, 1, per_channel_length]
-            targets_list.append(channel_targets.unsqueeze(1))   # shape: [B, 1]
-
-        # Concatenate the channels: resulting shape [B, num_channels, per_channel_length]
-        inputs = torch.cat(inputs_list, dim=1)
-        # Concatenate targets: resulting shape [B, num_channels]
-        targets = torch.cat(targets_list, dim=1)
-
-        # Advance the pointer by B * per_channel_length * num_processes.
-        self.ptr += self.B * self.per_channel_length * self.num_processes
-
-        return inputs, targets
-
-    def reset(self):
-        """
-        Resets the dataloader pointer to its initial start position.
-        """
-        self.ptr = self.start_ptr
-
-    @property
-    def total_len(self):
-        """
-        Returns the total number of tokens for one channel.
-        Assumes all channels have the same length.
-        """
-        # Using the first region as representative.
-        return self.tokens[REGIONS[0]].size(0)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.next_batch()
 
 #########################
 # Training Setup & Loop (No Epochs)
@@ -750,54 +603,6 @@ if master_process:
 #########################
 # Training Loop (No Epochs)
 #########################
-
-
-def train_step(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp):
-    """
-    Performs a single training step with proper gradient accumulation in DDP mode.
-    """
-    optimizer.zero_grad()
-    loss_accum = torch.zeros(1, device=device)
-
-    # Disable DDP sync initially
-    if ddp:
-        model.require_backward_grad_sync = False
-
-    # # Accumulate gradients locally on each GPU
-    # for micro_step in range(grad_accum_steps):
-    #     x, y = train_loader.next_batch()
-    #     x, y = x.to(device), y.to(device)
-    #
-    #     with torch.autocast(device_type=device_type, dtype=torch.float16):
-    #         logits, loss = model(x, y)
-    #
-    #     # Scale loss by accumulation steps
-    #     loss = loss / grad_accum_steps
-    #     loss_accum += loss.detach()
-    #     loss.backward()
-
-    # Now sync gradients across all GPUs
-    if ddp:
-        # Re-enable gradient sync
-        model.require_backward_grad_sync = True
-
-        # Average the accumulated gradients across GPUs
-        for param in model.parameters():
-            if param.grad is not None:
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-
-        # Average the loss
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-
-    # Clip gradients
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
-
-    # Step optimizer and scheduler
-    optimizer.step()
-    scheduler.step()
-
-    return loss_accum.item(), grad_norm
-
 
 def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp, scaler):
     """
