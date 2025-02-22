@@ -43,7 +43,7 @@ class CustomLRScheduler:
 # Parameters
 base_lr = 4e-4
 max_steps = 16200
-decay_rate = 0.995  # Adjustable decay rate (smaller value = faster decay)
+decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
 
 # Dummy optimizer
 optimizer = torch.optim.AdamW([torch.zeros(1)], lr=base_lr)

@@ -490,7 +490,7 @@ class DataLoaderLiteAllInMemory:
 # Training hyperparameters
 B = 16  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
-desired_B_eff = 512  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 16  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
@@ -605,7 +605,7 @@ val_loader = DataLoaderLiteAllInMemory(
 #                 region1,
 #                 region2
 #             )
-num_passes = 300
+num_passes = 5
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
 max_steps = num_passes * steps_per_pass
@@ -641,7 +641,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
 
 
 )
-decay_rate = 0.995  # Adjustable decay rate (smaller value = faster decay)
+decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
 scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=100, decay_rate=decay_rate)
 
 # Log file for training (will be appended at every optimizer step)
