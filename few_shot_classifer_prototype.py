@@ -240,6 +240,7 @@ REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]  # Define your reg
 def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(REGIONS)):
     """
     Load few-shot data from shard files, splitting into support and query sets.
+    Ensures all channels have equal token lengths by padding or truncating.
 
     Args:
         shard_paths (list): List of paths to .pt shard files, one per class.
@@ -274,7 +275,18 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
                 else:
                     raise ValueError(f"Shard {shard_path} has no channels for {region}.")
 
-        # Compute minimum length across channels
+        # Ensure all channels have the same length by padding or truncating
+        lengths = [loaded[region].size(0) for region in REGIONS]
+        max_length = max(lengths)
+        for region in REGIONS:
+            current_length = loaded[region].size(0)
+            if current_length < max_length:
+                padding = torch.full((max_length - current_length,), pad_token, dtype=loaded[region].dtype)
+                loaded[region] = torch.cat((loaded[region], padding), dim=0)
+            elif current_length > max_length:
+                loaded[region] = loaded[region][:max_length]
+
+        # Compute minimum length across channels (after equalization)
         min_length = min(loaded[region].size(0) for region in REGIONS)
         num_sequences = (min_length - T) // T + 1  # Non-overlapping sequences
         min_num_sequences = min(min_num_sequences, num_sequences)
@@ -315,7 +327,6 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
         print(f"Warning: Query set is unbalanced: {query_counts}")
 
     return support_data, query_data
-
 # Main Execution
 if __name__ == "__main__":
     # Device setup
