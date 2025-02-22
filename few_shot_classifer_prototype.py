@@ -347,6 +347,6 @@ if __name__ == "__main__":
         model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
         model.eval()
         print("\nEvaluating with pretrained weights")
-        evaluate_fewshot(model, support_data, query_data, device, batch_size=4)
+        evaluate_fewshot(model, support_data, query_data, device, batch_size=16)
     except FileNotFoundError:
         print("\nPretrained weights not found; skipping pretrained evaluation.")
