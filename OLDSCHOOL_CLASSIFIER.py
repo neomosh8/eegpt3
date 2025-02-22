@@ -7,7 +7,7 @@ import os
 import glob
 
 # REGIONS for channel mapping (example, adjust as per your data)
-REGIONS = ["channel1", "channel2", "channel3"]  # Replace with actual region names
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]  # Define your regions
 
 
 # Model Components
