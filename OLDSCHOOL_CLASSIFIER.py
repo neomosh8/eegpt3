@@ -368,20 +368,20 @@ if __name__ == "__main__":
     # shard_paths = glob.glob("./local_shards_val/mydata_train_*.pt")
 
     # Holdout setup
-    holdout_percentage = 0.1
+    holdout_percentage = 0.3
     num_holdout = int(len(shard_paths) * holdout_percentage)
     base_shards = shard_paths[:-num_holdout] if num_holdout > 0 else shard_paths
     holdout_shards = shard_paths[-num_holdout:] if num_holdout > 0 else []
 
     # Load data for base classes
     support_data_base, query_data_base = load_fewshot_data(
-        base_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
+        base_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
     )
 
     # Load data for holdout classes if available
     if holdout_shards:
         support_data_holdout, query_data_holdout = load_fewshot_data(
-            holdout_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
+            holdout_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
         )
     else:
         support_data_holdout, query_data_holdout = [], []
