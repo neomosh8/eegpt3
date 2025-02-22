@@ -397,11 +397,11 @@ if __name__ == "__main__":
     # Evaluate with random weights
     print("\nEvaluating with random weights on base classes")
     num_classes_base = len(base_shards)
-    evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
+    evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=8)
     if holdout_shards:
         print("Evaluating with random weights on holdout classes")
         num_classes_holdout = len(holdout_shards)
-        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
+        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=8)
 
     # Load pretrained weights and evaluate
     checkpoint_path = "checkpoints/model_03000.pt"  # Adjust path as needed
@@ -412,10 +412,10 @@ if __name__ == "__main__":
         model.eval()
 
         print("\nEvaluating with pretrained weights on base classes")
-        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
+        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=8)
 
         if holdout_shards:
             print("Evaluating with pretrained weights on holdout classes")
-            evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
+            evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=8)
     except FileNotFoundError:
         print(f"\nPretrained weights not found at {checkpoint_path}; skipping pretrained evaluation.")
