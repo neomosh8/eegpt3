@@ -292,71 +292,61 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch_size=16, epochs=100, lr=0.01):
-    """
-    Evaluate few-shot classification by training a linear classifier on support embeddings with batching.
-
-    Args:
-        model: Pretrained GPT model.
-        support_data: List of (sequence, label) tuples for support.
-        query_data: List of (sequence, label) tuples for query.
-        device: Device to run on (e.g., 'cuda' or 'cpu').
-        num_classes: Number of classes in the task.
-        batch_size: Batch size for processing (default=16).
-        epochs: Number of training epochs for the classifier (default=100).
-        lr: Learning rate for the classifier (default=0.01).
-    """
     model.eval()
 
+    # Helper function to get embeddings and labels
     def get_embeddings(data, batch_size):
         embeddings = []
         labels = []
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
-            batch_emb = model.get_embedding(sequences).detach()  # Detach here
+            batch_emb = model.get_embedding(sequences).detach()
             embeddings.append(batch_emb)
             labels.extend([label for _, label in batch])
         embeddings = torch.cat(embeddings, dim=0)
         labels = torch.tensor(labels, device=device)
         return embeddings, labels
-    
-    # Compute support and query embeddings in batches
+
+    # Get embeddings for support and query sets
     support_emb, support_labels = get_embeddings(support_data, batch_size)
     query_emb, query_labels = get_embeddings(query_data, batch_size)
 
-    # Train classifier with batching
+    # Define classifier, optimizer, and loss function
     classifier = nn.Linear(model.config.n_embd, num_classes).to(device)
     optimizer = torch.optim.Adam(classifier.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
-    # Create a DataLoader for support embeddings
-    support_dataset = TensorDataset(support_emb, support_labels)
-    support_loader = DataLoader(support_dataset, batch_size=batch_size, shuffle=True)
-
-    # Train the classifier using mini-batches
+    # Training loop with loss printing
     for epoch in range(epochs):
-        for batch_emb, batch_labels in support_loader:
-            optimizer.zero_grad()
-            logits = classifier(batch_emb)
-            loss = criterion(logits, batch_labels)
-            loss.backward()
-            optimizer.step()
+        classifier.train()
+        optimizer.zero_grad()
+        logits = classifier(support_emb)
+        loss = criterion(logits, support_labels)
+        loss.backward()
+        optimizer.step()
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
 
-    # Evaluate on query set in batches
+    # Calculate training accuracy
+    classifier.eval()
+    with torch.no_grad():
+        train_logits = classifier(support_emb)
+        train_pred = train_logits.argmax(dim=1)
+        train_correct = (train_pred == support_labels).sum().item()
+        train_total = support_labels.size(0)
+        train_accuracy = train_correct / train_total
+        print(f"Training Accuracy: {train_accuracy:.4f} (Total support samples: {train_total})")
+
+    # Evaluate on query set (validation accuracy)
     correct = 0
     total = 0
     with torch.no_grad():
-        for i in range(0, query_emb.size(0), batch_size):
-            batch_emb = query_emb[i:i + batch_size]
-            batch_labels = query_labels[i:i + batch_size]
-            logits = classifier(batch_emb)
-            pred = logits.argmax(dim=1)
-            correct += (pred == batch_labels).sum().item()
-            total += batch_labels.size(0)
-
+        query_logits = classifier(query_emb)
+        query_pred = query_logits.argmax(dim=1)
+        correct = (query_pred == query_labels).sum().item()
+        total = query_labels.size(0)
     accuracy = correct / total if total > 0 else 0
-    print(f"Accuracy: {accuracy:.4f} (Total query samples: {total})")
-
+    print(f"Validation Accuracy: {accuracy:.4f} (Total query samples: {total})")
 # Main Execution
 if __name__ == "__main__":
     # Device setup
@@ -381,10 +371,12 @@ if __name__ == "__main__":
     base_shards = shard_paths[:-num_holdout] if num_holdout > 0 else shard_paths
     holdout_shards = shard_paths[-num_holdout:] if num_holdout > 0 else []
 
-    # Load data
+    # Load data for base classes
     support_data_base, query_data_base = load_fewshot_data(
         base_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
     )
+
+    # Load data for holdout classes if available
     if holdout_shards:
         support_data_holdout, query_data_holdout = load_fewshot_data(
             holdout_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
@@ -392,14 +384,16 @@ if __name__ == "__main__":
     else:
         support_data_holdout, query_data_holdout = [], []
 
-    # Evaluate with random weights
+    # Evaluate with random weights on base classes
     print("\nEvaluating with random weights on base classes")
     num_classes_base = len(base_shards)
-    evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=1)
+    evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
+
+    # Evaluate with random weights on holdout classes if available
     if holdout_shards:
         print("Evaluating with random weights on holdout classes")
         num_classes_holdout = len(holdout_shards)
-        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=1)
+        evaluate_fewshot(model, support_data_holdout, query_data_holdout, device, num_classes=num_classes_holdout, batch_size=16)
 
     # Load pretrained weights and evaluate
     checkpoint_path = "checkpoints/model_03000.pt"  # Adjust path as needed
@@ -410,10 +404,10 @@ if __name__ == "__main__":
         model.eval()
 
         print("\nEvaluating with pretrained weights on base classes")
-        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=1)
+        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=16)
 
         if holdout_shards:
             print("Evaluating with pretrained weights on holdout classes")
-            evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base, batch_size=1)
+            evaluate_fewshot(model, support_data_holdout, query_data_holdout, device, num_classes=num_classes_holdout, batch_size=16)
     except FileNotFoundError:
         print(f"\nPretrained weights not found at {checkpoint_path}; skipping pretrained evaluation.")
