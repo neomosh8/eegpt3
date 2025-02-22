@@ -339,7 +339,7 @@ if __name__ == "__main__":
 
     # Example shard paths (replace with actual paths)
     shard_paths = [
-        "./local_shards_val/mydata_train_1.pt",
+        "./local_shards_val/mydata_train_2.pt",
         "./local_shards_val/mydata_train_0.pt",    ]
 
     # Load data
