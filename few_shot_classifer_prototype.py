@@ -342,7 +342,7 @@ if __name__ == "__main__":
 
     # Optionally, load pretrained weights and evaluate
     try:
-        checkpoint = torch.load("checkpoints/model_03000.pt", map_location=device)
+        checkpoint = torch.load("checkpoints/model_03000.pt", map_location=device,weights_only=False)
         state_dict = checkpoint['model_state_dict']
         model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
         model.eval()
