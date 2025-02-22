@@ -535,7 +535,7 @@ shard_paths = [
     "./local_shards_val/mydata_train_1.pt",
     "./local_shards_val/mydata_train_2.pt"
 ]
-support_data, query_data = load_fewshot_data(shard_paths, T=1024, K=2)
+support_data, query_data = load_fewshot_data(shard_paths, T=512, K=2)
 
 # Step 1: Random GPT
 print("Step 1: Evaluating with random weights")
