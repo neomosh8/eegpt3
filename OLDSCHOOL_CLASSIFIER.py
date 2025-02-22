@@ -385,11 +385,11 @@ if __name__ == "__main__":
 
     # Load data
     support_data_base, query_data_base = load_fewshot_data(
-        base_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
+        base_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
     )
     if holdout_shards:
         support_data_holdout, query_data_holdout = load_fewshot_data(
-            holdout_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
+            holdout_shards, T=config.block_size, K=5, pad_token=config.pad_token, num_channels=config.num_channels
         )
     else:
         support_data_holdout, query_data_holdout = [], []
