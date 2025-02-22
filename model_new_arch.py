@@ -305,56 +305,18 @@ class GPT(nn.Module):
         return logits, loss
 
 
-    # def configure_optimizer(self, weight_decay, learning_rate, device):
-    #     """
-    #     Configure the optimizer with separate parameter groups for decayed and non-decayed weights.
-    #     """
-    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-    #     decay_params = []
-    #     nodecay_params = []
-    #
-    #     for pn, p in param_dict.items():
-    #         if p.dim() >= 2:
-    #             decay_params.append(p)
-    #         else:
-    #             nodecay_params.append(p)
-    #
-    #     optim_groups = [
-    #         {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
-    #         {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
-    #     ]
-    #
-    #     num_decay_params = sum(p.numel() for p in decay_params)
-    #     num_nodecay_params = sum(p.numel() for p in nodecay_params)
-    #
-    #     fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-    #     use_fused = fused_available and ('cuda' in device)
-    #
-    #     if master_process:
-    #         print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
-    #         print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
-    #         print(f"Using fused AdamW: {use_fused}")
-    #
-    #     optimizer = torch.optim.AdamW(
-    #         optim_groups,
-    #         betas=(0.95, 0.999),
-    #         eps=1e-8,
-    #         fused=use_fused
-    #     )
-    #     return optimizer
-
     def configure_optimizer(self, weight_decay, learning_rate, device):
         """
-        Configure the optimizer with separate parameter groups for decayed and non-decayed weights using RMSprop.
+        Configure the optimizer with separate parameter groups for decayed and non-decayed weights.
         """
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = []
         nodecay_params = []
 
         for pn, p in param_dict.items():
-            if p.dim() >= 2:  # Apply weight decay to 2D+ parameters (e.g., weights)
+            if p.dim() >= 2:
                 decay_params.append(p)
-            else:  # No weight decay for 1D parameters (e.g., biases, LayerNorm params)
+            else:
                 nodecay_params.append(p)
 
         optim_groups = [
@@ -365,21 +327,59 @@ class GPT(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and ('cuda' in device)
+
         if master_process:
             print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
             print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
+            print(f"Using fused AdamW: {use_fused}")
 
-        # Initialize RMSprop optimizer
-        optimizer = torch.optim.RMSprop(
+        optimizer = torch.optim.AdamW(
             optim_groups,
-            lr=learning_rate,
-            alpha=0.99,  # Smoothing constant (default is 0.99, equivalent to Adam's beta2)
-            eps=1e-8,  # Numerical stability term
-            weight_decay=weight_decay,  # Weight decay is handled per parameter group
-            momentum=0.0,  # RMSprop can use momentum, set to 0 if not needed
-            centered=False  # If True, computes a centered RMSprop (normalizes gradients by variance)
+            betas=(0.95, 0.999),
+            eps=1e-8,
+            fused=use_fused
         )
         return optimizer
+
+    # def configure_optimizer(self, weight_decay, learning_rate, device):
+    #     """
+    #     Configure the optimizer with separate parameter groups for decayed and non-decayed weights using RMSprop.
+    #     """
+    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+    #     decay_params = []
+    #     nodecay_params = []
+    #
+    #     for pn, p in param_dict.items():
+    #         if p.dim() >= 2:  # Apply weight decay to 2D+ parameters (e.g., weights)
+    #             decay_params.append(p)
+    #         else:  # No weight decay for 1D parameters (e.g., biases, LayerNorm params)
+    #             nodecay_params.append(p)
+    #
+    #     optim_groups = [
+    #         {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
+    #         {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
+    #     ]
+    #
+    #     num_decay_params = sum(p.numel() for p in decay_params)
+    #     num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    #
+    #     if master_process:
+    #         print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
+    #         print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
+    #
+    #     # Initialize RMSprop optimizer
+    #     optimizer = torch.optim.RMSprop(
+    #         optim_groups,
+    #         lr=learning_rate,
+    #         alpha=0.99,  # Smoothing constant (default is 0.99, equivalent to Adam's beta2)
+    #         eps=1e-8,  # Numerical stability term
+    #         weight_decay=weight_decay,  # Weight decay is handled per parameter group
+    #         momentum=0.0,  # RMSprop can use momentum, set to 0 if not needed
+    #         centered=False  # If True, computes a centered RMSprop (normalizes gradients by variance)
+    #     )
+    #     return optimizer
 
 
 #########################
