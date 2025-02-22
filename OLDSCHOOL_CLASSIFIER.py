@@ -1,50 +1,68 @@
-from collections import Counter
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+from dataclasses import dataclass
+import random
 import os
-import torch.nn.functional as F  # Add this import
+import glob
 
-# Model definitions (condensed from earlier)
-REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 10799
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    num_channels: int = 3
-    mlp_dropout: float = 0.05
-    attn_dropout: float = 0.05
-    resid_dropout: float = 0.05
+# REGIONS for channel mapping (example, adjust as per your data)
+REGIONS = ["channel1", "channel2", "channel3"]  # Replace with actual region names
 
 
-class CausalSelfAttention(nn.Module):
+# Model Components
+class SimpleCrossChannelFusion(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        reduced_dim = 16
+        self.proj_reduce = nn.Linear(n_embd, reduced_dim)
+        self.proj_expand = nn.Linear(reduced_dim, n_embd)
+        self.ln = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        B, T, C, E = x.size()
+        fused = x.mean(dim=2, keepdim=True)  # [B, T, 1, E]
+        fused = self.proj_reduce(fused)  # [B, T, 1, reduced_dim]
+        fused = self.proj_expand(fused)  # [B, T, 1, E]
+        x = x + fused.expand_as(x)
+        return self.ln(x)
+
+
+class CausalSelfAttentionWithRoPE(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
-        self.attn_dropout = nn.Dropout(p=config.attn_dropout)
-        self.resid_dropout = nn.Dropout(p=config.resid_dropout)
+        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+
+    def apply_rotary_emb(self, x, seq_len):
+        head_dim = x.size(-1)
+        freqs = torch.arange(0, head_dim, 2, device=x.device).float() / head_dim
+        theta = 1000.0 ** (-freqs)
+        positions = torch.arange(seq_len, device=x.device).float()
+        angles = positions[:, None] * theta[None, :]
+        sin = angles.sin()
+        cos = angles.cos()
+        x1, x2 = x[..., 0::2], x[..., 1::2]
+        x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+        return x_rot
 
     def forward(self, x):
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        head_dim = C // self.n_head
+        k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        q = self.apply_rotary_emb(q, T)
+        k = self.apply_rotary_emb(k, T)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = self.attn_dropout(y)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
@@ -71,7 +89,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttentionWithRoPE(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -81,19 +99,40 @@ class Block(nn.Module):
         return x
 
 
-class SimpleCrossChannelFusion(nn.Module):
-    def __init__(self, n_embd, num_heads=1):
+class BlockWithFusion(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=n_embd, num_heads=num_heads, batch_first=True)
-        self.ln = nn.LayerNorm(n_embd)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttentionWithRoPE(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.fusion = SimpleCrossChannelFusion(config.n_embd)
+        self.ln_3 = nn.LayerNorm(config.n_embd)
+        self.mlp = MLP(config)
 
     def forward(self, x):
         B, T, C, E = x.size()
-        x_reshaped = x.view(B * T, C, E)
-        fused, _ = self.attn(x_reshaped, x_reshaped, x_reshaped)
-        fused = fused + x_reshaped
-        fused = self.ln(fused).view(B, T, C, E)
-        return fused
+        x_reshaped = x.view(B * C, T, E)
+        x_reshaped = x_reshaped + self.attn(self.ln_1(x_reshaped))
+        x = x_reshaped.view(B, T, C, E)
+        x = x + self.fusion(self.ln_2(x))
+        x_reshaped = x.view(B * C, T, E)
+        x_reshaped = x_reshaped + self.mlp(self.ln_3(x_reshaped))
+        x = x_reshaped.view(B, T, C, E)
+        return x
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 82
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
+    num_channels: int = len(REGIONS)
+    mlp_dropout: float = 0.00
+    attn_dropout: float = 0.00
+    resid_dropout: float = 0.00
+    pad_token: int = 0
 
 
 class GPT(nn.Module):
@@ -102,17 +141,16 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "wpe": nn.Embedding(config.block_size, config.n_embd),
-            "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            "h": nn.ModuleList([BlockWithFusion(config) for _ in range(config.n_layer)]),
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
-        self.channel_encoder = nn.ModuleList([
-            nn.Sequential(Block(config), Block(config))
-            for _ in range(config.num_channels)
-        ])
-        self.cross_channel_fusion = SimpleCrossChannelFusion(config.n_embd, num_heads=1)
+        self.intra_channel_encoder = nn.Sequential(
+            Block(config),
+            Block(config),
+            Block(config),
+        )
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -128,213 +166,229 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, C, T = idx.size()
-        assert C == self.config.num_channels
-        tok_emb = self.transformer.wte(idx).transpose(1, 2)
-        pos = torch.arange(T, device=idx.device).unsqueeze(0)
-        pos_emb = self.transformer.wpe(pos)
-        x = tok_emb + pos_emb.unsqueeze(2)
-
-        channel_outs = [self.channel_encoder[c](x[:, :, c, :]) for c in range(C)]
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb.transpose(1, 2)
+        channel_outs = []
+        for c in range(C):
+            x_c = x[:, :, c, :]
+            x_c = self.intra_channel_encoder(x_c)
+            channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)
-        x = self.cross_channel_fusion(x)
-
-        x = x.transpose(1, 2).reshape(B * C, T, self.config.n_embd)
         for block in self.transformer.h:
             x = block(x)
+        x = x.transpose(1, 2).reshape(B * C, T, self.config.n_embd)
         x = self.transformer.ln_f(x)
-        x_last = x[:, -1, :]
-        logits = self.lm_head(x_last).view(B, C, -1)
-
+        logits = self.lm_head(x)
+        logits = logits.view(B, C, T, -1)
         loss = None
         if targets is not None:
-            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, x_last, loss  # Modified to return x_last
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100)
+        return logits, loss
 
-
-class GPTWithClassifier(nn.Module):
-    def __init__(self, gpt_model, num_classes):
-        super().__init__()
-        self.gpt = gpt_model
-        for param in self.gpt.parameters():
-            param.requires_grad = False
-        self.classifier = nn.Sequential(
-            nn.Linear(gpt_model.config.n_embd, 32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, num_classes)
-        )
-
-    def forward(self, idx):
+    def get_embedding(self, idx):
         B, C, T = idx.size()
-        with torch.no_grad():
-            _, x_last, _ = self.gpt(idx)  # [B * C, n_embd]
-        x_last = x_last.view(B, C, -1).mean(dim=1)  # [B, n_embd]
-        logits = self.classifier(x_last)  # [B, num_classes]
-        return logits
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb.transpose(1, 2)
+        channel_outs = []
+        for c in range(C):
+            x_c = x[:, :, c, :]
+            x_c = self.intra_channel_encoder(x_c)
+            channel_outs.append(x_c)
+        x = torch.stack(channel_outs, dim=2)
+        for block in self.transformer.h:
+            x = block(x)
+        last_tokens = x[:, -1, :, :]
+        embedding = last_tokens.mean(dim=1)
+        return embedding
 
 
-# Dataloader for specific shard paths
-class ShardDataset(Dataset):
-    def __init__(self, shard_paths, sequence_length, split_ratio=0.8, is_train=True):
-        self.shard_paths = shard_paths
-        self.sequence_length = sequence_length
-        self.num_channels = len(REGIONS)
+# Few-Shot Classification Functions
+def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(REGIONS)):
+    """
+    Load few-shot data from shard files, splitting into support and query sets.
 
-        self.tokens = {region: [] for region in REGIONS}
-        self.labels = []
+    Args:
+        shard_paths (list): List of paths to .pt shard files, one per class.
+        T (int): Sequence length per channel.
+        K (int): Number of support samples per class.
+        pad_token (int): Token to pad sequences.
+        num_channels (int): Number of channels.
 
-        # Load all data
-        for shard_path in shard_paths:
-            label = int(os.path.basename(shard_path).split('_')[-1].replace('.pt', ''))
-            loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
-            token_count = min(loaded[REGIONS[0]].size(0), 39490)
+    Returns:
+        support_data (list): List of (sequence, label) tuples for support set.
+        query_data (list): List of (sequence, label) tuples for query set.
+    """
+    if not shard_paths:
+        raise ValueError("No shard paths provided.")
+
+    all_sequences = []
+    min_num_sequences = float('inf')
+
+    for label, shard_path in enumerate(shard_paths):
+        if not os.path.exists(shard_path):
+            raise FileNotFoundError(f"Shard file not found: {shard_path}")
+
+        loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+        for region in REGIONS:
+            if region not in loaded:
+                available_regions = list(loaded.keys())
+                if available_regions:
+                    loaded[region] = loaded[available_regions[0]]
+                    print(f"Warning: Shard {shard_path} missing {region}, using {available_regions[0]}.")
+                else:
+                    raise ValueError(f"Shard {shard_path} has no channels for {region}.")
+
+        lengths = [loaded[region].size(0) for region in REGIONS]
+        max_length = max(lengths)
+        for region in REGIONS:
+            current_length = loaded[region].size(0)
+            if current_length < max_length:
+                padding = torch.full((max_length - current_length,), pad_token, dtype=loaded[region].dtype)
+                loaded[region] = torch.cat((loaded[region], padding), dim=0)
+            elif current_length > max_length:
+                loaded[region] = loaded[region][:max_length]
+
+        min_length = min(loaded[region].size(0) for region in REGIONS)
+        num_sequences = (min_length - T) // T + 1
+        min_num_sequences = min(min_num_sequences, num_sequences)
+
+        if num_sequences < K:
+            raise ValueError(f"Shard {shard_path} has too few sequences ({num_sequences}) for K={K}")
+
+        sequences = []
+        for i in range(num_sequences):
+            start = i * T
+            end = start + T
+            seq = []
             for region in REGIONS:
-                self.tokens[region].append(loaded[region][:token_count])
-            self.labels.extend([label] * token_count)
+                channel_seq = loaded[region][start:end]
+                if channel_seq.size(0) < T:
+                    padding = torch.full((T - channel_seq.size(0),), pad_token, dtype=channel_seq.dtype)
+                    channel_seq = torch.cat((channel_seq, padding), dim=0)
+                seq.append(channel_seq.unsqueeze(0))
+            seq = torch.cat(seq, dim=0)
+            sequences.append((seq, label))
+        all_sequences.append(sequences)
 
-        for region in REGIONS:
-            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
-        self.labels = torch.tensor(self.labels)
+    support_data = []
+    query_data = []
+    for sequences in all_sequences:
+        sequences = sequences[:min_num_sequences]
+        random.shuffle(sequences)
+        support_data.extend(sequences[:K])
+        query_data.extend(sequences[K:])
 
-        self.total_length = self.tokens[REGIONS[0]].size(0)
-        assert all(self.tokens[r].size(0) == self.total_length for r in REGIONS)
-        assert len(self.labels) == self.total_length
+    query_counts = {}
+    for _, label in query_data:
+        query_counts[label] = query_counts.get(label, 0) + 1
+    if len(set(query_counts.values())) > 1:
+        print(f"Warning: Query set is unbalanced: {query_counts}")
 
-        # Randomly shuffle indices and split
-        indices = torch.randperm(self.total_length)
-        split_idx = int(self.total_length * split_ratio)
-        if is_train:
-            indices = indices[:split_idx]
-        else:
-            indices = indices[split_idx:]
+    return support_data, query_data
 
-        # Apply split
-        for region in REGIONS:
-            self.tokens[region] = self.tokens[region][indices]
-        self.labels = self.labels[indices]
-        self.total_length = len(self.labels)
 
-    def __len__(self):
-        return self.total_length // self.sequence_length
+def evaluate_fewshot(model, support_data, query_data, device, num_classes, epochs=100, lr=0.01):
+    """
+    Evaluate few-shot classification by training a linear classifier on support embeddings.
 
-    def __getitem__(self, idx):
-        start = idx * self.sequence_length
-        end = start + self.sequence_length
-        channel_inputs = []
-        for region in REGIONS:
-            seq = self.tokens[region][start:end]
-            if seq.size(0) < self.sequence_length:
-                seq = F.pad(seq, (0, self.sequence_length - seq.size(0)))
-            channel_inputs.append(seq.unsqueeze(0))
-        inputs = torch.cat(channel_inputs, dim=0)
-        label = self.labels[start]
-        return inputs, label
-
-# Updated training function with validation
-def train_classifier(model, train_loader, val_loader, num_epochs, device):
-    model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=4e-4)
-
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        correct = 0
-        total = 0
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            logits = model(inputs)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            preds = torch.argmax(logits, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-        avg_loss = total_loss / len(train_loader)
-        train_accuracy = correct / total
-
-        # Validation
-        model.eval()
-        val_correct = 0
-        val_total = 0
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                logits = model(inputs)
-                preds = torch.argmax(logits, dim=1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
-        val_accuracy = val_correct / val_total if val_total > 0 else 0
-
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}, "
-              f"Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f}")
-
-    torch.save(model.state_dict(), "gpt_with_classifier.pt")
-    print("Model saved to gpt_with_classifier.pt")
-
-# Evaluation function
-def evaluate_performance(model, dataloader, device, desc="Evaluation"):
+    Args:
+        model: Pretrained GPT model.
+        support_data: List of (sequence, label) tuples for support.
+        query_data: List of (sequence, label) tuples for query.
+        device: Device to run on.
+        num_classes: Number of classes in the task.
+        epochs: Number of training epochs for the classifier.
+        lr: Learning rate for the classifier.
+    """
     model.eval()
-    correct = 0
-    total = 0
-    batch_count = 0
     with torch.no_grad():
-        for inputs, labels in dataloader:
-            batch_count += 1
-            inputs, labels = inputs.to(device), labels.to(device)
-            logits = model(inputs)
-            preds = torch.argmax(logits, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-            running_accuracy = correct / total
-            print(f"{desc} - Batch {batch_count}, Samples: {total}, Running Accuracy: {running_accuracy:.4f}")
-    final_accuracy = correct / total
-    print(f"{desc} - Final Accuracy (Full Dataset, {total} samples, {batch_count} batches): {final_accuracy:.4f}")
-    return final_accuracy
+        support_sequences = torch.stack([seq for seq, _ in support_data], dim=0).to(device)
+        support_emb = model.get_embedding(support_sequences)
+        support_labels = torch.tensor([label for _, label in support_data], device=device)
 
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = "./checkpoints/model_00300.pt"
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint['config']
+        query_sequences = torch.stack([seq for seq, _ in query_data], dim=0).to(device)
+        query_emb = model.get_embedding(query_sequences)
+        query_labels = torch.tensor([label for _, label in query_data], device=device)
 
-    shard_paths = ["./local_shards_val/mydata_train_0.pt", "./local_shards_val/mydata_train_1.pt",
-                   "./local_shards_val/mydata_train_2.pt"]
-    train_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=0.6, is_train=True)
-    val_dataset = ShardDataset(shard_paths, sequence_length=config.block_size, split_ratio=.6, is_train=False)
-    print("Train label distribution:", Counter(train_dataset.labels.tolist()))
-    print("Val label distribution:", Counter(val_dataset.labels.tolist()))
+    classifier = nn.Linear(model.config.n_embd, num_classes).to(device)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        logits = classifier(support_emb)
+        loss = criterion(logits, support_labels)
+        loss.backward()
+        optimizer.step()
 
-    # Step 1: Random GPT
-    print("Step 1: Evaluating with randomly initialized GPT model")
-    gpt_model_random = GPT(config)
-    gpt_model_random.eval()
-    model_random = GPTWithClassifier(gpt_model_random, num_classes=3)
-    model_random = model_random.to(device)
-    evaluate_performance(model_random, val_loader, device, desc="Random GPT (Validation)")
+    with torch.no_grad():
+        logits = classifier(query_emb)
+        pred = logits.argmax(dim=1)
+        correct = (pred == query_labels).sum().item()
+        total = query_labels.size(0)
+        accuracy = correct / total if total > 0 else 0
+    print(f"Accuracy: {accuracy:.4f} (Total query samples: {total})")
 
-    # Step 2: Pretrained GPT
-    print("\nStep 2: Loading pretrained weights and evaluating")
-    gpt_model_pretrained = GPT(config)
-    state_dict = checkpoint['model_state_dict']
-    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-    gpt_model_pretrained.load_state_dict(new_state_dict)
-    gpt_model_pretrained.eval()
-    model_pretrained = GPTWithClassifier(gpt_model_pretrained, num_classes=3)
-    model_pretrained = model_pretrained.to(device)
-    evaluate_performance(model_pretrained, val_loader, device, desc="Pretrained GPT (Validation)")
 
-    # Step 3: Train
-    print("\nStep 3: Starting classifier training")
-    print("Training random GPT model")
-    train_classifier(model_random, train_loader, val_loader, num_epochs=10, device=device)  # Reduced for testing
-    print("\nTraining pretrained GPT model")
-    train_classifier(model_pretrained, train_loader, val_loader, num_epochs=10, device=device)
-
+# Main Execution
 if __name__ == "__main__":
-    main()
+    # Device setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Model configuration
+    config = GPTConfig()
+    model = GPT(config).to(device)
+
+    # Shard paths (example, replace with your actual paths)
+    shard_paths = [
+        "./local_shards_val/mydata_train_2.pt",
+        "./local_shards_val/mydata_train_0.pt",
+        "./local_shards_val/mydata_train_1.pt",
+    ]
+    # Alternatively, use glob to load all shards:
+    # shard_paths = glob.glob("./local_shards_val/mydata_train_*.pt")
+
+    # Holdout setup
+    holdout_percentage = 0.2
+    num_holdout = int(len(shard_paths) * holdout_percentage)
+    base_shards = shard_paths[:-num_holdout] if num_holdout > 0 else shard_paths
+    holdout_shards = shard_paths[-num_holdout:] if num_holdout > 0 else []
+
+    # Load data
+    support_data_base, query_data_base = load_fewshot_data(
+        base_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
+    )
+    if holdout_shards:
+        support_data_holdout, query_data_holdout = load_fewshot_data(
+            holdout_shards, T=config.block_size, K=10, pad_token=config.pad_token, num_channels=config.num_channels
+        )
+    else:
+        support_data_holdout, query_data_holdout = [], []
+
+    # Evaluate with random weights
+    print("\nEvaluating with random weights on base classes")
+    num_classes_base = len(base_shards)
+    evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base)
+
+    if holdout_shards:
+        print("Evaluating with random weights on holdout classes")
+        num_classes_holdout = len(holdout_shards)
+        evaluate_fewshot(model, support_data_holdout, query_data_holdout, device, num_classes=num_classes_holdout)
+
+    # Load pretrained weights and evaluate
+    checkpoint_path = "checkpoints/model_03000.pt"  # Adjust path as needed
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
+        model.eval()
+
+        print("\nEvaluating with pretrained weights on base classes")
+        evaluate_fewshot(model, support_data_base, query_data_base, device, num_classes=num_classes_base)
+
+        if holdout_shards:
+            print("Evaluating with pretrained weights on holdout classes")
+            evaluate_fewshot(model, support_data_holdout, query_data_holdout, device, num_classes=num_classes_holdout)
+    except FileNotFoundError:
+        print(f"\nPretrained weights not found at {checkpoint_path}; skipping pretrained evaluation.")
