@@ -263,7 +263,7 @@ if __name__ == "__main__":
 
     # Evaluate with random weights
     print("Evaluating with random weights")
-    evaluate_fewshot(model, support_data, query_data, device, batch_size=4)
+    evaluate_fewshot(model, support_data, query_data, device, batch_size=16)
 
     # Optionally, load pretrained weights and evaluate
     try:
