@@ -328,10 +328,8 @@ if __name__ == "__main__":
 
     # Example shard paths (replace with actual paths)
     shard_paths = [
-        "./local_shards/mydata_train_643.pt",
-        "./local_shards/mydata_train_900.pt",
-        "./local_shards/mydata_train_400.pt"
-    ]
+        "./local_shards_val/mydata_train_1.pt",
+        "./local_shards_val/mydata_train_0.pt",    ]
 
     # Load data
     support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=10,
