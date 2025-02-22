@@ -368,7 +368,7 @@ if __name__ == "__main__":
     # shard_paths = glob.glob("./local_shards_val/mydata_train_*.pt")
 
     # Holdout setup
-    holdout_percentage = 0.4
+    holdout_percentage = 0.1
     num_holdout = int(len(shard_paths) * holdout_percentage)
     base_shards = shard_paths[:-num_holdout] if num_holdout > 0 else shard_paths
     holdout_shards = shard_paths[-num_holdout:] if num_holdout > 0 else []
