@@ -291,7 +291,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch_size=16, epochs=100, lr=0.01):
+def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch_size=16, epochs=10, lr=0.0001):
     model.eval()
 
     # Helper function to get embeddings and labels
@@ -313,7 +313,7 @@ def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch
     query_emb, query_labels = get_embeddings(query_data, batch_size)
 
     # Define classifier, optimizer, and loss function
-    classifier = nn.Linear(model.config.n_embd//64, num_classes).to(device)
+    classifier = nn.Linear(model.config.n_embd, num_classes).to(device)
     optimizer = torch.optim.Adam(classifier.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
