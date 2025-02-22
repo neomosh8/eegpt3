@@ -328,13 +328,13 @@ if __name__ == "__main__":
 
     # Example shard paths (replace with actual paths)
     shard_paths = [
-        "./local_shards_val/mydata_train_0.pt",
-        "./local_shards_val/mydata_train_1.pt",
-        "./local_shards_val/mydata_train_2.pt"
+        "./local_shards/mydata_train_0.pt",
+        "./local_shards/mydata_train_1.pt",
+        "./local_shards/mydata_train_2.pt"
     ]
 
     # Load data
-    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=2,
+    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=5,
                                                  pad_token=config.pad_token, num_channels=config.num_channels)
     # Evaluate with random weights
     print("Evaluating with random weights")
