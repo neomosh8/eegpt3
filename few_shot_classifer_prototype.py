@@ -228,16 +228,92 @@ def evaluate_fewshot(model, support_data, query_data, device, batch_size=4):
     accuracy = correct / total if total > 0 else 0
     print(f"Accuracy: {accuracy:.4f} (Total query samples: {total})")
 
-# Data Loading (Simple Example)
-def load_fewshot_data(shard_paths, T=1024, K=3, num_channels=3, vocab_size=82):
+
+import torch
+import os
+import glob
+import random
+
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]  # Define your regions
+
+
+def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(REGIONS)):
+    """
+    Load few-shot data from shard files, splitting into support and query sets.
+
+    Args:
+        shard_paths (list): List of paths to .pt shard files, one per class.
+        T (int): Sequence length per channel.
+        K (int): Number of support samples per class.
+        pad_token (int): Token to pad sequences if needed.
+        num_channels (int): Number of channels (default: len(REGIONS)).
+
+    Returns:
+        support_data (list): List of (sequence, label) tuples for support set, sequence shape [C, T].
+        query_data (list): List of (sequence, label) tuples for query set, sequence shape [C, T].
+    """
+    if not shard_paths:
+        raise ValueError("No shard paths provided.")
+
+    all_sequences = []
+    min_num_sequences = float('inf')
+
+    # Load data from shards and extract sequences
+    for label, shard_path in enumerate(shard_paths):
+        if not os.path.exists(shard_path):
+            raise FileNotFoundError(f"Shard file not found: {shard_path}")
+
+        loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+        # Ensure all regions are present; use the first available if missing
+        for region in REGIONS:
+            if region not in loaded:
+                available_regions = list(loaded.keys())
+                if available_regions:
+                    loaded[region] = loaded[available_regions[0]]
+                    print(f"Warning: Shard {shard_path} missing {region}, using {available_regions[0]}.")
+                else:
+                    raise ValueError(f"Shard {shard_path} has no channels for {region}.")
+
+        # Compute minimum length across channels
+        min_length = min(loaded[region].size(0) for region in REGIONS)
+        num_sequences = (min_length - T) // T + 1  # Non-overlapping sequences
+        min_num_sequences = min(min_num_sequences, num_sequences)
+
+        if num_sequences < K:
+            raise ValueError(f"Shard {shard_path} has too few sequences ({num_sequences}) for K={K}")
+
+        # Extract sequences for this class
+        sequences = []
+        for i in range(num_sequences):
+            start = i * T
+            end = start + T
+            seq = []
+            for region in REGIONS:
+                channel_seq = loaded[region][start:end]  # [T]
+                if channel_seq.size(0) < T:
+                    padding = torch.full((T - channel_seq.size(0),), pad_token, dtype=channel_seq.dtype)
+                    channel_seq = torch.cat((channel_seq, padding), dim=0)
+                seq.append(channel_seq.unsqueeze(0))  # [1, T]
+            seq = torch.cat(seq, dim=0)  # [C, T]
+            sequences.append((seq, label))
+        all_sequences.append(sequences)
+
+    # Balance and split into support and query sets
     support_data = []
     query_data = []
-    for label, shard_path in enumerate(shard_paths):
-        # Simulate loading data; replace with actual torch.load logic
-        num_samples = K + 10  # K support + 10 query
-        sequences = torch.randint(0, vocab_size, (num_samples, num_channels, T))
-        support_data.extend([(sequences[i], label) for i in range(K)])
-        query_data.extend([(sequences[i + K], label) for i in range(10)])
+    for sequences in all_sequences:
+        sequences = sequences[:min_num_sequences]  # Truncate to smallest class size
+        random.shuffle(sequences)
+        support_data.extend(sequences[:K])  # K support samples
+        query_data.extend(sequences[K:])  # Remaining as query
+
+    # Verify balance in query set
+    query_counts = {}
+    for _, label in query_data:
+        query_counts[label] = query_counts.get(label, 0) + 1
+    if len(set(query_counts.values())) > 1:
+        print(f"Warning: Query set is unbalanced: {query_counts}")
+
     return support_data, query_data
 
 # Main Execution
