@@ -287,48 +287,76 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
     return support_data, query_data
 
 
-def evaluate_fewshot(model, support_data, query_data, device, num_classes, epochs=100, lr=0.01):
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch_size=16, epochs=100, lr=0.01):
     """
-    Evaluate few-shot classification by training a linear classifier on support embeddings.
+    Evaluate few-shot classification by training a linear classifier on support embeddings with batching.
 
     Args:
         model: Pretrained GPT model.
         support_data: List of (sequence, label) tuples for support.
         query_data: List of (sequence, label) tuples for query.
-        device: Device to run on.
+        device: Device to run on (e.g., 'cuda' or 'cpu').
         num_classes: Number of classes in the task.
-        epochs: Number of training epochs for the classifier.
-        lr: Learning rate for the classifier.
+        batch_size: Batch size for processing (default=16).
+        epochs: Number of training epochs for the classifier (default=100).
+        lr: Learning rate for the classifier (default=0.01).
     """
     model.eval()
-    with torch.no_grad():
-        support_sequences = torch.stack([seq for seq, _ in support_data], dim=0).to(device)
-        support_emb = model.get_embedding(support_sequences)
-        support_labels = torch.tensor([label for _, label in support_data], device=device)
 
-        query_sequences = torch.stack([seq for seq, _ in query_data], dim=0).to(device)
-        query_emb = model.get_embedding(query_sequences)
-        query_labels = torch.tensor([label for _, label in query_data], device=device)
+    # Helper function to compute embeddings in batches
+    def get_embeddings(data, batch_size):
+        embeddings = []
+        labels = []
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
+            batch_emb = model.get_embedding(sequences)
+            embeddings.append(batch_emb)
+            labels.extend([label for _, label in batch])
+        embeddings = torch.cat(embeddings, dim=0)
+        labels = torch.tensor(labels, device=device)
+        return embeddings, labels
 
+    # Compute support and query embeddings in batches
+    support_emb, support_labels = get_embeddings(support_data, batch_size)
+    query_emb, query_labels = get_embeddings(query_data, batch_size)
+
+    # Train classifier with batching
     classifier = nn.Linear(model.config.n_embd, num_classes).to(device)
     optimizer = torch.optim.Adam(classifier.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
+    # Create a DataLoader for support embeddings
+    support_dataset = TensorDataset(support_emb, support_labels)
+    support_loader = DataLoader(support_dataset, batch_size=batch_size, shuffle=True)
+
+    # Train the classifier using mini-batches
     for epoch in range(epochs):
-        optimizer.zero_grad()
-        logits = classifier(support_emb)
-        loss = criterion(logits, support_labels)
-        loss.backward()
-        optimizer.step()
+        for batch_emb, batch_labels in support_loader:
+            optimizer.zero_grad()
+            logits = classifier(batch_emb)
+            loss = criterion(logits, batch_labels)
+            loss.backward()
+            optimizer.step()
 
+    # Evaluate on query set in batches
+    correct = 0
+    total = 0
     with torch.no_grad():
-        logits = classifier(query_emb)
-        pred = logits.argmax(dim=1)
-        correct = (pred == query_labels).sum().item()
-        total = query_labels.size(0)
-        accuracy = correct / total if total > 0 else 0
-    print(f"Accuracy: {accuracy:.4f} (Total query samples: {total})")
+        for i in range(0, query_emb.size(0), batch_size):
+            batch_emb = query_emb[i:i + batch_size]
+            batch_labels = query_labels[i:i + batch_size]
+            logits = classifier(batch_emb)
+            pred = logits.argmax(dim=1)
+            correct += (pred == batch_labels).sum().item()
+            total += batch_labels.size(0)
 
+    accuracy = correct / total if total > 0 else 0
+    print(f"Accuracy: {accuracy:.4f} (Total query samples: {total})")
 
 # Main Execution
 if __name__ == "__main__":
