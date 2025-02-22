@@ -361,12 +361,14 @@ if __name__ == "__main__":
     shard_paths = [
         "./local_shards_val/mydata_train_2.pt",
         "./local_shards_val/mydata_train_1.pt",
+        "./local_shards_val/mydata_train_0.pt",
+
     ]
     # Alternatively, use glob to load all shards:
     # shard_paths = glob.glob("./local_shards_val/mydata_train_*.pt")
 
     # Holdout setup
-    holdout_percentage = 0.2
+    holdout_percentage = 0.4
     num_holdout = int(len(shard_paths) * holdout_percentage)
     base_shards = shard_paths[:-num_holdout] if num_holdout > 0 else shard_paths
     holdout_shards = shard_paths[-num_holdout:] if num_holdout > 0 else []
