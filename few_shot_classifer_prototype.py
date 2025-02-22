@@ -459,33 +459,50 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0):
 
 
 def compute_embeddings(model, sequences, device):
+    """
+    Compute embeddings for a batch of multi-channel sequences using the provided GPT model.
+
+    Args:
+        model: The GPT model instance (with RoPE and multi-channel support).
+        sequences: Tensor of shape [B, C, T] containing input token indices.
+        device: Device to run the computation on (e.g., 'cuda' or 'cpu').
+
+    Returns:
+        Tensor of shape [B, n_embd] containing the mean embeddings across channels for each batch item.
+    """
     model.eval()
     with torch.no_grad():
-        sequences = sequences.to(device)
+        # Move sequences to device
+        sequences = sequences.to(device)  # [B, C, T]
         B, C, T = sequences.size()
 
-        tok_emb = model.transformer.wte(sequences)
-        x = tok_emb.transpose(1, 2)
-        pos = torch.arange(T, device=device).unsqueeze(0)
-        pos_emb = model.transformer.wpe(pos)
-        x = x + pos_emb.unsqueeze(2)
+        # Token embeddings
+        tok_emb = model.transformer.wte(sequences)  # [B, C, T, n_embd]
+        x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
+        # Note: No explicit positional embeddings (wpe) added here; RoPE is handled in attention
 
+        # Process each channel through the intra_channel_encoder
         channel_outs = []
         for c in range(C):
-            x_c = x[:, :, c, :]
-            x_c = model.intra_channel_encoder(x_c)
+            x_c = x[:, :, c, :]  # [B, T, n_embd]
+            x_c = model.intra_channel_encoder(x_c)  # [B, T, n_embd]
             channel_outs.append(x_c)
-        x = torch.stack(channel_outs, dim=2)
+        x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
 
+        # Pass through transformer blocks
         for block in model.transformer.h:
-            x = block(x)
+            x = block(x)  # [B, T, C, n_embd]
 
-        x = x.transpose(1, 2).reshape(B * C, T, model.config.n_embd)
-        x = model.transformer.ln_f(x)
+        # Reshape and apply final layer norm
+        x = x.transpose(1, 2).reshape(B * C, T, model.config.n_embd)  # [B * C, T, n_embd]
+        x = model.transformer.ln_f(x)  # [B * C, T, n_embd]
 
-        last_tokens = x[:, -1, :]
-        last_tokens = last_tokens.view(B, C, model.config.n_embd)
-        embeddings = last_tokens.mean(dim=1)
+        # Extract the last token's representation for each channel
+        last_tokens = x[:, -1, :]  # [B * C, n_embd]
+        last_tokens = last_tokens.view(B, C, model.config.n_embd)  # [B, C, n_embd]
+
+        # Average across channels to get a single embedding per batch item
+        embeddings = last_tokens.mean(dim=1)  # [B, n_embd]
 
         return embeddings.cpu()
 
