@@ -185,21 +185,19 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100)
         return logits, loss
 
-    def get_embedding(self, idx):
-        B, C, T = idx.size()
-        tok_emb = self.transformer.wte(idx)
-        x = tok_emb.transpose(1, 2)
-        channel_outs = []
-        for c in range(C):
-            x_c = x[:, :, c, :]
-            x_c = self.intra_channel_encoder(x_c)
-            channel_outs.append(x_c)
-        x = torch.stack(channel_outs, dim=2)
-        for block in self.transformer.h:
-            x = block(x)
-        last_tokens = x[:, -1, :, :]
-        embedding = last_tokens.mean(dim=1)
-        return embedding
+    def get_embeddings(data, batch_size):
+        embeddings = []
+        labels = []
+        with torch.no_grad():  # Prevent gradient tracking
+            for i in range(0, len(data), batch_size):
+                batch = data[i:i + batch_size]
+                sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
+                batch_emb = model.get_embedding(sequences).detach()
+                embeddings.append(batch_emb)
+                labels.extend([label for _, label in batch])
+        embeddings = torch.cat(embeddings, dim=0)
+        labels = torch.tensor(labels, device=device)
+        return embeddings, labels
 
 
 # Few-Shot Classification Functions
@@ -371,6 +369,7 @@ if __name__ == "__main__":
     # Shard paths (example, replace with your actual paths)
     shard_paths = [
         "./local_shards_val/mydata_train_2.pt",
+        "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
     ]
     # Alternatively, use glob to load all shards:
