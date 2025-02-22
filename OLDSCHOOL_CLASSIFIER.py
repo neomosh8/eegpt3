@@ -192,7 +192,7 @@ class GPT(nn.Module):
             for i in range(0, len(data), batch_size):
                 batch = data[i:i + batch_size]
                 sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
-                batch_emb = model.get_embedding(sequences).detach()
+                batch_emb = model.get_embeddings(sequences).detach()
                 embeddings.append(batch_emb)
                 labels.extend([label for _, label in batch])
         embeddings = torch.cat(embeddings, dim=0)
@@ -312,7 +312,7 @@ def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
-            batch_emb = model.get_embedding(sequences)
+            batch_emb = model.get_embeddings(sequences)
             embeddings.append(batch_emb)
             labels.extend([label for _, label in batch])
         embeddings = torch.cat(embeddings, dim=0)
