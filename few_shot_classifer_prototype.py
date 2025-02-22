@@ -59,24 +59,26 @@ if torch.cuda.is_available():
 #########################
 # Model Components
 #########################
-import torch
-import torch.nn as nn
-
 
 class SimpleCrossChannelFusion(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
-        self.proj = nn.Linear(n_embd, n_embd)
+        reduced_dim = 16
+        self.proj_reduce = nn.Linear(n_embd, reduced_dim)
+        self.proj_expand = nn.Linear(reduced_dim, n_embd)
         self.ln = nn.LayerNorm(n_embd)
 
     def forward(self, x):
         B, T, C, E = x.size()
-        # Average across channels
+        # Average across channels to fuse inter-channel information
         fused = x.mean(dim=2, keepdim=True)  # [B, T, 1, E]
-        # Apply projection
-        fused = self.proj(fused)  # [B, T, 1, E]
-        # Add back to original and normalize
-        x = x + fused.expand_as(x)  # [B, T, C, E]
+        # Project to a lower-dimensional space
+        fused = self.proj_reduce(fused)  # [B, T, 1, reduced_dim]
+        # (Optional: you can add a non-linearity here)
+        # Project back to the original embedding dimension
+        fused = self.proj_expand(fused)  # [B, T, 1, E]
+        # Add the reduced fusion back to the original representation and normalize
+        x = x + fused.expand_as(x)
         return self.ln(x)
 
 class CausalSelfAttention(nn.Module):
@@ -127,7 +129,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttentionWithRoPE(config)  # Updated to RoPE
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -141,30 +143,23 @@ class BlockWithFusion(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)  # Within-channel temporal attention
+        self.attn = CausalSelfAttentionWithRoPE(config)  # Updated to RoPE
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.fusion = SimpleCrossChannelFusion(config.n_embd)  # Cross-channel fusion
+        self.fusion = SimpleCrossChannelFusion(config.n_embd)
         self.ln_3 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
     def forward(self, x):
-        # Input: [B, T, C, n_embd]
         B, T, C, E = x.size()
-
-        # Step 1: Within-channel causal attention
-        x_reshaped = x.view(B * C, T, E)  # [B * C, T, n_embd]
-        x_reshaped = x_reshaped + self.attn(self.ln_1(x_reshaped))  # Temporal attention
-        x = x_reshaped.view(B, T, C, E)  # [B, T, C, n_embd]
-
-        # Step 2: Cross-channel fusion
-        x = x + self.fusion(self.ln_2(x))  # [B, T, C, n_embd]
-
-        # Step 3: MLP
-        x_reshaped = x.view(B * C, T, E)  # [B * C, T, n_embd]
+        x_reshaped = x.view(B * C, T, E)
+        x_reshaped = x_reshaped + self.attn(self.ln_1(x_reshaped))
+        x = x_reshaped.view(B, T, C, E)
+        x = x + self.fusion(self.ln_2(x))
+        x_reshaped = x.view(B * C, T, E)
         x_reshaped = x_reshaped + self.mlp(self.ln_3(x_reshaped))
-        x = x_reshaped.view(B, T, C, E)  # [B, T, C, n_embd]
-
+        x = x_reshaped.view(B, T, C, E)
         return x
+
 class CrossChannelFusion(nn.Module):
     def __init__(self, n_embd, num_heads=1):
         super().__init__()
@@ -187,27 +182,71 @@ class CrossChannelFusion(nn.Module):
 
         return fused
 
+class CausalSelfAttentionWithRoPE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
+        self.attn_dropout = nn.Dropout(p=getattr(config, 'attn_dropout', 0.05))
+        self.resid_dropout = nn.Dropout(p=getattr(config, 'resid_dropout', 0.05))
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
 
+    def apply_rotary_emb(self, x, seq_len):
+        # Assumes x is [B, n_head, T, head_dim]
+        head_dim = x.size(-1)
+        freqs = torch.arange(0, head_dim, 2, device=x.device).float() / head_dim
+        theta = 1000.0 ** (-freqs)  # Frequency base
+        positions = torch.arange(seq_len, device=x.device).float()
+        angles = positions[:, None] * theta[None, :]  # [T, head_dim/2]
+        sin = angles.sin()
+        cos = angles.cos()
+        x1, x2 = x[..., 0::2], x[..., 1::2]  # Split even/odd dimensions
+        x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+        return x_rot
+
+    def forward(self, x):
+        B, T, C = x.size()
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        head_dim = C // self.n_head
+        k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
+
+        # Apply RoPE to q and k
+        q = self.apply_rotary_emb(q, T)
+        k = self.apply_rotary_emb(k, T)
+
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = self.attn_dropout(y)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        y = self.resid_dropout(y)
+        return y
 @dataclass
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 82
+    # vocab_size: int = 10799
     # Small model configuration
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    # n_layer: int = 12
+    # n_head: int = 12
+    # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
-    # n_layer: int = 8
-    # n_head: int = 8
-    # n_embd: int = 512
+    # n_layer: int = 12
+    # n_head: int = 12
+    # n_embd: int = 768
     num_channels: int = 3
-    mlp_dropout: float = 0.05
-    attn_dropout: float = 0.05
-    resid_dropout: float = 0.05
+    mlp_dropout: float = 0.00
+    attn_dropout: float = 0.00
+    resid_dropout: float = 0.00
     pad_token: int = 0  # Padding token for inputs
 
 
@@ -217,7 +256,6 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "wpe": nn.Embedding(config.block_size, config.n_embd),
             "h": nn.ModuleList([BlockWithFusion(config) for _ in range(config.n_layer)]),
             "ln_f": nn.LayerNorm(config.n_embd)
         })
@@ -227,7 +265,8 @@ class GPT(nn.Module):
         # Shared intra-channel encoder (replaces per-channel encoder)
         self.intra_channel_encoder = nn.Sequential(
             Block(config),
-            Block(config)
+            Block(config),
+            Block(config),
         )
 
         self.apply(self._init_weights)
@@ -243,18 +282,11 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        B, C, T = idx.size()  # C can be 1 or more
-
-        # Token embedding and reshape
+        B, C, T = idx.size()
         tok_emb = self.transformer.wte(idx)  # [B, C, T, n_embd]
         x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
+        # No positional embeddings added here; RoPE handles it in attention
 
-        # Positional embeddings
-        pos = torch.arange(T, device=x.device).unsqueeze(0)  # [1, T]
-        pos_emb = self.transformer.wpe(pos)  # [1, T, n_embd]
-        x = x + pos_emb.unsqueeze(2)  # [B, T, C, n_embd]
-
-        # Apply shared intra-channel encoder to each channel
         channel_outs = []
         for c in range(C):
             x_c = x[:, :, c, :]  # [B, T, n_embd]
@@ -262,19 +294,14 @@ class GPT(nn.Module):
             channel_outs.append(x_c)
         x = torch.stack(channel_outs, dim=2)  # [B, T, C, n_embd]
 
-        # Transformer blocks with fusion (works for any C)
         for block in self.transformer.h:
             x = block(x)  # [B, T, C, n_embd]
 
-        # Reshape and final layer norm
         x = x.transpose(1, 2).reshape(B * C, T, self.config.n_embd)  # [B * C, T, n_embd]
         x = self.transformer.ln_f(x)  # [B * C, T, n_embd]
-
-        # Predict at all time steps
         logits = self.lm_head(x)  # [B * C, T, vocab_size]
         logits = logits.view(B, C, T, -1)  # [B, C, T, vocab_size]
 
-        # Loss computation with padding ignored
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100)
@@ -313,11 +340,49 @@ class GPT(nn.Module):
 
         optimizer = torch.optim.AdamW(
             optim_groups,
-            betas=(0.9, 0.95),
+            betas=(0.95, 0.999),
             eps=1e-8,
             fused=use_fused
         )
         return optimizer
+
+    # def configure_optimizer(self, weight_decay, learning_rate, device):
+    #     """
+    #     Configure the optimizer with separate parameter groups for decayed and non-decayed weights using RMSprop.
+    #     """
+    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+    #     decay_params = []
+    #     nodecay_params = []
+    #
+    #     for pn, p in param_dict.items():
+    #         if p.dim() >= 2:  # Apply weight decay to 2D+ parameters (e.g., weights)
+    #             decay_params.append(p)
+    #         else:  # No weight decay for 1D parameters (e.g., biases, LayerNorm params)
+    #             nodecay_params.append(p)
+    #
+    #     optim_groups = [
+    #         {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
+    #         {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
+    #     ]
+    #
+    #     num_decay_params = sum(p.numel() for p in decay_params)
+    #     num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    #
+    #     if master_process:
+    #         print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
+    #         print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
+    #
+    #     # Initialize RMSprop optimizer
+    #     optimizer = torch.optim.RMSprop(
+    #         optim_groups,
+    #         lr=learning_rate,
+    #         alpha=0.99,  # Smoothing constant (default is 0.99, equivalent to Adam's beta2)
+    #         eps=1e-8,  # Numerical stability term
+    #         weight_decay=weight_decay,  # Weight decay is handled per parameter group
+    #         momentum=0.0,  # RMSprop can use momentum, set to 0 if not needed
+    #         centered=False  # If True, computes a centered RMSprop (normalizes gradients by variance)
+    #     )
+    #     return optimizer
 
 
 import torch
@@ -464,7 +529,7 @@ evaluate_fewshot(gpt_model_random, support_data, query_data, device)
 # Step 2: Pretrained GPT
 print("\nStep 2: Loading pretrained weights and evaluating")
 gpt_model_pretrained = GPT(config).to(device)
-checkpoint = torch.load("checkpoints/model_00400.pt", map_location=device)  # Adjust path
+checkpoint = torch.load("checkpoints/model_02000.pt", map_location=device)  # Adjust path
 state_dict = checkpoint['model_state_dict']
 new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 gpt_model_pretrained.load_state_dict(new_state_dict)
