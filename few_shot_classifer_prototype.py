@@ -258,7 +258,7 @@ if __name__ == "__main__":
     ]
 
     # Load data
-    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=2,
+    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=10,
                                                  num_channels=config.num_channels, vocab_size=config.vocab_size)
 
     # Evaluate with random weights
