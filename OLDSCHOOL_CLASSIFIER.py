@@ -307,20 +307,19 @@ def evaluate_fewshot(model, support_data, query_data, device, num_classes, batch
     """
     model.eval()
 
-    # Helper function to compute embeddings in batches
     def get_embeddings(data, batch_size):
         embeddings = []
         labels = []
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
-            batch_emb = model.get_embeddings(sequences)
+            batch_emb = model.get_embedding(sequences).detach()  # Detach here
             embeddings.append(batch_emb)
             labels.extend([label for _, label in batch])
         embeddings = torch.cat(embeddings, dim=0)
         labels = torch.tensor(labels, device=device)
         return embeddings, labels
-
+    
     # Compute support and query embeddings in batches
     support_emb, support_labels = get_embeddings(support_data, batch_size)
     query_emb, query_labels = get_embeddings(query_data, batch_size)
