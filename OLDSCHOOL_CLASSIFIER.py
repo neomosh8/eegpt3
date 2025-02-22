@@ -371,7 +371,6 @@ if __name__ == "__main__":
     # Shard paths (example, replace with your actual paths)
     shard_paths = [
         "./local_shards_val/mydata_train_2.pt",
-        "./local_shards_val/mydata_train_0.pt",
         "./local_shards_val/mydata_train_1.pt",
     ]
     # Alternatively, use glob to load all shards:
