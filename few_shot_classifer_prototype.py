@@ -334,7 +334,7 @@ if __name__ == "__main__":
     ]
 
     # Load data
-    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=5,
+    support_data, query_data = load_fewshot_data(shard_paths, T=config.block_size, K=10,
                                                  pad_token=config.pad_token, num_channels=config.num_channels)
     # Evaluate with random weights
     print("Evaluating with random weights")
