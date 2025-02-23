@@ -148,11 +148,11 @@ class BlockWithFusion(nn.Module):
 
     def forward(self, x):
         B, T, C, E = x.size()
-        x_reshaped = x.view(B * C, T, E)
+        x_reshaped = x.contiguous().view(B * C, T, E)
         x_reshaped = x_reshaped + self.attn(self.ln_1(x_reshaped))
         x = x_reshaped.view(B, T, C, E)
         x = x + self.fusion(self.ln_2(x))
-        x_reshaped = x.view(B * C, T, E)
+        x_reshaped = x.contiguous().view(B * C, T, E)
         x_reshaped = x_reshaped + self.mlp(self.ln_3(x_reshaped))
         x = x_reshaped.view(B, T, C, E)
         return x
@@ -295,14 +295,14 @@ class GPT(nn.Module):
         # No positional embeddings added here; RoPE handles it in attention
 
         # Batched operation
-        x_reshaped = x.permute(0, 2, 1, 3).reshape(B * C, T, self.config.n_embd)  # [B*C, T, n_embd]
+        x_reshaped = x.permute(0, 2, 1, 3).contiguous().reshape(B * C, T, self.config.n_embd)  # [B*C, T, n_embd]
         out = self.intra_channel_encoder(x_reshaped)  # [B*C, T, n_embd]
-        x = out.view(B, C, T, self.config.n_embd).permute(0, 2, 1, 3)  # [B, T, C, n_embd]
+        x = out.view(B, C, T, self.config.n_embd).permute(0, 2, 1, 3).contiguous()  # [B, T, C, n_embd]
 
         for block in self.transformer.h:
             x = block(x)  # [B, T, C, n_embd]
 
-        x = x.transpose(1, 2).reshape(B * C, T, self.config.n_embd)  # [B * C, T, n_embd]
+        x = x.transpose(1, 2).contiguous().reshape(B * C, T, self.config.n_embd)  # [B * C, T, n_embd]
         x = self.transformer.ln_f(x)  # [B * C, T, n_embd]
         logits = self.lm_head(x)  # [B * C, T, vocab_size]
         logits = logits.view(B, C, T, -1)  # [B, C, T, vocab_size]
