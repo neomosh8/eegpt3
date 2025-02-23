@@ -605,7 +605,7 @@ val_loader = DataLoaderLiteAllInMemory(
 #                 region1,
 #                 region2
 #             )
-num_passes = 5
+num_passes = 10
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
 max_steps = num_passes * steps_per_pass
@@ -804,6 +804,9 @@ for step in range(max_steps):
             val_loss=avg_val_loss.item(),
             log_dir="./checkpoints"
         )
+        if master_process:
+            upload_folder_to_s3(local_folder_path="./checkpoints", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training_new_arch/log")
+
 
 if ddp:
     destroy_process_group()
@@ -811,4 +814,4 @@ if ddp:
 
 # (Optional) Upload log files to S3.
 # if master_process:
-#     upload_folder_to_s3(local_folder_path="./", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training/log")
+#     upload_folder_to_s3(local_folder_path="./checkpoints", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training_new_arch/log")
