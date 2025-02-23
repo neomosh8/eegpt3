@@ -199,11 +199,18 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         self.register_buffer('cos', angles.cos())
         self.register_buffer('sin', angles.sin())
 
-    def apply_rotary_emb(self, x):
+    def apply_rotary_emb(self, x, T):
         # x: [B, n_head, T, head_dim]
-        x1, x2 = x[..., 0::2], x[..., 1::2]  # [B, n_head, T, head_dim//2]
-        cos = self.cos[None, None, :, :x1.size(-1)]  # [1, 1, T, head_dim//2]
-        sin = self.sin[None, None, :, :x1.size(-1)]  # [1, 1, T, head_dim//2]
+        B, n_head, T, head_dim = x.shape
+        # Split into pairs for rotation
+        x1, x2 = x[..., 0::2], x[..., 1::2]  # Each: [B, n_head, T, head_dim//2]
+        # Use precomputed cos and sin, sliced to T if necessary
+        cos = self.cos[:T, :]  # [T, head_dim//2]
+        sin = self.sin[:T, :]  # [T, head_dim//2]
+        # Broadcast to match x1 and x2 shapes
+        cos = cos[None, None, :, :]  # [1, 1, T, head_dim//2]
+        sin = sin[None, None, :, :]  # [1, 1, T, head_dim//2]
+        # Apply rotary transformation
         x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
         return x_rot
 
