@@ -57,7 +57,7 @@ def save_checkpoint(model, optimizer, config, step, val_loss, log_dir):
         'val_loss': val_loss,
     }
 
-    checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+    checkpoint_path = os.path.join(log_dir, f"model_last_checkpoint.pt")
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved to {checkpoint_path}")
     return checkpoint_path
