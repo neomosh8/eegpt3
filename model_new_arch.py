@@ -626,7 +626,7 @@ if ddp:
 raw_model = model.module if ddp else model
 
 # Set up the optimizer.
-base_lr = 4e-3
+base_lr = 1e-3
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -635,7 +635,7 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     total_steps=max_steps,  # Use correct total_steps
     pct_start=0.1,
     anneal_strategy='cos',
-    cycle_momentum=True,
+    cycle_momentum=False,
     # div_factor = 10,
     # three_phase=True,
 
