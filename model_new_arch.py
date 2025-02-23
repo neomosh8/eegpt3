@@ -629,20 +629,20 @@ raw_model = model.module if ddp else model
 base_lr = 4e-3
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
-# scheduler = torch.optim.lr_scheduler.OneCycleLR(
-#     optimizer,
-#     max_lr=base_lr,
-#     total_steps=max_steps,  # Use correct total_steps
-#     pct_start=0.2,
-#     anneal_strategy='cos',
-#     cycle_momentum=True,
-#     div_factor = 10,
-#     three_phase=True,
-#
-#
-# )
-decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
-scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=100, decay_rate=decay_rate)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=base_lr,
+    total_steps=max_steps,  # Use correct total_steps
+    pct_start=0.2,
+    anneal_strategy='cos',
+    cycle_momentum=True,
+    div_factor = 10,
+    three_phase=True,
+
+
+)
+# decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
+# scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=100, decay_rate=decay_rate)
 
 # Log file for training (will be appended at every optimizer step)
 log_file = "training.log"
