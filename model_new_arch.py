@@ -716,7 +716,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
 val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
         B * T * ddp_world_size)  # Ceiling division
-val_steps_needed = 10
+# val_steps_needed = 10
 if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=10, window=50)
