@@ -241,9 +241,9 @@ class GPTConfig:
     n_head: int = 8  # Fewer heads but still enough for good attention
     n_embd: int = 512  # Smaller embedding dimension
     num_channels: int = 3
-    mlp_dropout: float = 0.02
-    attn_dropout: float = 0.00
-    resid_dropout: float = 0.02
+    mlp_dropout: float = 0.05
+    attn_dropout: float = 0.02
+    resid_dropout: float = 0.05
     pad_token: int = 0  # Padding token for inputs
 
 
@@ -401,7 +401,7 @@ class DataLoaderLiteAllInMemory:
 
         # Locate shard files
         pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
-        self.shard_files = sorted(glob.glob(pattern))[0:15]
+        self.shard_files = sorted(glob.glob(pattern))[0:100]
         if not self.shard_files:
             raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
         if shuffle_shards:
