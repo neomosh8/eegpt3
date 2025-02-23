@@ -233,17 +233,17 @@ class GPTConfig:
     # n_head: int = 12
     # n_embd: int = 768
 
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    # n_layer: int = 6
+    # n_head: int = 6
+    # n_embd: int = 384
 
-    # n_layer: int = 12
-    # n_head: int = 12
-    # n_embd: int = 768
+    n_layer: int = 24
+    n_head: int = 16
+    n_embd: int = 1536
     num_channels: int = 3
-    mlp_dropout: float = 0.00
+    mlp_dropout: float = 0.02
     attn_dropout: float = 0.00
-    resid_dropout: float = 0.00
+    resid_dropout: float = 0.02
     pad_token: int = 0  # Padding token for inputs
 
 
@@ -627,7 +627,7 @@ raw_model = model.module if ddp else model
 
 # Set up the optimizer.
 base_lr = 4e-3
-optimizer = raw_model.configure_optimizer(weight_decay=0.0, learning_rate=base_lr, device=device)
+optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_lr, device=device)
 
 # scheduler = torch.optim.lr_scheduler.OneCycleLR(
 #     optimizer,
