@@ -641,7 +641,7 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=base_l
 #
 #
 # )
-decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
+decay_rate = 0.995  # Adjustable decay rate (smaller value = faster decay)
 scheduler = CustomLRScheduler(optimizer, base_lr=base_lr, constant_steps=2000, decay_rate=decay_rate)
 
 # Log file for training (will be appended at every optimizer step)
