@@ -114,9 +114,9 @@ class BlockWithFusion(nn.Module):
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 82
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    n_layer: int = 12  # Moderate depth
+    n_head: int = 16  # Fewer heads but still enough for good attention
+    n_embd: int = 1536  # Smaller embedding dimension
     num_channels: int = 3
     mlp_dropout: float = 0.00
     attn_dropout: float = 0.00
@@ -351,7 +351,7 @@ if __name__ == "__main__":
 
     # Optionally, load pretrained weights and evaluate
     try:
-        checkpoint = torch.load("checkpoints/model_03000.pt", map_location=device,weights_only=False)
+        checkpoint = torch.load("checkpoints/model_01000.pt", map_location=device,weights_only=False)
         state_dict = checkpoint['model_state_dict']
         model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
         model.eval()
