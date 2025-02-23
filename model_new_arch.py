@@ -490,7 +490,7 @@ class DataLoaderLiteAllInMemory:
 # Training hyperparameters
 B = 16  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
-desired_B_eff = 128  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 16  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
