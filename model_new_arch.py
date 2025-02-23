@@ -238,7 +238,7 @@ class GPTConfig:
     # n_embd: int = 384
 
     n_layer: int = 16  # Moderate depth
-    n_head: int = 24  # Fewer heads but still enough for good attention
+    n_head: int = 32  # Fewer heads but still enough for good attention
     n_embd: int = 2048  # Smaller embedding dimension
     num_channels: int = 3
     mlp_dropout: float = 0.05
@@ -488,7 +488,7 @@ class DataLoaderLiteAllInMemory:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 12  # micro-batch size (sequences per mini-batch)
+B = 16  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
 desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
