@@ -605,7 +605,7 @@ val_loader = DataLoaderLiteAllInMemory(
 #                 region1,
 #                 region2
 #             )
-num_passes = 1000
+num_passes = 200
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
 max_steps = num_passes * steps_per_pass
@@ -633,11 +633,11 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps,  # Use correct total_steps
-    pct_start=0.2,
+    pct_start=0.1,
     anneal_strategy='cos',
     cycle_momentum=True,
-    div_factor = 10,
-    three_phase=True,
+    # div_factor = 10,
+    # three_phase=True,
 
 
 )

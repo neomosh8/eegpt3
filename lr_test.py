@@ -42,7 +42,7 @@ class CustomLRScheduler:
 
 # Parameters
 base_lr = 4e-4
-max_steps = 16200
+max_steps = 74000
 decay_rate = 1  # Adjustable decay rate (smaller value = faster decay)
 
 # Dummy optimizer

@@ -2,8 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 
 # Parameters
-base_lr = 4e-4
-max_steps = 16200  # Total training steps
+base_lr =  4e-3
+max_steps = 75000  # Total training steps
 
 # Dummy optimizer
 optimizer = torch.optim.AdamW([torch.zeros(1)], lr=base_lr)
@@ -13,11 +13,12 @@ scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
     max_lr=base_lr,
     total_steps=max_steps,  # Use correct total_steps
-    pct_start=0.2,
+    pct_start=0.1,
     anneal_strategy='cos',
     cycle_momentum=True,
-    div_factor = 10,
-    three_phase=True,
+    # div_factor = 10,
+    # three_phase=True,
+
 
 )
 
