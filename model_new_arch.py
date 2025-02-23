@@ -237,9 +237,9 @@ class GPTConfig:
     # n_head: int = 6
     # n_embd: int = 384
 
-    n_layer: int = 24
-    n_head: int = 16
-    n_embd: int = 1536
+    n_layer: int = 12  # Moderate depth
+    n_head: int = 8  # Fewer heads but still enough for good attention
+    n_embd: int = 512  # Smaller embedding dimension
     num_channels: int = 3
     mlp_dropout: float = 0.02
     attn_dropout: float = 0.00
@@ -654,6 +654,7 @@ if master_process:
 #########################
 # Training Loop (No Epochs)
 #########################
+torch.set_float32_matmul_precision('high')
 
 def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps, device, device_type, ddp, scaler):
     """
@@ -685,7 +686,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
         context = model.no_sync() if ddp and micro_step < grad_accum_steps - 1 else contextlib.nullcontext()
         with context:
             # Mixed precision forward pass
-            with torch.autocast(device_type=device_type, dtype=torch.float32):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y)  # logits: [B, C, T, vocab_size], loss over all T positions
             # Accumulate unscaled loss for reporting
             loss_accum += loss.detach()
@@ -775,7 +776,7 @@ for step in range(max_steps):
             for val_step_num in range(val_loss_steps):
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float32):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(x_val, y_val)
                 val_loss_accum += loss.detach()
                 if ddp:
