@@ -812,14 +812,11 @@ for step in range(max_steps):
             val_loss=avg_val_loss.item(),
             log_dir="./checkpoints"
         )
-        if master_process:
-            upload_folder_to_s3(local_folder_path="./checkpoints", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training_new_arch/log")
-
+    if step % 1000 == 0 and step > 0:
+        upload_folder_to_s3(local_folder_path="./checkpoints", bucket_name="dataframes--use1-az6--x-s3",
+                            s3_prefix="training_new_arch/log")
 
 if ddp:
     destroy_process_group()
 
 
-# (Optional) Upload log files to S3.
-# if master_process:
-#     upload_folder_to_s3(local_folder_path="./checkpoints", bucket_name="dataframes--use1-az6--x-s3", s3_prefix="training_new_arch/log")
