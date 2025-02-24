@@ -508,6 +508,9 @@ train_loader = DataLoaderLiteAllInMemory(
     B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='train', shuffle_shards=True
 )
+for region, tokens in train_loader.tokens.items():
+    print(f"{region}: min={tokens.min().item()}, max={tokens.max().item()}")
+
 val_loader = DataLoaderLiteAllInMemory(
     B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size,
     local_data_dir="./local_shards", shard_prefix="mydata", split='val', shuffle_shards=True
@@ -627,8 +630,7 @@ if master_process:
 # Instantiate the model.
 model = GPT(GPTConfig())
 model.to(device)
-# Optionally compile the model for potential speedups.
-# model = torch.compile(model)
+model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
