@@ -1,47 +1,47 @@
-import math
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
+# Read the training log file assuming it is whitespace-delimited.
+# The file should have a header like "step train_loss".
+data = pd.read_csv("training.log", delim_whitespace=True)
 
+# Extract training steps and loss values.
+steps = data['step']
+loss = data['train_loss']
 
+# Compute a smoothed loss curve using a moving average.
+def moving_average(data, window_size=3):
+    return np.convolve(data, np.ones(window_size) / window_size, mode='valid')
 
-epoch_num = 20
-total_batch_size = 524288
-B = 16
-T = 1024
-plateau_count = 0
-max_lr = 1e-1
-min_lr = 1e-10
-max_steps = math.ceil(1e9//total_batch_size) * epoch_num
-warmup_steps =int(0.02*max_steps)
-best_val_loss = float('inf')
-no_improvement_count = 0
-patience = 3
+window_size = 3  # You can adjust the window size as needed.
+smoothed_loss = moving_average(loss, window_size)
+smoothed_steps = steps[window_size - 1:]  # Adjust steps to match the smoothed data.
 
-def get_lr(step, max_lr=max_lr, min_lr=min_lr, warmup_steps=warmup_steps, total_steps=2*max_steps):
-    if step < warmup_steps:
-        lr = max_lr * (step + 1) / warmup_steps
-    else:
-        ratio = (step - warmup_steps) / float(total_steps - warmup_steps)
-        ratio = min(1.0, max(0.0, ratio))
-        lr = max_lr * (min_lr / max_lr) ** ratio
-        lr = max(lr, min_lr)
-    # multiply by 0.1^plateau_count
-    factor = 0.1 ** plateau_count
-    lr_final = lr * factor
-    return max(lr_final, min_lr)
+# Compute the pace of loss change: the difference between consecutive loss values.
+loss_diff = np.diff(loss)
+steps_diff = steps[1:]  # Corresponding steps for the differences.
 
-# Generate learning rate values for iterations
-iterations = list(range(0, max_steps))
-learning_rates = [get_lr(it) for it in iterations]
-print(learning_rates[27000])
-# Plot the learning rate schedule
-plt.figure(figsize=(10, 6))
-plt.plot(iterations, learning_rates, label="Dynamic Range Adjusted Learning Rate")
-plt.xlabel("Iteration")
-plt.ylabel("Learning Rate")
-plt.title("Learning Rate Schedule with Increased Dynamic Range")
-plt.grid(True)
-plt.legend()
+# Create two subplots: one for the loss curves, one for the pace analysis.
+fig, axes = plt.subplots(2, 1, figsize=(10, 10))
+
+# Plot the raw training loss and the smoothed loss.
+axes[0].plot(steps, loss, 'o-', label='Raw Training Loss', alpha=0.7)
+axes[0].plot(smoothed_steps, smoothed_loss, 's--', label='Smoothed Loss (MA)', alpha=0.9)
+axes[0].set_title('Training Loss vs. Steps')
+axes[0].set_xlabel('Training Steps')
+axes[0].set_ylabel('Loss')
+axes[0].grid(True)
+axes[0].legend()
+
+# Plot the pace of training: the change (delta) in loss between successive steps.
+axes[1].plot(steps_diff, loss_diff, 'o-', color='orange', label='Loss Change (Delta)')
+axes[1].axhline(0, color='black', linewidth=0.8, linestyle='--')
+axes[1].set_title('Pace of Training Loss Change')
+axes[1].set_xlabel('Training Steps')
+axes[1].set_ylabel('Loss Difference')
+axes[1].grid(True)
+axes[1].legend()
+
+plt.tight_layout()
 plt.show()
-
-

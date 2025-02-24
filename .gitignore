@@ -30,3 +30,4 @@ log.txt
 /output_EMOTIV
 final_report.txt
 *.pt
+*.log
