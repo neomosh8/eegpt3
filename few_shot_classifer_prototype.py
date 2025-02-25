@@ -735,7 +735,6 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # Model configuration (assuming GPTConfig and GPT are defined elsewhere)
-    from your_model_file import GPTConfig, GPT
 
     config = GPTConfig()
     model = GPT(config).to(device)
