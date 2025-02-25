@@ -706,41 +706,212 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
     return support_data, query_data
 
 
-# Update the model's get_embedding method for consistency
-def update_model_with_consistent_embedding(model):
+def extract_embeddings(model, sequences):
     """
-    Replace the model's get_embedding method with a consistent version.
+    Extract embeddings using continuous segments of tokens for better context representation.
 
     Args:
-        model: The model to update
+        model: The model to extract embeddings
+        sequences: Tensor of shape [B, C, T] where B is batch size, C is channels, T is sequence length
 
     Returns:
-        Updated model
+        Tensor of embeddings with shape [B, E] where E is embedding dimension
     """
+    B, C, T = sequences.size()
+    config = model.config
 
-    def new_get_embedding(self, idx):
-        return extract_embeddings(self, idx)
+    # Process through the embedding layer and encoder
+    tok_emb = model.transformer.wte(sequences)  # [B, C, T, n_embd]
+    x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
 
-    # Replace the method
-    import types
-    model.get_embedding = types.MethodType(new_get_embedding, model)
+    # Use the same batched operation as in forward()
+    x_reshaped = x.permute(0, 2, 1, 3).contiguous().reshape(B * C, T, config.n_embd)
+    out = model.intra_channel_encoder(x_reshaped)
+    x = out.view(B, C, T, config.n_embd).permute(0, 2, 1, 3).contiguous()
 
-    return model
+    # Process through transformer blocks
+    for block in model.transformer.h:
+        x = block(x)
+
+    # Apply the final layer norm to maintain consistency with forward pass
+    x_reshaped = x.transpose(1, 2).contiguous().reshape(B * C, T, config.n_embd)
+    x_norm = model.transformer.ln_f(x_reshaped)
+    x = x_norm.view(B, C, T, config.n_embd)
+
+    # Use continuous segments of tokens for context
+    # Divide the sequence into 4 segments and extract embedding from each
+    segment_length = T // 4
+    segment_embeddings = []
+
+    for i in range(4):
+        start_idx = i * segment_length
+        end_idx = start_idx + segment_length
+
+        # Get embedding for this segment (average across tokens in segment)
+        segment_emb = x[:, start_idx:end_idx, :, :].mean(dim=1)  # [B, C, E]
+        segment_emb = segment_emb.mean(dim=1)  # [B, E] - average across channels
+        segment_embeddings.append(segment_emb)
+
+    # Concatenate segment embeddings to capture the full temporal context
+    full_embedding = torch.cat(segment_embeddings, dim=1)  # [B, 4*E]
+
+    # Project back to original embedding dimension to keep consistent size
+    if not hasattr(model, 'context_projection'):
+        model.context_projection = torch.nn.Linear(
+            4 * config.n_embd, config.n_embd,
+            device=full_embedding.device
+        )
+        # Initialize weights to average the segments
+        torch.nn.init.constant_(model.context_projection.weight, 0.25)
+        torch.nn.init.zeros_(model.context_projection.bias)
+
+    final_embedding = model.context_projection(full_embedding)
+
+    return final_embedding
 
 
-# Example usage in main
+def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, batch_size=8):
+    """
+    Evaluate few-shot classification with temporal augmentation for more robust results.
+
+    Args:
+        model: The model to use for evaluation
+        support_data: List of (sequence, label) tuples for support set
+        query_data: List of (sequence, label) tuples for query set
+        device: Device to run computation on
+        batch_size: Number of samples to process at once
+
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    model.eval()
+
+    # 1. Create multiple augmented views of the support set through minor time shifts
+    augmented_support_data = []
+    for seq, label in support_data:
+        B, C, T = 1, seq.size(0), seq.size(1)
+
+        # Original sample
+        augmented_support_data.append((seq, label))
+
+        # Add time-shifted versions (shifts of 5% of sequence length)
+        shift_amount = max(1, int(0.05 * T))
+        for shift in [shift_amount, 2 * shift_amount]:
+            # Shift right (take from beginning)
+            shifted_seq = torch.roll(seq.clone(), shifts=shift, dims=1)
+            augmented_support_data.append((shifted_seq, label))
+
+            # Shift left (take from end)
+            shifted_seq = torch.roll(seq.clone(), shifts=-shift, dims=1)
+            augmented_support_data.append((shifted_seq, label))
+
+    # 2. Compute prototypes from augmented support set
+    prototypes = compute_prototypes(model, augmented_support_data, device, batch_size)
+
+    # 3. Process query data with multiple views through time offsets
+    all_true_labels = []
+    all_pred_labels = []
+
+    for i in range(0, len(query_data), batch_size):
+        batch = query_data[i:i + batch_size]
+        batch_sequences = [seq for seq, _ in batch]
+        batch_labels = [label for _, label in batch]
+        all_true_labels.extend(batch_labels)
+
+        # For each sequence, create multiple temporal views
+        batch_predictions = []
+
+        for j, orig_seq in enumerate(batch_sequences):
+            views = [orig_seq]  # Start with original sequence
+
+            # Add time-shifted versions for robustness
+            T = orig_seq.size(1)
+            shift_amount = max(1, int(0.05 * T))
+
+            # Add right-shifted version
+            shifted_seq = torch.roll(orig_seq.clone(), shifts=shift_amount, dims=1)
+            views.append(shifted_seq)
+
+            # Add left-shifted version
+            shifted_seq = torch.roll(orig_seq.clone(), shifts=-shift_amount, dims=1)
+            views.append(shifted_seq)
+
+            # Process all views to get embeddings
+            view_embeddings = []
+            for view in views:
+                view_tensor = view.unsqueeze(0).to(device)  # [1, C, T]
+                with torch.no_grad():
+                    embedding = extract_embeddings(model, view_tensor)
+                    view_embeddings.append(embedding)
+
+            # Combine view predictions with voting
+            view_predictions = []
+            for embedding in view_embeddings:
+                # Compute similarity to each prototype
+                similarities = {}
+                for label, prototype in prototypes.items():
+                    # Normalize for cosine similarity
+                    embedding_norm = F.normalize(embedding, p=2, dim=1)
+                    similarity = torch.matmul(embedding_norm, prototype.unsqueeze(1)).item()
+                    similarities[label] = similarity
+
+                # Get prediction from this view
+                pred = max(similarities, key=similarities.get)
+                view_predictions.append(pred)
+
+            # Take majority vote across views
+            from collections import Counter
+            votes = Counter(view_predictions)
+            final_pred = votes.most_common(1)[0][0]
+            batch_predictions.append(final_pred)
+
+        all_pred_labels.extend(batch_predictions)
+
+    # 4. Compute metrics
+    correct = sum(1 for p, t in zip(all_pred_labels, all_true_labels) if p == t)
+    total = len(all_true_labels)
+    accuracy = correct / total if total > 0 else 0
+
+    # Compute per-class metrics
+    class_metrics = {}
+    for label in set(all_true_labels):
+        class_correct = sum(1 for p, t in zip(all_pred_labels, all_true_labels)
+                            if p == t and t == label)
+        class_total = sum(1 for t in all_true_labels if t == label)
+        class_accuracy = class_correct / class_total if class_total > 0 else 0
+        class_metrics[label] = {
+            'accuracy': class_accuracy,
+            'support': class_total
+        }
+
+    # Print results
+    print(f"Overall Accuracy: {accuracy:.4f} (Total query samples: {total})")
+    print("Per-class Accuracy:")
+    for label, metrics in class_metrics.items():
+        print(f"  Class {label}: {metrics['accuracy']:.4f} (Support: {metrics['support']})")
+
+    # Return results
+    results = {
+        'accuracy': accuracy,
+        'class_metrics': class_metrics,
+        'predictions': all_pred_labels,
+        'true_labels': all_true_labels
+    }
+
+    return results
+
+
+# Usage example
 if __name__ == "__main__":
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Model configuration (assuming GPTConfig and GPT are defined elsewhere)
+    # Model configuration
+    from your_model_file import GPTConfig, GPT
 
     config = GPTConfig()
     model = GPT(config).to(device)
-
-    # Update model with consistent embedding method
-    model = update_model_with_consistent_embedding(model)
 
     # Example shard paths (replace with actual paths)
     shard_paths = [
@@ -748,20 +919,21 @@ if __name__ == "__main__":
         "./local_shards_val/mydata_train_0.pt",
     ]
 
-    # Load data with improved handling
+    # Load data
     support_data, query_data = load_fewshot_data(
         shard_paths,
         T=config.block_size,
         K=10,
         pad_token=config.pad_token,
         num_channels=config.num_channels,
-        balance_classes=True,
-        max_samples_per_class=100  # Limit samples per class for faster training/evaluation
+        balance_classes=True
     )
 
     # Evaluate with random weights
-    print("Evaluating with random weights")
-    random_results = evaluate_fewshot(model, support_data, query_data, device, batch_size=16)
+    print("Evaluating with random weights and continuous context extraction")
+    random_results = evaluate_fewshot_with_augmentation(
+        model, support_data, query_data, device, batch_size=16
+    )
 
     # Optionally, load pretrained weights and evaluate
     try:
@@ -774,11 +946,10 @@ if __name__ == "__main__":
         model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
         model.eval()
 
-        print("\nEvaluating with pretrained weights")
-        pretrained_results = evaluate_fewshot(model, support_data, query_data, device, batch_size=16)
-
-        # Compare results
-        print(f"\nImprovement: {pretrained_results['accuracy'] - random_results['accuracy']:.4f}")
+        print("\nEvaluating with pretrained weights and continuous context extraction")
+        pretrained_results = evaluate_fewshot_with_augmentation(
+            model, support_data, query_data, device, batch_size=16
+        )
 
     except FileNotFoundError:
         print("\nPretrained weights not found; skipping pretrained evaluation.")
