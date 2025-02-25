@@ -388,7 +388,7 @@ if __name__ == "__main__":
         print(f"Downloaded {region} models to local paths:\n  GMM: {gmm_local_path}\n  CAE: {cae_local_path}")
 
     # List CSV files from S3
-    folders = list_s3_folders()[0:2]
+    folders = list_s3_folders()
     csv_files = []
     i = 1
     for folder in folders:
