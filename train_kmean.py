@@ -88,8 +88,7 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
         )
         for idx, region in enumerate(coeffs_dict.keys()):
             if idx < len(decomposed_channels):
-                coeffs_2d = np.abs(decomposed_channels[idx])  # Should be (scales, time_points)
-                print(f"Region '{region}' - CWT shape: {coeffs_2d.shape}")
+                coeffs_2d = decomposed_channels[idx]  # Shape: (scales, time_points)
                 coeffs_dict[region].append(coeffs_2d)
 
     return coeffs_dict
