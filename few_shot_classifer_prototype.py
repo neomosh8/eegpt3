@@ -543,7 +543,7 @@ def compute_loss_for_class(model, support_prompt, support_completion, query_prom
         _, loss = model(input_seq, targets=targets)
     return loss.item()
 
-def evaluate_few_shot(model, class_tokens, num_trials=10):
+def evaluate_few_shot(model, class_tokens, num_trials=30):
     """
     For each trial, for every class (true label), sample a query example and then
     compute the loss (i.e. negative log-likelihood) of generating its query completion
