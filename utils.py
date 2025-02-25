@@ -95,7 +95,7 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
             "theta": (4, 8),
             "alpha": (8, 12),
             "beta": (12, 30),
-            "gamma": (30, 80),
+            "gamma": (30, 64),
 
         }
 
@@ -449,7 +449,7 @@ def filter_band_pass_windows(ndarray, sps):
     # f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
     # filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # return filtered_data
-    f_b, f_a = signal.butter(N=5, Wn=80, btype='low', fs=sps)
+    f_b, f_a = signal.butter(N=5, Wn=64, btype='low', fs=sps)
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
