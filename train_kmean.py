@@ -160,7 +160,7 @@ def train_kmeans_models(all_coeffs, num_clusters=256, output_folder="/tmp"):
     return kmeans_models
 
 if __name__ == "__main__":
-    folders = list_s3_folders()
+    folders = list_s3_folders()[0:3]
     csv_files = []
     i = 0
     for folder in folders:
