@@ -15,45 +15,17 @@ from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
 import joblib
 
-# Placeholder utilities (replace with actual implementations if available)
-def list_s3_folders():
-    s3 = boto3.client("s3")
-    response = s3.list_objects_v2(Bucket="dataframes--use1-az6--x-s3", Delimiter='/')
-    return [prefix['Prefix'] for prefix in response.get('CommonPrefixes', [])]
+from create_text_files_from_csv_2 import create_regional_bipolar_channels
+from utils import call_gpt_for_instructions, preprocess_data, wavelet_decompose_window, list_csv_files_in_folder, \
+    list_s3_folders
 
-def list_csv_files_in_folder(folder):
-    s3 = boto3.client("s3")
-    response = s3.list_objects_v2(Bucket="dataframes--use1-az6--x-s3", Prefix=folder)
-    return [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.csv')]
-
-def call_gpt_for_instructions(channel_names, dataset_id):
-    return {"action": "process", "channels_to_drop": []}
 
 def calculate_sps_from_df(df):
     time_col = df.get('timestamp', df.columns[0])
     dt = np.diff(time_col).mean()
     return 1.0 / dt if dt != 0 else 1.0
 
-def preprocess_data(signal_2d, sps):
-    return signal_2d, sps
 
-def wavelet_decompose_window(window_data, wavelet='cmor1.5-1.0', scales=None, normalization=False, sampling_period=1.0):
-    import pywt
-    if scales is None:
-        scales = np.arange(1, 11)  # Adjust scales as needed
-    coeffs_list = []
-    for channel_data in window_data:
-        coeffs, _ = pywt.cwt(channel_data, scales, wavelet, sampling_period=sampling_period)
-        coeffs_list.append(coeffs)
-    return np.array(coeffs_list), scales, window_data.shape[1], window_data
-
-def create_regional_bipolar_channels(df, channels_to_drop):
-    signals = df.drop(columns=channels_to_drop + ['timestamp']).values.T
-    return {
-        "frontal": signals[0] if len(signals) > 0 else np.array([]),
-        "motor_temporal": signals[1] if len(signals) > 1 else np.array([]),
-        "parietal_occipital": signals[2] if len(signals) > 2 else np.array([])
-    }
 
 # Process CSV to collect 2D CWT coefficients
 def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per_file=10):
