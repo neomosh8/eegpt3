@@ -87,7 +87,8 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
         )
         for idx, region in enumerate(coeffs_dict.keys()):
             if idx < len(decomposed_channels):
-                coeffs_2d = np.abs(decomposed_channels[idx])  # Take magnitude of 2D CWT
+                coeffs_2d = np.abs(decomposed_channels[idx])  # Should be (scales, time_points)
+                print(f"Region '{region}' - CWT shape: {coeffs_2d.shape}")
                 coeffs_dict[region].append(coeffs_2d)
 
     return coeffs_dict
@@ -153,20 +154,30 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Prepare data
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)  # Shape: (n_samples, scales, time_points)
+    # Verify the shape of an individual CWT coefficient
+    print(f"Region '{region}' - First CWT shape: {coeffs_2d_list[0].shape}")
+
+    # Stack coefficients into (n_samples, scales, time_points)
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)
     if len(coeffs_array.shape) != 3:
         print(f"Invalid CWT coefficients shape in region '{region}': {coeffs_array.shape}")
         return None, None, None, None
-    coeffs_array = coeffs_array[..., np.newaxis]  # Shape: (n_samples, scales, time_points, 1)
+    print(f"Region '{region}' - Stacked shape: {coeffs_array.shape}")
+
+    # Add channel dimension: (n_samples, scales, time_points, 1)
+    coeffs_array = coeffs_array[..., np.newaxis]
+    print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
+
+    # Normalize the array
     min_val = coeffs_array.min()
     max_val = coeffs_array.max()
-    coeffs_array = (coeffs_array - min_val) / (max_val - min_val) if max_val > min_val else coeffs_array  # Normalize
+    if max_val > min_val:
+        coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
 
     # Convert to PyTorch tensor
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
-    print(f"Region '{region}' - Input tensor shape: {coeffs_tensor.shape}")
+    print(f"Region '{region}' - Final input tensor shape: {coeffs_tensor.shape}")
 
     # DataLoader
     dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
