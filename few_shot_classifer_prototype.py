@@ -429,60 +429,6 @@ def compute_prototypes(model, support_data, device, batch_size=8):
     return prototypes
 
 
-def extract_embeddings(model, sequences):
-    """
-    Extract embeddings using continuous segments of tokens for better context representation.
-    This version avoids modifying the model structure.
-
-    Args:
-        model: The model to extract embeddings
-        sequences: Tensor of shape [B, C, T] where B is batch size, C is channels, T is sequence length
-
-    Returns:
-        Tensor of embeddings with shape [B, E] where E is embedding dimension
-    """
-    B, C, T = sequences.size()
-    config = model.config
-
-    # Process through the embedding layer and encoder
-    tok_emb = model.transformer.wte(sequences)  # [B, C, T, n_embd]
-    x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
-
-    # Use the same batched operation as in forward()
-    x_reshaped = x.permute(0, 2, 1, 3).contiguous().reshape(B * C, T, config.n_embd)
-    out = model.intra_channel_encoder(x_reshaped)
-    x = out.view(B, C, T, config.n_embd).permute(0, 2, 1, 3).contiguous()
-
-    # Process through transformer blocks
-    for block in model.transformer.h:
-        x = block(x)
-
-    # Apply the final layer norm to maintain consistency with forward pass
-    x_reshaped = x.transpose(1, 2).contiguous().reshape(B * C, T, config.n_embd)
-    x_norm = model.transformer.ln_f(x_reshaped)
-    x = x_norm.view(B, C, T, config.n_embd)
-
-    # Use continuous segments of tokens for context
-    # Divide the sequence into 4 segments
-    segment_length = T // 4
-    segment_embeddings = []
-
-    for i in range(4):
-        start_idx = i * segment_length
-        end_idx = min(start_idx + segment_length, T)
-
-        # Get embedding for this segment (average across tokens in segment)
-        segment_emb = x[:, start_idx:end_idx, :, :].mean(dim=1)  # [B, C, E]
-        segment_emb = segment_emb.mean(dim=1)  # [B, E] - average across channels
-        segment_embeddings.append(segment_emb)
-
-    # Instead of adding a new layer to the model, we'll average the segment
-    # embeddings here directly
-    final_embedding = torch.stack(segment_embeddings, dim=0).mean(dim=0)
-
-    return final_embedding
-
-
 def compute_cosine_similarities(query_embeddings, prototypes):
     """
     Compute cosine similarities between query embeddings and prototypes.
@@ -592,9 +538,9 @@ def evaluate_fewshot(model, support_data, query_data, device, batch_size=8, retu
 
 
 def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
-                      balance_classes=True, max_samples_per_class=10, seed=42):
+                      balance_classes=True, max_samples_per_class=None, seed=42):
     """
-    Load few-shot data with improved handling of class imbalance.
+    Load few-shot data with robust error handling and diagnostics.
 
     Args:
         shard_paths: List of paths to shard files, one per class
@@ -621,10 +567,12 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
     if not shard_paths:
         raise ValueError("No shard paths provided.")
 
-    all_sequences = []
-
     # Define regions globally
     regions = ["frontal", "motor_temporal", "parietal_occipital"]
+    print(f"Loading data from {len(shard_paths)} shards...")
+
+    all_sequences = []
+    class_sizes = []
 
     # Load data from shards
     for label, shard_path in enumerate(shard_paths):
@@ -632,19 +580,27 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
             raise FileNotFoundError(f"Shard file not found: {shard_path}")
 
         try:
+            print(f"Processing shard: {shard_path} (class {label})")
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
+
+            # Print available keys/regions
+            print(f"  Available regions: {list(loaded.keys())}")
 
             # Handle missing regions
             for region in regions:
                 if region not in loaded:
                     available_regions = list(loaded.keys())
                     if available_regions:
-                        print(f"Warning: Shard {shard_path} missing {region}, using {available_regions[0]}.")
+                        print(f"  Warning: Missing region {region}, using {available_regions[0]} instead")
                         loaded[region] = loaded[available_regions[0]]
                     else:
                         raise ValueError(f"Shard {shard_path} has no channels.")
 
-            # Ensure all channels have the same length
+            # Print sequence lengths
+            for region in regions:
+                print(f"  Region {region} length: {loaded[region].size(0)}")
+
+            # Ensure all channels have the same length by padding or truncating
             max_length = max(loaded[region].size(0) for region in regions)
             for region in regions:
                 current_length = loaded[region].size(0)
@@ -655,25 +611,49 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
                 elif current_length > max_length:
                     loaded[region] = loaded[region][:max_length]
 
-            # Extract overlapping sequences with 50% overlap for better coverage
             min_length = min(loaded[region].size(0) for region in regions)
-            stride = T // 2  # 50% overlap
+            print(f"  After alignment: all regions have length {min_length}")
 
-            # Ensure we can extract enough samples (at least K)
-            num_sequences = ((min_length - T) // stride) + 1
-            if num_sequences < K:
-                print(f"Warning: Shard {shard_path} has only {num_sequences} sequences for K={K}")
-                # Fall back to non-overlapping if we can't get enough samples
-                stride = T
-                num_sequences = ((min_length - T) // stride) + 1
-                if num_sequences < K:
-                    raise ValueError(f"Shard {shard_path} has too few tokens for K={K} samples")
-
+            # Simple approach: non-overlapping fixed-size segments
+            # This ensures we get at least some samples if possible
+            num_full_sequences = min_length // T
             sequences = []
+
+            print(f"  Can create {num_full_sequences} full sequences of length {T}")
+            if num_full_sequences < K:
+                print(f"  WARNING: Not enough data for {K} support samples (only {num_full_sequences})")
+                # If we have less than K samples, we'll extract overlapping sequences
+                overlap = 0.5
+                stride = int(T * (1 - overlap))
+                num_sequences = ((min_length - T) // stride) + 1
+                print(f"  Trying with {overlap * 100}% overlap: {num_sequences} sequences")
+
+                if num_sequences < K:
+                    # If still not enough, use highest possible overlap to get K samples
+                    if min_length >= T:  # At least one full sequence is possible
+                        max_sequences = min_length - T + 1  # Maximum possible with 1-token stride
+                        if max_sequences >= K:
+                            stride = (min_length - T) // (K - 1) if K > 1 else T
+                            num_sequences = ((min_length - T) // stride) + 1
+                            print(f"  Using high overlap (stride={stride}): {num_sequences} sequences")
+                        else:
+                            # We'll extract what we can and duplicate if needed
+                            stride = 1
+                            num_sequences = max_sequences
+                            print(f"  Using maximum overlap: {num_sequences} sequences (will duplicate)")
+                    else:
+                        # Not even one full sequence is possible
+                        print(f"  ERROR: Data too short ({min_length} < {T})")
+                        continue
+            else:
+                stride = T  # Non-overlapping if we have enough data
+
+            # Extract sequences
             for i in range(num_sequences):
                 start = i * stride
                 end = start + T
-                if end <= min_length:  # Ensure we don't go out of bounds
+
+                if end <= min_length:  # Only use complete sequences
                     seq = []
                     for region in regions:
                         channel_seq = loaded[region][start:end]
@@ -681,11 +661,30 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
                     seq = torch.cat(seq, dim=0)  # [C, T]
                     sequences.append((seq, label))
 
-            all_sequences.append(sequences)
+            # Handle case where we still don't have enough samples
+            if len(sequences) < K and len(sequences) > 0:
+                print(f"  Still only got {len(sequences)} < {K} samples, duplicating...")
+                while len(sequences) < K:
+                    # Duplicate a random sample
+                    sequences.append(random.choice(sequences))
+
+            if len(sequences) > 0:
+                print(f"  Created {len(sequences)} sequences for class {label}")
+                all_sequences.append(sequences)
+                class_sizes.append(len(sequences))
+            else:
+                print(f"  ERROR: Failed to create any sequences for class {label}")
 
         except Exception as e:
-            print(f"Error loading shard {shard_path}: {e}")
-            raise
+            print(f"Error loading shard {shard_path}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue  # Skip this shard but continue with others
+
+    if not all_sequences:
+        raise ValueError("No valid sequences could be extracted from any shard")
+
+    print(f"Loaded {len(all_sequences)} classes with sizes: {class_sizes}")
 
     # Split into support and query sets
     support_data = []
@@ -697,41 +696,89 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
             sequences = random.sample(sequences, max_samples_per_class)
 
         random.shuffle(sequences)
-        support_data.extend(sequences[:K])
-        query_data.extend(sequences[K:])
 
-    # Balance query set if requested
-    if balance_classes:
+        # Ensure we don't take more support samples than available
+        k_actual = min(K, len(sequences))
+        if k_actual < K:
+            print(f"WARNING: Using only {k_actual} support samples instead of {K}")
+
+        support_samples = sequences[:k_actual]
+        support_data.extend(support_samples)
+
+        # Remaining samples go to query set
+        if k_actual < len(sequences):
+            query_samples = sequences[k_actual:]
+            query_data.extend(query_samples)
+
+    print(f"Created support set with {len(support_data)} samples")
+    print(f"Created query set with {len(query_data)} samples")
+
+    # Balance query set if requested and possible
+    if balance_classes and query_data:
         query_by_class = {}
         for seq, label in query_data:
             if label not in query_by_class:
                 query_by_class[label] = []
             query_by_class[label].append((seq, label))
 
-        # Find minimum size for balancing
-        min_class_size = min(len(samples) for samples in query_by_class.values())
+        # Skip balancing if any class has no query samples
+        if any(len(samples) == 0 for samples in query_by_class.values()):
+            print("WARNING: Some classes have no query samples, skipping balancing")
+        elif query_by_class:  # Only balance if we have at least one class
+            min_class_size = min(len(samples) for samples in query_by_class.values())
 
-        # Balance classes
-        balanced_query_data = []
-        for label, samples in query_by_class.items():
-            balanced_query_data.extend(random.sample(samples, min_class_size))
+            # Balance classes
+            balanced_query_data = []
+            for label, samples in query_by_class.items():
+                if min_class_size > 0:
+                    # Take exactly min_class_size samples or duplicate if needed
+                    if len(samples) < min_class_size:
+                        # Need to duplicate some samples
+                        sampled = random.choices(samples, k=min_class_size)
+                    else:
+                        # Can take a true random sample
+                        sampled = random.sample(samples, min_class_size)
+                    balanced_query_data.extend(sampled)
+                    print(f"Class {label}: using {len(sampled)} query samples")
 
-        query_data = balanced_query_data
+            query_data = balanced_query_data
+        else:
+            print("WARNING: No query samples available after processing")
 
-    # Shuffle query data
+    # Double-check we actually have samples
+    if not support_data:
+        raise ValueError("No support samples could be created")
+
+    if not query_data:
+        print("WARNING: No query samples available. Creating query set from support set.")
+        # If no query data, use some support data as query (for testing only)
+        if len(support_data) > K:
+            random.shuffle(support_data)
+            split_point = max(1, len(support_data) // 2)
+            query_data = support_data[split_point:]
+            support_data = support_data[:split_point]
+        else:
+            # If very little data, duplicate support samples for query
+            query_data = [(seq.clone(), label) for seq, label in support_data]
+            print("WARNING: Using duplicated support samples as query (evaluation will be unreliable)")
+
+    # Shuffle final sets
+    random.shuffle(support_data)
     random.shuffle(query_data)
 
-    # Verify balance
+    # Verify class distribution
+    support_counts = {}
+    for _, label in support_data:
+        support_counts[label] = support_counts.get(label, 0) + 1
+
     query_counts = {}
     for _, label in query_data:
         query_counts[label] = query_counts.get(label, 0) + 1
 
-    print(f"Support set: {len(support_data)} samples")
-    print(f"Query set: {len(query_data)} samples")
-    print(f"Class distribution in query set: {query_counts}")
+    print(f"Final support set: {len(support_data)} samples, distribution: {support_counts}")
+    print(f"Final query set: {len(query_data)} samples, distribution: {query_counts}")
 
     return support_data, query_data
-
 
 def extract_embeddings(model, sequences):
     """
