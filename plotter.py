@@ -49,7 +49,6 @@ class LossPlotter:
         plt.xlabel("Step", color="white")
         plt.ylabel("Loss", color="white")
         plt.title(f"Loss Curves up to step {step}", color="white")
-        plt.ylim(0, 4)  # Set y-axis limits from 0 to 4
 
         # Plot train loss in #011638
         plt.plot(self.train_losses, label="Train Loss", color="#0D21A1")
