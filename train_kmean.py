@@ -246,7 +246,7 @@ if __name__ == "__main__":
     # Select folders and files from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    selected_folders = all_folders[:30]
+    selected_folders = all_folders[:5]
 
     csv_files = []
     for i, folder in enumerate(selected_folders):
