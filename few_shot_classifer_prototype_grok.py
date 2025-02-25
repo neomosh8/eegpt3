@@ -381,6 +381,8 @@ class GPT(nn.Module):
 
         # Take the last token's hidden state for each channel and average across channels
         representation = x[:, :, -1, :].mean(dim=1)  # [B, n_embd]
+        # Normalize the representation to have unit norm (L2 normalization)
+        representation = F.normalize(representation, p=2, dim=1)
         return representation
     # def configure_optimizer(self, weight_decay, learning_rate, device):
     #     """
@@ -421,6 +423,74 @@ class GPT(nn.Module):
     #     return optimizer
 
 
+def matching_network_evaluation(model, shard_paths, K, Q, T, device):
+    """
+    Performs few-shot classification using the matching network approach.
+
+    Args:
+        model (GPT): The model to use for extracting representations.
+        shard_paths (list): List of shard file paths (each corresponds to a class).
+        K (int): Number of support examples per class.
+        Q (int): Number of query examples per class.
+        T (int): Sequence length per channel (e.g., 512).
+        device (str): Device to use (e.g., 'cuda' or 'cpu').
+
+    Returns:
+        float: Classification accuracy.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Load data for each class
+        class_data = load_class_data(shard_paths, T)
+        N = len(class_data)  # Number of classes
+
+        # Sample support and query examples per class
+        support_examples_per_class = []
+        query_examples_per_class = []
+        for class_idx, examples in enumerate(class_data):
+            if len(examples) < K + Q:
+                print(f"Warning: Class {class_idx} has only {len(examples)} examples, skipping.")
+                continue
+            # Shuffle examples
+            indices = torch.randperm(len(examples))
+            support_indices = indices[:K]
+            query_indices = indices[K:K + Q]
+            support = [examples[i] for i in support_indices]
+            query = [examples[i] for i in query_indices]
+            support_examples_per_class.append(support)
+            query_examples_per_class.append(query)
+
+        # Compute representations for support examples
+        all_support_examples = [ex for class_support in support_examples_per_class for ex in class_support]
+        all_support_inputs = torch.stack(all_support_examples, dim=0).to(device)  # [N*K, num_channels, T]
+        support_reps = model.get_representation(all_support_inputs).cpu()  # [N*K, n_embd]
+
+        # Compute representations for query examples
+        all_query_examples = [ex for class_query in query_examples_per_class for ex in class_query]
+        all_query_inputs = torch.stack(all_query_examples, dim=0).to(device)  # [N*Q, num_channels, T]
+        query_reps = model.get_representation(all_query_inputs).cpu()  # [N*Q, n_embd]
+
+        # Compute cosine similarities between query and support representations
+        similarities = torch.mm(query_reps, support_reps.t())  # [N*Q, N*K]
+
+        # Create class labels for support examples
+        support_labels = torch.tensor([class_idx for class_idx in range(N) for _ in range(K)])  # [N*K]
+
+        # For each query, compute the sum of similarities per class
+        total_similarities = torch.zeros(N * Q, N)  # [N*Q, N]
+        for class_idx in range(N):
+            class_mask = (support_labels == class_idx)  # [N*K]
+            total_similarities[:, class_idx] = similarities[:, class_mask].sum(dim=1)
+
+        # Predict the class with the highest total similarity
+        predictions = total_similarities.argmax(dim=1)  # [N*Q]
+
+        # True labels
+        true_labels = torch.tensor([class_idx for class_idx in range(N) for _ in range(Q)])
+
+        # Compute accuracy
+        accuracy = (predictions == true_labels).float().mean().item()
+        return accuracy
 #########################
 # DataLoader (All-In-Memory)
 #########################
@@ -561,7 +631,7 @@ Q = 5  # Number of query examples per class
 T = 128  # Sequence length per channel
 
 # Evaluate with randomly initialized model
-random_accuracy = few_shot_evaluation(model, shard_paths, K, Q, T, device)
+random_accuracy = matching_network_evaluation(model, shard_paths, K, Q, T, device)
 print(f"Accuracy with randomly initialized model: {random_accuracy:.4f}")
 
 # Load pre-trained weights
@@ -580,5 +650,5 @@ except Exception as e:
     pretrained_accuracy = 0.0
 else:
     # Evaluate with pre-trained model
-    pretrained_accuracy = few_shot_evaluation(model, shard_paths, K, Q, T, device)
+    pretrained_accuracy = matching_network_evaluation(model, shard_paths, K, Q, T, device)
     print(f"Accuracy with pre-trained model: {pretrained_accuracy:.4f}")
