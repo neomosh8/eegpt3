@@ -1,8 +1,6 @@
+
 import random
 import numpy as np
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score  # Added import
-import joblib
 import boto3
 import pandas as pd
 import asyncio
@@ -10,17 +8,28 @@ import aioboto3
 from concurrent.futures import ProcessPoolExecutor
 import os
 import io
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score
+import joblib
+from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score
+import joblib
 
 from create_text_files_from_csv_2 import create_regional_bipolar_channels
 from utils import list_csv_files_in_folder, list_s3_folders, call_gpt_for_instructions, calculate_sps, preprocess_data, wavelet_decompose_window
 
-# Updated calculate_sps_from_df (example implementation)
+# Calculate sampling rate from DataFrame
 def calculate_sps_from_df(df):
     time_col = df.get('timestamp', df.columns[0])
     dt = np.diff(time_col).mean()
     return 1.0 / dt if dt != 0 else 1.0
 
-def process_csv_for_coeffs(csv_key, bucket, local_dir=None, window_length_sec=1.96, wvlet='db2', level=4, num_samples_per_file=10):
+# Process CSV to collect 2D CWT coefficients
+def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per_file=10):
     s3 = boto3.client("s3")
     response = s3.get_object(Bucket=bucket, Key=csv_key)
     df = pd.read_csv(response['Body'])
@@ -30,11 +39,11 @@ def process_csv_for_coeffs(csv_key, bucket, local_dir=None, window_length_sec=1.
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
 
     if instructions.get("action") == "skip":
-        print(f"Skipping dataset '{base_name}' as instructed by GPT.")
+        print(f"Skipping dataset '{base_name}'.")
         return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
 
     channels_to_drop = instructions.get("channels_to_drop", [])
-    print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
+    print(f"Processing '{base_name}'. Dropping: {channels_to_drop}")
 
     regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
     original_sps = calculate_sps_from_df(df)
@@ -48,50 +57,51 @@ def process_csv_for_coeffs(csv_key, bucket, local_dir=None, window_length_sec=1.
             new_sps_val = new_sps
 
     # Global normalization
-    all_data = np.concatenate([regional_preprocessed[region] for region in regional_preprocessed])
+    all_data = np.concatenate([regional_preprocessed[region] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
+    if len(all_data) == 0:
+        return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     global_mean = np.mean(all_data)
-    global_std = np.std(all_data)
-    if np.isclose(global_std, 0):
-        global_std = 1e-8
+    global_std = np.std(all_data) if np.std(all_data) > 0 else 1e-8
     for key in regional_preprocessed:
         regional_preprocessed[key] = (regional_preprocessed[key] - global_mean) / global_std
 
-    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed)
+    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed if len(regional_preprocessed[region]) > 0)
+    if min_length == 0:
+        return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     n_window_samples = int(window_length_sec * new_sps_val)
     num_windows = min_length // n_window_samples
 
-    if num_windows <= num_samples_per_file:
-        selected_indices = list(range(num_windows))
-    else:
-        selected_indices = np.random.choice(num_windows, num_samples_per_file, replace=False)
+    selected_indices = np.random.choice(num_windows, min(num_samples_per_file, num_windows), replace=False)
 
     coeffs_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     for i in selected_indices:
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
-        window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in coeffs_dict])
-        (decomposed_channels, scales, num_samples, normalized_data) = wavelet_decompose_window(
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in coeffs_dict if len(regional_preprocessed[region]) > 0])
+        if window_data.size == 0:
+            continue
+        decomposed_channels, _, _, _ = wavelet_decompose_window(
             window_data,
-            wavelet='cmor1.5-1.0',  # Note: Matches your function body, not the default 'db2'
+            wavelet='cmor1.5-1.0',
             scales=None,
             normalization=False,
             sampling_period=1.0 / new_sps_val
         )
         for idx, region in enumerate(coeffs_dict.keys()):
-            coeffs_complex = decomposed_channels[idx].flatten()
-            coeffs_real = coeffs_complex.real
-            coeffs_imag = coeffs_complex.imag
-            coeffs_combined = np.concatenate([coeffs_real, coeffs_imag])
-            coeffs_dict[region].append(coeffs_combined)
+            if idx < len(decomposed_channels):
+                coeffs_2d = np.abs(decomposed_channels[idx])  # 2D magnitude
+                coeffs_dict[region].append(coeffs_2d)
 
     return coeffs_dict
 
+# Async helper to download files
 async def download_file(s3_client, bucket, csv_key):
     response = await s3_client.get_object(Bucket=bucket, Key=csv_key)
     body = await response['Body'].read()
     return csv_key, body
 
-async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=1.96, wvlet='db2', level=4):
+# Collect coefficients from S3
+async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2):
     all_coeffs = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     async with aioboto3.Session().client("s3") as s3_client:
         tasks = [download_file(s3_client, bucket, csv_file) for csv_file in csv_files]
@@ -99,7 +109,7 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
         csv_data = {key: pd.read_csv(io.BytesIO(body)) for key, body in results}
 
         with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(process_csv_for_coeffs, key, bucket, None, window_length_sec, wvlet, level, num_samples_per_file)
+            futures = [executor.submit(process_csv_for_coeffs, key, bucket, window_length_sec, num_samples_per_file)
                        for key in csv_data.keys()]
             for future in futures:
                 coeffs = future.result()
@@ -107,78 +117,180 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
                     all_coeffs[region].extend(coeffs[region])
     return all_coeffs
 
-def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=1.96, wvlet='db2', level=4):
-    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, wvlet, level))
+def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2):
+    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec))
 
-def train_kmeans_models(all_coeffs, num_clusters=256, output_folder="/tmp", sample_size=1000):
-    kmeans_models = {}
-    for region, coeffs_list in all_coeffs.items():
-        if not coeffs_list:
-            print(f"No data for region '{region}'. Skipping K-means training.")
-            continue
+# Define the CAE model in PyTorch
+class CAE(nn.Module):
+    def __init__(self, input_shape, latent_dim):
+        super(CAE, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(8, 4, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(4 * (input_shape[0] // 2) * (input_shape[1] // 2), latent_dim)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 4 * (input_shape[0] // 2) * (input_shape[1] // 2)),
+            nn.Unflatten(1, (4, input_shape[0] // 2, input_shape[1] // 2)),
+            nn.ConvTranspose2d(4, 8, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2),
+            nn.ConvTranspose2d(8, 1, kernel_size=3, padding=1),
+            nn.Sigmoid()
+        )
 
-        coeffs_array = np.vstack(coeffs_list)
-        print(f"\nTraining K-means for region: {region}")
-        print(f"Number of samples: {coeffs_array.shape[0]}")
-        print(f"Feature dimension: {coeffs_array.shape[1]}")
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded, encoded
 
-        kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init=10)
-        kmeans.fit(coeffs_array)
+# Train the CAE using PyTorch
+def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
+    if not coeffs_2d_list:
+        print(f"No data for CAE training in region '{region}'.")
+        return None, None, None, None
 
-        # Quality Assurance Metrics
-        inertia = kmeans.inertia_
-        print(f"Inertia (within-cluster sum of squares): {inertia:.2f}")
+    # Prepare data
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)[..., np.newaxis]  # (samples, scales, time, 1)
+    min_val = coeffs_array.min()
+    max_val = coeffs_array.max()
+    coeffs_array = (coeffs_array - min_val) / (max_val - min_val)  # Normalize to [0, 1]
 
-        if coeffs_array.shape[0] > sample_size:
-            sample_indices = np.random.choice(coeffs_array.shape[0], sample_size, replace=False)
-            sample_data = coeffs_array[sample_indices]
-            sample_labels = kmeans.predict(sample_data)
-            silhouette = silhouette_score(sample_data, sample_labels)
-            print(f"Silhouette Score (on {sample_size} samples): {silhouette:.3f}")
-        else:
-            silhouette = silhouette_score(coeffs_array, kmeans.labels_)
-            print(f"Silhouette Score (full dataset): {silhouette:.3f}")
+    # Convert to PyTorch tensor
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
 
-        cluster_counts = np.bincount(kmeans.labels_, minlength=num_clusters)
-        print(f"Cluster sizes (number of samples per cluster):")
-        for i, count in enumerate(cluster_counts):
-            if count > 0:
-                print(f"  Cluster {i}: {count} samples ({count / len(coeffs_array) * 100:.1f}%)")
+    # DataLoader
+    dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        model_path = os.path.join(output_folder, f"kmeans_{region}.pkl")
-        joblib.dump(kmeans, model_path)
-        kmeans_models[region] = model_path
+    # Initialize CAE
+    input_shape = coeffs_array.shape[1:3]  # (scales, time)
+    cae = CAE(input_shape, latent_dim).to(device)
 
-    return kmeans_models
+    # Optimizer and loss
+    optimizer = optim.Adam(cae.parameters())
+    criterion = nn.MSELoss()
 
+    # Train
+    for epoch in range(epochs):
+        for data in dataloader:
+            inputs, _ = data
+            optimizer.zero_grad()
+            outputs, _ = cae(inputs)
+            loss = criterion(outputs, inputs)
+            loss.backward()
+            optimizer.step()
+        print(f"Region '{region}' - Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+
+    # Save model
+    model_path = os.path.join(output_folder, f"cae_{region}.pt")
+    torch.save(cae.state_dict(), model_path)
+
+    # Extract encoder
+    encoder = nn.Sequential(*list(cae.encoder.children()))
+    return model_path, encoder, min_val, max_val
+
+# Get latent representations using the encoder
+def get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device):
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)[..., np.newaxis]
+    coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
+    coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
+    with torch.no_grad():
+        latent_reps = encoder(coeffs_tensor).cpu().numpy()
+    return latent_reps
+
+# Train GMM on latent space
+def train_gmm(latent_reps, max_components=10, output_folder="/tmp", region="unknown"):
+    if len(latent_reps) < 2:
+        print(f"Not enough data for GMM in region '{region}'.")
+        return None, None, None
+
+    # Find optimal number of components
+    best_n = 2
+    best_bic = float('inf')
+    for n in range(2, min(max_components + 1, len(latent_reps))):
+        gmm = GaussianMixture(n_components=n, random_state=0)
+        gmm.fit(latent_reps)
+        bic = gmm.bic(latent_reps)
+        print(f"Region '{region}' - GMM with {n} components - BIC: {bic:.2f}")
+        if bic < best_bic:
+            best_bic = bic
+            best_n = n
+
+    # Train final GMM
+    gmm = GaussianMixture(n_components=best_n, random_state=0)
+    gmm.fit(latent_reps)
+    labels = gmm.predict(latent_reps)
+    print(f"Region '{region}' - Optimal GMM components: {best_n}")
+
+    # Quality check
+    if len(set(labels)) > 1:
+        silhouette = silhouette_score(latent_reps, labels)
+        print(f"Region '{region}' - GMM Silhouette Score: {silhouette:.3f}")
+    else:
+        silhouette = None
+        print(f"Region '{region}' - GMM Silhouette Score: N/A (single cluster)")
+
+    # Save model
+    model_path = os.path.join(output_folder, f"gmm_{region}.pkl")
+    joblib.dump(gmm, model_path)
+    return model_path, best_n, silhouette
+
+# Main execution
 if __name__ == "__main__":
+    # Select folders and files from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    num_folders_to_select = 30
-    selected_folders = all_folders[:num_folders_to_select]
+    selected_folders = all_folders[:30]
 
     csv_files = []
     for i, folder in enumerate(selected_folders):
-        print(f"{i}/{len(selected_folders)}: Looking into folder: {folder}")
+        print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        num_files_to_select = min(5, len(all_files))
-        selected_files = random.sample(all_files, num_files_to_select) if len(all_files) > num_files_to_select else all_files
+        selected_files = random.sample(all_files, min(5, len(all_files)))
         csv_files.extend(selected_files)
-        print(f"Selected {len(selected_files)} files from folder {folder}")
+        print(f"Selected {len(selected_files)} files")
 
-    print(f"Done listing. Total files selected: {len(csv_files)}")
+    print(f"Total files: {len(csv_files)}")
 
+    # Collect 2D CWT coefficients
     all_coeffs = collect_coeffs_from_s3(
         csv_files,
         "dataframes--use1-az6--x-s3",
         num_samples_per_file=100,
-        window_length_sec=2,
-        wvlet='db2',  # Note: Main call uses 'db2', but process_csv_for_coeffs uses Morlet
-        level=4
+        window_length_sec=2
     )
 
-    kmeans_model_paths = train_kmeans_models(all_coeffs, num_clusters=128)
+    # Process each region
     s3 = boto3.client("s3")
-    for region, path in kmeans_model_paths.items():
-        s3.upload_file(path, "dataframes--use1-az6--x-s3", f"kmeans_models/kmeans_{region}.pkl")
-        os.remove(path)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    for region, coeffs_2d_list in all_coeffs.items():
+        print(f"\n--- Region: {region} ---")
+        if not coeffs_2d_list:
+            print("No data. Skipping.")
+            continue
+
+        # Train CAE
+        cae_path, encoder, min_val, max_val = train_cae(coeffs_2d_list, region=region)
+        if cae_path is None:
+            continue
+
+        # Get latent representations
+        latent_reps = get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device)
+        print(f"Latent space shape: {latent_reps.shape}")
+
+        # Train GMM
+        gmm_path, n_components, silhouette = train_gmm(latent_reps, region=region)
+
+        # Upload models to S3
+        if cae_path:
+            s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", f"cae_models/cae_{region}.pt")
+            os.remove(cae_path)
+        if gmm_path:
+            s3.upload_file(gmm_path, "dataframes--use1-az6--x-s3", f"gmm_models/gmm_{region}.pkl")
+            os.remove(gmm_path)
