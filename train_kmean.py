@@ -75,13 +75,14 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
     for i in selected_indices:
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
-        window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in coeffs_dict if len(regional_preprocessed[region]) > 0])
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
+                                 for region in coeffs_dict if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
         decomposed_channels, _, _, _ = wavelet_decompose_window(
             window_data,
             wavelet='cmor1.5-1.0',
-            scales=None,
+            scales=None,  # Adjust scales as needed
             normalization=False,
             sampling_period=1.0 / new_sps_val
         )
