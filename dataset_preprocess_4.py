@@ -8,7 +8,7 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Use a special number for the |trial| token.
-TRIAL_TOKEN = 999
+TRIAL_TOKEN = 9
 
 REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
