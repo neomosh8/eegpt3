@@ -173,7 +173,7 @@ if __name__ == "__main__":
 
     # Shuffle the folder list and randomly pick some (e.g., 3 folders)
     random.shuffle(all_folders)
-    num_folders_to_select = 3  # Adjust this number as needed
+    num_folders_to_select = 10  # Adjust this number as needed
     selected_folders = all_folders[:num_folders_to_select]
 
     csv_files = []
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     all_coeffs = collect_coeffs_from_s3(
         csv_files,
         "dataframes--use1-az6--x-s3",
-        num_samples_per_file=50,  # Reduced from 200 for efficiency; adjust as needed
+        num_samples_per_file=200,  # Reduced from 200 for efficiency; adjust as needed
         window_length_sec=2,
         wvlet='db2',
         level=4
