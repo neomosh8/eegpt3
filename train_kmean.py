@@ -178,9 +178,6 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
     dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Initialize CAE
-    input_shape = coeffs_array.shape[1:3]  # (scales, time_points)
-    cae = CAE(input_shape, latent_dim).to(device)
 
     # Optimizer and loss
     optimizer = optim.Adam(cae.parameters())
