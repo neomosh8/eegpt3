@@ -177,7 +177,7 @@ if __name__ == "__main__":
         level=4
     )
 
-    kmeans_model_paths = train_kmeans_models(all_coeffs, num_clusters=512)
+    kmeans_model_paths = train_kmeans_models(all_coeffs, num_clusters=128)
     s3 = boto3.client("s3")
     for region, path in kmeans_model_paths.items():
         s3.upload_file(path, "dataframes--use1-az6--x-s3", f"kmeans_models/kmeans_{region}.pkl")
