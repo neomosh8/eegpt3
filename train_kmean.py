@@ -154,18 +154,14 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Verify the shape of an individual CWT coefficient
-    print(f"Region '{region}' - First CWT shape: {coeffs_2d_list[0].shape}")
-
     # Stack coefficients into (n_samples, scales, time_points)
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)  # Shape: (200, 25, 512)
     if len(coeffs_array.shape) != 3:
         print(f"Invalid CWT coefficients shape in region '{region}': {coeffs_array.shape}")
         return None, None, None, None
-    print(f"Region '{region}' - Stacked shape: {coeffs_array.shape}")
 
-    # Add channel dimension: (n_samples, scales, time_points, 1)
-    coeffs_array = coeffs_array[..., np.newaxis]
+    # Add channel dimension: (n_samples, 1, scales, time_points)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # Shape: (200, 1, 25, 512)
     print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
 
     # Normalize the array
