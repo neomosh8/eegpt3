@@ -235,17 +235,17 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         return y
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 4096
     vocab_size: int = 10
     # vocab_size: int = 10799
     # Small model configuration
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    # n_layer: int = 12
+    # n_head: int = 12
+    # n_embd: int = 768
 
-    # n_layer: int = 6
-    # n_head: int = 6
-    # n_embd: int = 384
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
     #
     # n_layer: int = 16  # Moderate depth
     # n_head: int = 32  # Fewer heads but still enough for good attention
@@ -616,7 +616,7 @@ val_loader = DataLoaderLiteAllInMemory(
 #                 region1,
 #                 region2
 #             )
-num_passes = 10
+num_passes = 1000
 tokens_per_optim = B * T * grad_accum_steps * ddp_world_size * len(REGIONS)
 steps_per_pass = (train_loader.total_len - 1) // (B * T * ddp_world_size)
 max_steps = num_passes * steps_per_pass
