@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import boto3
+import joblib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -133,58 +134,58 @@ def create_regional_bipolar_channels(df, channels_to_drop):
 
 def generate_quantized_files_local(csv_file: str,
                                    output_folder: str,
-                                   window_length_sec: float = epoch_len,
-                                   wvlet: str = 'db2',
-                                   level: int = level):
+                                   kmeans_model_paths: dict,
+                                   window_length_sec: float = 2.0,
+                                   wvlet: str = 'cmor1.5-1.0',
+                                   scales: list = None,
+                                   sampling_period: float = None):
     """
-    Process a single CSV file:
-      1. Drop channels as per GPT instructions.
-      2. Create three regional bipolar channels.
-      3. Preprocess and plot signals.
-      4. Perform joint (global) normalization.
-      5. Do wavelet decomposition (with normalization turned off) and quantize.
-      6. Write token sequences to text files.
-      7. Return a tuple: (base_name, total_tokens, skipped, reason)
-         - If an error occurs, mark as skipped with an error reason.
-         - If skipped by GPT, mark as such.
+    Generate quantized token files from a CSV file using Morlet wavelet decomposition and pre-trained K-means models.
+
+    Args:
+        csv_file (str): Path to the input CSV file.
+        output_folder (str): Directory to save output files.
+        kmeans_model_paths (dict): Dictionary mapping regions to paths of pre-trained K-means models.
+        window_length_sec (float): Length of the sliding window in seconds (default: 2.0).
+        wvlet (str): Wavelet type (default: 'cmor1.5-1.0' for Morlet wavelet).
+        scales (list): Scales for CWT (if None, computed for EEG bands: 0.5–40 Hz).
+        sampling_period (float): Sampling period in seconds (if None, computed from data).
+
+    Returns:
+        tuple: (base_name, total_tokens, error_flag, message)
     """
     base_name = os.path.splitext(os.path.basename(csv_file))[0]
     try:
+        # Load and preprocess CSV data
         df = pd.read_csv(csv_file)
         all_columns = list(df.columns)
         instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
         if instructions.get("action") == "skip":
             print(f"Skipping dataset '{base_name}' as instructed by GPT.")
-            return base_name, 0, True, "Skipped by GPT: instructions indicated skip"
+            return base_name, 0, True, "Skipped by GPT"
 
         channels_to_drop = instructions.get("channels_to_drop", [])
         print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
 
-        # Create a folder for this dataset's plots.
+        # Create output directory
         dataset_dir = os.path.join(output_folder, base_name)
         os.makedirs(dataset_dir, exist_ok=True)
 
-        # --- Create Regional Bipolar Channels ---
+        # --- Step 1: Create Regional Bipolar Channels ---
         regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
+
+        # Plot regional bipolar channels
         plt.figure(figsize=(15, 10))
-        plt.subplot(3, 1, 1)
-        plt.plot(regional_bipolar["frontal"], label="Frontal Bipolar", color='blue')
-        plt.title(f"Frontal Bipolar Channel - {base_name}")
-        plt.legend()
-        plt.subplot(3, 1, 2)
-        plt.plot(regional_bipolar["motor_temporal"], label="Motor-Temporal Bipolar", color='red')
-        plt.title(f"Motor-Temporal Bipolar Channel - {base_name}")
-        plt.legend()
-        plt.subplot(3, 1, 3)
-        plt.plot(regional_bipolar["parietal_occipital"], label="Parietal-Occipital Bipolar", color='green')
-        plt.title(f"Parietal-Occipital Bipolar Channel - {base_name}")
-        plt.legend()
+        for idx, (region, signal) in enumerate(regional_bipolar.items(), 1):
+            plt.subplot(3, 1, idx)
+            plt.plot(signal, label=f"{region.capitalize()} Bipolar", color=['blue', 'red', 'green'][idx-1])
+            plt.title(f"{region.capitalize()} Bipolar Channel - {base_name}")
+            plt.legend()
         plt.tight_layout()
-        regional_plot_file = os.path.join(dataset_dir, f"{base_name}_regional_bipolar_channels.png")
-        plt.savefig(regional_plot_file)
+        plt.savefig(os.path.join(dataset_dir, f"{base_name}_regional_bipolar_channels.png"))
         plt.close()
 
-        # --- Preprocess the Regional Signals ---
+        # --- Step 2: Preprocess Signals ---
         original_sps = calculate_sps(csv_file)
         regional_preprocessed = {}
         new_sps_val = None
@@ -195,81 +196,68 @@ def generate_quantized_files_local(csv_file: str,
             if new_sps_val is None:
                 new_sps_val = new_sps
 
-        # --- Joint Global Normalization ---
-        all_data = np.concatenate([
-            regional_preprocessed["frontal"],
-            regional_preprocessed["motor_temporal"],
-            regional_preprocessed["parietal_occipital"]
-        ])
+        # Joint global normalization (consistent with training)
+        all_data = np.concatenate([regional_preprocessed[region] for region in regional_preprocessed])
         global_mean = np.mean(all_data)
-        global_std = np.std(all_data)
-        if np.isclose(global_std, 0):
-            print(f"Warning: Global standard deviation is zero for dataset '{base_name}'.")
-            global_std = 1e-8
+        global_std = np.std(all_data) if np.std(all_data) > 0 else 1e-8
         for key in regional_preprocessed:
             regional_preprocessed[key] = (regional_preprocessed[key] - global_mean) / global_std
 
+        # Plot preprocessed signals
         plt.figure(figsize=(15, 10))
-        plt.subplot(3, 1, 1)
-        plt.plot(regional_preprocessed["frontal"], label="Frontal Preprocessed", color='blue')
-        plt.title(f"Preprocessed Frontal Bipolar Channel - {base_name}")
-        plt.legend()
-        plt.subplot(3, 1, 2)
-        plt.plot(regional_preprocessed["motor_temporal"], label="Motor-Temporal Preprocessed", color='red')
-        plt.title(f"Preprocessed Motor-Temporal Bipolar Channel - {base_name}")
-        plt.legend()
-        plt.subplot(3, 1, 3)
-        plt.plot(regional_preprocessed["parietal_occipital"], label="Parietal-Occipital Preprocessed", color='green')
-        plt.title(f"Preprocessed Parietal-Occipital Bipolar Channel - {base_name}")
-        plt.legend()
+        for idx, (region, signal) in enumerate(regional_preprocessed.items(), 1):
+            plt.subplot(3, 1, idx)
+            plt.plot(signal, label=f"{region.capitalize()} Preprocessed", color=['blue', 'red', 'green'][idx-1])
+            plt.title(f"Preprocessed {region.capitalize()} Bipolar Channel - {base_name}")
+            plt.legend()
         plt.tight_layout()
-        regional_prep_plot_file = os.path.join(dataset_dir, f"{base_name}_regional_preprocessed_bipolar_channels.png")
-        plt.savefig(regional_prep_plot_file)
+        plt.savefig(os.path.join(dataset_dir, f"{base_name}_regional_preprocessed_bipolar_channels.png"))
         plt.close()
 
-        # --- Joint Wavelet Decomposition & Quantization ---
-        min_length = min(
-            len(regional_preprocessed["frontal"]),
-            len(regional_preprocessed["motor_temporal"]),
-            len(regional_preprocessed["parietal_occipital"])
-        )
+        # --- Step 3: Load K-means Models ---
+        kmeans_models = {region: joblib.load(path) for region, path in kmeans_model_paths.items()}
+
+        # --- Step 4: Wavelet Decomposition and Quantization ---
+        min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed)
         n_window_samples = int(window_length_sec * new_sps_val)
         num_windows = min_length // n_window_samples
+        sampling_period = 1.0 / new_sps_val if sampling_period is None else sampling_period
 
-        tokens_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
-        regions = ["frontal", "motor_temporal", "parietal_occipital"]
+        tokens_dict = {region: [] for region in ["frontal", "motor_temporal", "parietal_occipital"]}
+        regions = list(tokens_dict.keys())
 
         for i in range(num_windows):
             window_start = i * n_window_samples
             window_end = window_start + n_window_samples
             window_data = np.vstack([
-                regional_preprocessed["frontal"][window_start:window_end],
-                regional_preprocessed["motor_temporal"][window_start:window_end],
-                regional_preprocessed["parietal_occipital"][window_start:window_end]
+                regional_preprocessed[region][window_start:window_end] for region in regions
             ])
-            (decomposed_channels,
-             coeffs_lengths,
-             num_samples,
-             normalized_data) = wavelet_decompose_window(
+
+            # Perform CWT with Morlet wavelet
+            decomposed_channels, scales, num_samples, normalized_data = wavelet_decompose_window(
                 window_data,
                 wavelet=wvlet,
-                level=level,
-                normalization=False  # Data is already normalized globally
+                scales=scales,
+                normalization=False,  # Normalization already done globally
+                sampling_period=sampling_period
             )
+
+            # Process complex coefficients
             for idx, region in enumerate(regions):
-                coeffs_for_channel = decomposed_channels[idx].flatten()
-                q_ids = [str(quantize_number(c)) for c in coeffs_for_channel]
-                tokens_dict[region].extend(q_ids)
-                print(f"Window {i + 1}/{num_windows} - {region}: {len(q_ids)} tokens")
+                coeffs_complex = decomposed_channels[idx].flatten()
+                coeffs_real = coeffs_complex.real
+                coeffs_imag = coeffs_complex.imag
+                coeffs_combined = np.concatenate([coeffs_real, coeffs_imag])
+                token = str(kmeans_models[region].predict(coeffs_combined.reshape(1, -1))[0])
+                tokens_dict[region].append(token)
 
+        # Verify token lengths
         lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-        print("Total token counts per region for", base_name, ":", lengths)
+        print(f"Token counts per region for {base_name}: {lengths}")
         if len(set(lengths.values())) != 1:
-            print("Warning: The token sequences for the three regions are not the same length.")
-        else:
-            print("All regional token sequences have the same length.")
+            print("Warning: Token sequences for regions have different lengths.")
 
-        # --- Write the token files (saved in output_folder with dataset prefix) ---
+        # --- Step 5: Write Token Files ---
         token_file_paths = {}
         for region, tokens in tokens_dict.items():
             token_fname = f"{base_name}_quantized_coeffs_{region}.txt"
@@ -277,10 +265,11 @@ def generate_quantized_files_local(csv_file: str,
             with open(out_fname, "w") as f_out:
                 f_out.write(" ".join(tokens))
             token_file_paths[region] = out_fname
-        print(f"Done generating quantized files for {csv_file}.")
+        print(f"Generated quantized files for {csv_file}.")
 
-        total_tokens = sum(len(tokens) for tokens in tokens_dict.values())
+        total_tokens = sum(lengths.values())
         return base_name, total_tokens, False, "Processed successfully"
+
     except Exception as e:
         print(f"Error processing dataset '{base_name}': {e}")
         return base_name, 0, True, f"Error: {str(e)}"

@@ -45,94 +45,58 @@ def plot_amplitude_histogram(data, channel_name='Unknown', bins=50):
     plt.tight_layout()
     plt.show()
 
-import numpy as np
-import pywt
+
 
 import numpy as np
 import pywt
 
 def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
     """
-    Apply continuous wavelet decomposition (CWT) to each channel in the window using the Morlet wavelet,
-    with scales defined for standard EEG frequency bands (delta, theta, alpha, beta, gamma).
+    Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
 
     Args:
         window (numpy.ndarray): 2D array (channels x samples).
-        wavelet (str): Wavelet type (e.g., 'cmor1.5-1.0' for Morlet with bandwidth=1.5, center frequency=1.0).
-        scales (list or numpy.ndarray): Scales for CWT (if None, computed for EEG bands: 0.5–40 Hz).
-        normalization (bool): If True, use z-score normalization. If False, use raw values.
-        sampling_period (float): Sampling period in seconds (1/sampling_rate).
+        wavelet (str): Wavelet type (default: 'cmor1.5-1.0').
+        scales (list): Scales for CWT (if None, computed for EEG bands).
+        normalization (bool): If True, apply z-score normalization.
+        sampling_period (float): Sampling period in seconds.
 
     Returns:
         tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
-            - decomposed_channels: Array of CWT coefficients (channels x scales x samples).
-            - scales: Array of scales used in CWT.
-            - original_signal_length: Number of samples in the original signal.
-            - normalized_data: Normalized input data (channels x samples).
     """
     num_channels, num_samples = window.shape
     decomposed_channels = []
     normalized_data = []
 
-    # --- Normalization / Scaling ---
+    # Normalization
     if normalization:
         mean = np.mean(window)
-        std = np.std(window)
-        if std == 0:
-            std = 1  # Prevent division by zero
+        std = np.std(window) if np.std(window) > 0 else 1
         window_normalized = (window - mean) / std
     else:
         window_normalized = window.copy()
 
-    # --- Define Scales for Standard EEG Bands (if not provided) ---
+    # Define scales for EEG bands if not provided
     if scales is None:
-        # Sampling frequency = 1 / sampling_period
         fs = 1.0 / sampling_period
-
-        # Define standard EEG frequency bands (in Hz)
-        eeg_bands = {
-            "delta": (0.2, 4),
-            "theta": (4, 8),
-            "alpha": (8, 12),
-            "beta": (12, 30),
-            "gamma": (30, 64),
-
-        }
-
-        # Number of scales per band (adjustable)
-        scales_per_band = 6  # 5 scales per band, totaling 25 scales across all bands
-
-        # Compute scales for each band
+        eeg_bands = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 12), "beta": (12, 30), "gamma": (30, 40)}
+        scales_per_band = 5
         scales = []
-        for band, (f_min, f_max) in eeg_bands.items():
-            # Convert frequency range to scales
-            scale_max = pywt.scale2frequency(wavelet, f_min) * fs  # Scale for lowest frequency in band
-            scale_min = pywt.scale2frequency(wavelet, f_max) * fs  # Scale for highest frequency in band
-            # Logarithmic spacing within each band
+        for f_min, f_max in eeg_bands.values():
+            scale_max = pywt.scale2frequency(wavelet, f_min) * fs
+            scale_min = pywt.scale2frequency(wavelet, f_max) * fs
             band_scales = np.logspace(np.log10(scale_min), np.log10(scale_max), scales_per_band)
             scales.extend(band_scales)
-
-        # Sort scales in ascending order (since lower frequencies correspond to larger scales)
         scales = np.sort(scales)
 
-    # --- Per-Channel Wavelet Decomposition (CWT) ---
-    for channel_index in range(num_channels):
-        channel_data_normalized = window_normalized[channel_index, :]
-        normalized_data.append(channel_data_normalized)
-
-        # Perform continuous wavelet transform
-        coeffs, freqs = pywt.cwt(channel_data_normalized, scales, wavelet, sampling_period=sampling_period)
-
-        # coeffs shape: (scales x samples)
-        # Keep the 2D structure or flatten based on downstream needs
-        flattened_coeffs = coeffs.flatten()  # Flatten for vector quantization compatibility
-
+    # Perform CWT per channel
+    for channel_idx in range(num_channels):
+        coeffs, _ = pywt.cwt(window_normalized[channel_idx, :], scales, wavelet, sampling_period=sampling_period)
+        flattened_coeffs = coeffs.flatten()  # Complex coefficients
         decomposed_channels.append(flattened_coeffs)
+        normalized_data.append(window_normalized[channel_idx, :])
 
-    decomposed_channels = np.array(decomposed_channels)  # Shape: (channels x (scales * samples))
-    normalized_data = np.array(normalized_data)  # Shape: (channels x samples)
-
-    return decomposed_channels, scales, num_samples, normalized_data
+    return (np.array(decomposed_channels), scales, num_samples, np.array(normalized_data))
 
 def wavelet_reconstruct_window(decomposed_channels, coeffs_lengths, num_samples, wavelet='db2'):
     """
