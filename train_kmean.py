@@ -123,7 +123,8 @@ def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_le
 class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim):
         super(CAE, self).__init__()
-        self.input_shape = input_shape  # (height, width)
+        self.input_shape = input_shape
+        flattened_size = 4 * (self.input_shape[0] // 2) * (self.input_shape[1] // 2)
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 8, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -131,18 +132,17 @@ class CAE(nn.Module):
             nn.Conv2d(8, 4, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(4 * (input_shape[0] // 2) * (input_shape[1] // 2), latent_dim)
+            nn.Linear(flattened_size, latent_dim)
         )
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 4 * (input_shape[0] // 2) * (input_shape[1] // 2)),
-            nn.Unflatten(1, (4, input_shape[0] // 2, input_shape[1] // 2)),
+            nn.Linear(latent_dim, flattened_size),
+            nn.Unflatten(1, (4, self.input_shape[0] // 2, self.input_shape[1] // 2)),
             nn.ConvTranspose2d(4, 8, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Upsample(scale_factor=2),
             nn.ConvTranspose2d(8, 1, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
-
     def forward(self, x):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
