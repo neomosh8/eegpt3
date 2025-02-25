@@ -47,28 +47,12 @@ def plot_amplitude_histogram(data, channel_name='Unknown', bins=50):
 
 
 
-import numpy as np
-import pywt
 
 def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
-    """
-    Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
-
-    Args:
-        window (numpy.ndarray): 2D array (channels x samples).
-        wavelet (str): Wavelet type (default: 'cmor1.5-1.0').
-        scales (list): Scales for CWT (if None, computed for EEG bands).
-        normalization (bool): If True, apply z-score normalization.
-        sampling_period (float): Sampling period in seconds.
-
-    Returns:
-        tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
-    """
     num_channels, num_samples = window.shape
     decomposed_channels = []
     normalized_data = []
 
-    # Normalization
     if normalization:
         mean = np.mean(window)
         std = np.std(window) if np.std(window) > 0 else 1
@@ -76,7 +60,6 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
     else:
         window_normalized = window.copy()
 
-    # Define scales for EEG bands if not provided
     if scales is None:
         fs = 1.0 / sampling_period
         eeg_bands = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 12), "beta": (12, 30), "gamma": (30, 40)}
@@ -89,7 +72,6 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
             scales.extend(band_scales)
         scales = np.sort(scales)
 
-    # Perform CWT per channel
     for channel_idx in range(num_channels):
         coeffs, _ = pywt.cwt(window_normalized[channel_idx, :], scales, wavelet, sampling_period=sampling_period)
         flattened_coeffs = coeffs.flatten()  # Complex coefficients
@@ -97,7 +79,6 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
         normalized_data.append(window_normalized[channel_idx, :])
 
     return (np.array(decomposed_channels), scales, num_samples, np.array(normalized_data))
-
 def wavelet_reconstruct_window(decomposed_channels, coeffs_lengths, num_samples, wavelet='db2'):
     """
     Reconstruct the normalized signal from decomposed channels.
