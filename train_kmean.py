@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 from sklearn.cluster import KMeans
 import joblib
@@ -108,27 +110,98 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
 def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=1.96, wvlet='db2', level=4):
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, wvlet, level))
 
-def train_kmeans_models(all_coeffs, num_clusters=256, output_folder="/tmp"):
+def train_kmeans_models(all_coeffs, num_clusters=256, output_folder="/tmp", sample_size=1000):
+    """
+    Train K-means models and print quality assurance metrics.
+
+    Args:
+        all_coeffs (dict): Coefficient vectors for each region.
+        num_clusters (int): Number of clusters for K-means.
+        output_folder (str): Directory to save models.
+        sample_size (int): Number of samples to use for silhouette score (for efficiency).
+
+    Returns:
+        dict: Paths to saved K-means models.
+    """
     kmeans_models = {}
     for region, coeffs_list in all_coeffs.items():
+        if not coeffs_list:
+            print(f"No data for region '{region}'. Skipping K-means training.")
+            continue
+
         coeffs_array = np.vstack(coeffs_list)
+        print(f"\nTraining K-means for region: {region}")
+        print(f"Number of samples: {coeffs_array.shape[0]}")
+        print(f"Feature dimension: {coeffs_array.shape[1]}")
+
         kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init=10)
         kmeans.fit(coeffs_array)
+
+        # Quality Assurance Metrics
+        # 1. Inertia
+        inertia = kmeans.inertia_
+        print(f"Inertia (within-cluster sum of squares): {inertia:.2f}")
+
+        # 2. Silhouette Score (on a sample if dataset is large)
+        if coeffs_array.shape[0] > sample_size:
+            sample_indices = np.random.choice(coeffs_array.shape[0], sample_size, replace=False)
+            sample_data = coeffs_array[sample_indices]
+            sample_labels = kmeans.predict(sample_data)
+            silhouette = silhouette_score(sample_data, sample_labels)
+            print(f"Silhouette Score (on {sample_size} samples): {silhouette:.3f}")
+        else:
+            silhouette = silhouette_score(coeffs_array, kmeans.labels_)
+            print(f"Silhouette Score (full dataset): {silhouette:.3f}")
+
+        # 3. Cluster Sizes
+        cluster_counts = np.bincount(kmeans.labels_, minlength=num_clusters)
+        print(f"Cluster sizes (number of samples per cluster):")
+        for i, count in enumerate(cluster_counts):
+            if count > 0:  # Only print non-empty clusters
+                print(f"  Cluster {i}: {count} samples ({count / len(coeffs_array) * 100:.1f}%)")
+
+        # Save the model
         model_path = os.path.join(output_folder, f"kmeans_{region}.pkl")
         joblib.dump(kmeans, model_path)
         kmeans_models[region] = model_path
+
     return kmeans_models
 
 if __name__ == "__main__":
-    folders = list_s3_folders()[0:3]
+    # Get all folders from S3
+    all_folders = list_s3_folders()
+
+    # Shuffle the folder list and randomly pick some (e.g., 3 folders)
+    random.shuffle(all_folders)
+    num_folders_to_select = 3  # Adjust this number as needed
+    selected_folders = all_folders[:num_folders_to_select]
+
     csv_files = []
-    for i, folder in enumerate(folders):
-        print(f"{i}/{len(folders)}: Looking into folder: {folder}")
-        files = list_csv_files_in_folder(folder)
-        csv_files.extend(files)
-    print(f"Done listing. Total files: {len(csv_files)}")
-    all_coeffs = collect_coeffs_from_s3(csv_files, "dataframes--use1-az6--x-s3", num_samples_per_file=200, window_length_sec=2, wvlet='db2', level=4)
-    kmeans_model_paths = train_kmeans_models(all_coeffs, num_clusters=2048)
+    for i, folder in enumerate(selected_folders):
+        print(f"{i}/{len(selected_folders)}: Looking into folder: {folder}")
+        # List all files in the folder
+        all_files = list_csv_files_in_folder(folder)
+        # Randomly pick some files (e.g., up to 5 files per folder)
+        num_files_to_select = min(5, len(all_files))  # Adjust this number as needed
+        selected_files = random.sample(all_files, num_files_to_select) if len(
+            all_files) > num_files_to_select else all_files
+        csv_files.extend(selected_files)
+        print(f"Selected {len(selected_files)} files from folder {folder}")
+
+    print(f"Done listing. Total files selected: {len(csv_files)}")
+
+    # Process the randomly selected files
+    all_coeffs = collect_coeffs_from_s3(
+        csv_files,
+        "dataframes--use1-az6--x-s3",
+        num_samples_per_file=50,  # Reduced from 200 for efficiency; adjust as needed
+        window_length_sec=2,
+        wvlet='db2',
+        level=4
+    )
+
+    # Train and save K-means models
+    kmeans_model_paths = train_kmeans_models(all_coeffs, num_clusters=512)
     s3 = boto3.client("s3")
     for region, path in kmeans_model_paths.items():
         s3.upload_file(path, "dataframes--use1-az6--x-s3", f"kmeans_models/kmeans_{region}.pkl")
