@@ -5,7 +5,7 @@ import math
 
 import boto3
 import pandas as pd
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 from matplotlib.animation import FuncAnimation
 
 from scipy import signal
@@ -14,7 +14,7 @@ import pywt
 import matplotlib.pyplot as plt  # <-- needed for plotting histogram
 from  openai import OpenAI
 
-load_dotenv()
+# load_dotenv()
 wvlet = 'db2'
 level = 4
 client = OpenAI(
