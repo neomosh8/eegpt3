@@ -1,16 +1,29 @@
-import inspect
-from dataclasses import dataclass
-
 import torch
+import torch.nn.functional as F
+import random
 import os
 import glob
+import os
+import math
 import random
-import numpy as np
-from torch.distributed import init_process_group
-from torch.nn import functional as F
+import time
+import inspect
+from dataclasses import dataclass
+import contextlib
 
-# Define regions globally for consistency
-REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
+import torch
+import torch.nn as nn
+from fontTools.unicodedata import script
+from torch.nn import functional as F
+import torch.distributed as dist
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from checkpoint_manager import save_checkpoint
+# assumed available; replace or remove if not using S3 logging
+from handle_tokenized import upload_folder_to_s3
+from lr_test import CustomLRScheduler
+from plotter import LossPlotter
 
 #########################
 # DDP Setup
@@ -34,12 +47,6 @@ else:
     print(f"using device: {device}")
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
-
-# Set manual seeds for reproducibility.
-torch.manual_seed(9259)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(9259)
-
 
 #########################
 # Model Components
@@ -380,660 +387,243 @@ class GPT(nn.Module):
     #     )
     #     return optimizer
 
-def compute_prototypes(model, support_data, device, batch_size=8):
-    """
-    Compute class prototypes from support set.
 
-    Args:
-        model: The model to extract embeddings
-        support_data: List of (sequence, label) tuples
-        device: Device to run computation on
-        batch_size: Number of samples to process at once
+#########################
+# DataLoader (All-In-Memory)
+#########################
+# Ensure these match the channels defined during preprocessing.
+REGIONS = ["frontal", "motor_temporal", "parietal_occipital"]
 
-    Returns:
-        Dictionary mapping class labels to prototype vectors
-    """
-    model.eval()
-    label_to_embeddings = {}
+class DataLoaderLiteAllInMemory:
+    def __init__(self, B: int, T: int, process_rank: int, num_processes: int,
+                 local_data_dir: str = "./local_shards", shard_prefix: str = "mydata",
+                 split: str = "train", shuffle_shards: bool = False, pad_token: int = 0):
+        self.B = B
+        self.per_channel_length = T  # Sequence length per channel
+        self.num_channels = len(REGIONS)
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.pad_token = pad_token  # Token to use for padding
 
-    # Process in batches to save memory
-    for i in range(0, len(support_data), batch_size):
-        batch = support_data[i:i + batch_size]
-        batch_sequences = [seq for seq, _ in batch]
-        batch_labels = [label for _, label in batch]
+        # Locate shard files
+        pattern = os.path.join(local_data_dir, f"{shard_prefix}_{split}_*.pt")
+        self.shard_files = sorted(glob.glob(pattern))
+        if not self.shard_files:
+            raise ValueError(f"No {split} shards found in {local_data_dir} with prefix {shard_prefix}_{split}_")
+        if shuffle_shards:
+            random.shuffle(self.shard_files)
 
-        # Process each sequence individually to handle varying shapes
-        for seq, label in zip(batch_sequences, batch_labels):
-            seq_tensor = seq.unsqueeze(0).to(device)  # Add batch dimension [1, C, T]
-
-            with torch.no_grad():
-                # Get embedding
-                embedding = extract_embeddings(model, seq_tensor)
-
-                # Store by class
-                if label not in label_to_embeddings:
-                    label_to_embeddings[label] = []
-                label_to_embeddings[label].append(embedding.cpu())  # Store on CPU to save memory
-
-    # Compute prototypes for each class
-    prototypes = {}
-    for label, embs in label_to_embeddings.items():
-        embs = torch.stack(embs, dim=0).to(device)
-        # Apply L2 normalization before averaging for better prototype quality
-        normalized_embs = F.normalize(embs, p=2, dim=1)
-        prototype = normalized_embs.mean(dim=0)
-        # Re-normalize the prototype
-        prototype = F.normalize(prototype, p=2, dim=0)
-        prototypes[label] = prototype
-
-    return prototypes
-
-
-def compute_cosine_similarities(query_embeddings, prototypes):
-    """
-    Compute cosine similarities between query embeddings and prototypes.
-
-    Args:
-        query_embeddings: Tensor of shape [B, E]
-        prototypes: Dictionary mapping class labels to prototype vectors
-
-    Returns:
-        Dictionary mapping each query index to a dictionary of {label: similarity}
-    """
-    similarities = {}
-    for i, query_emb in enumerate(query_embeddings):
-        query_emb_normalized = F.normalize(query_emb, p=2, dim=0)
-        similarities[i] = {}
-        for label, prototype in prototypes.items():
-            # Compute cosine similarity (dot product of normalized vectors)
-            similarity = torch.dot(query_emb_normalized, prototype).item()
-            similarities[i][label] = similarity
-    return similarities
-
-
-def evaluate_fewshot(model, support_data, query_data, device, batch_size=8, return_predictions=False):
-    """
-    Evaluate few-shot classification performance.
-
-    Args:
-        model: The model to use for evaluation
-        support_data: List of (sequence, label) tuples for support set
-        query_data: List of (sequence, label) tuples for query set
-        device: Device to run computation on
-        batch_size: Number of samples to process at once
-        return_predictions: Whether to return predicted labels
-
-    Returns:
-        Dictionary of evaluation metrics including accuracy, and optionally predictions
-    """
-    model.eval()
-
-    # Compute prototypes from support set
-    prototypes = compute_prototypes(model, support_data, device, batch_size)
-
-    # Process query data in batches
-    all_similarities = {}
-    all_true_labels = []
-
-    for i in range(0, len(query_data), batch_size):
-        batch = query_data[i:i + batch_size]
-        sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
-        batch_labels = [label for _, label in batch]
-        all_true_labels.extend(batch_labels)
-
-        with torch.no_grad():
-            # Extract embeddings
-            embeddings = extract_embeddings(model, sequences)
-
-            # Compute similarities
-            batch_similarities = compute_cosine_similarities(embeddings, prototypes)
-
-            # Add to all similarities with adjusted indices
-            for j, sims in batch_similarities.items():
-                all_similarities[i + j] = sims
-
-    # Predict labels and compute metrics
-    predictions = []
-    correct = 0
-
-    for i, true_label in enumerate(all_true_labels):
-        sims = all_similarities[i]
-        pred_label = max(sims, key=sims.get)
-        predictions.append(pred_label)
-        if pred_label == true_label:
-            correct += 1
-
-    total = len(all_true_labels)
-    accuracy = correct / total if total > 0 else 0
-
-    # Compute per-class metrics
-    class_metrics = {}
-    for label in set(all_true_labels):
-        class_correct = sum(1 for p, t in zip(predictions, all_true_labels)
-                            if p == t and t == label)
-        class_total = sum(1 for t in all_true_labels if t == label)
-        class_accuracy = class_correct / class_total if class_total > 0 else 0
-        class_metrics[label] = {
-            'accuracy': class_accuracy,
-            'support': class_total
-        }
-
-    # Print results
-    print(f"Overall Accuracy: {accuracy:.4f} (Total query samples: {total})")
-    print("Per-class Accuracy:")
-    for label, metrics in class_metrics.items():
-        print(f"  Class {label}: {metrics['accuracy']:.4f} (Support: {metrics['support']})")
-
-    # Return results
-    results = {
-        'accuracy': accuracy,
-        'class_metrics': class_metrics,
-    }
-
-    if return_predictions:
-        results['predictions'] = predictions
-        results['true_labels'] = all_true_labels
-
-    return results
-
-
-def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
-                      balance_classes=True, max_samples_per_class=None, seed=42):
-    """
-    Load few-shot data with robust error handling and diagnostics.
-
-    Args:
-        shard_paths: List of paths to shard files, one per class
-        T: Sequence length
-        K: Number of support samples per class
-        pad_token: Token used for padding
-        num_channels: Number of channels
-        balance_classes: Whether to balance classes in query set
-        max_samples_per_class: Maximum samples to use per class (None = use all)
-        seed: Random seed for reproducibility
-
-    Returns:
-        support_data: List of (sequence, label) tuples for support set
-        query_data: List of (sequence, label) tuples for query set
-    """
-    import random
-    import numpy as np
-    import os
-    import torch
-
-    random.seed(seed)
-    np.random.seed(seed)
-
-    if not shard_paths:
-        raise ValueError("No shard paths provided.")
-
-    # Define regions globally
-    regions = ["frontal", "motor_temporal", "parietal_occipital"]
-    print(f"Loading data from {len(shard_paths)} shards...")
-
-    all_sequences = []
-    class_sizes = []
-
-    # Load data from shards
-    for label, shard_path in enumerate(shard_paths):
-        if not os.path.exists(shard_path):
-            raise FileNotFoundError(f"Shard file not found: {shard_path}")
-
-        try:
-            print(f"Processing shard: {shard_path} (class {label})")
+        # Load and concatenate tokens
+        self.tokens = {region: [] for region in REGIONS}
+        for shard_path in self.shard_files:
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
-
-            # Print available keys/regions
-            print(f"  Available regions: {list(loaded.keys())}")
-
-            # Handle missing regions
-            for region in regions:
+            for region in REGIONS:
                 if region not in loaded:
                     available_regions = list(loaded.keys())
                     if available_regions:
-                        print(f"  Warning: Missing region {region}, using {available_regions[0]} instead")
                         loaded[region] = loaded[available_regions[0]]
+                        print(f"Warning: Shard {shard_path} missing {region}, using {available_regions[0]}.")
                     else:
-                        raise ValueError(f"Shard {shard_path} has no channels.")
+                        raise ValueError(f"Shard {shard_path} has no channels for {region}.")
+                self.tokens[region].append(loaded[region])
+        for region in REGIONS:
+            self.tokens[region] = torch.cat(self.tokens[region], dim=0)
 
-            # Print sequence lengths
-            for region in regions:
-                print(f"  Region {region} length: {loaded[region].size(0)}")
+        # Check minimum length
+        min_length = min(t.size(0) for t in self.tokens.values())
+        required_length = self.B * self.per_channel_length * self.num_processes
+        if min_length < required_length:
+            print(f"Warning: Shortest channel has {min_length} tokens, less than required {required_length}. Padding will be used.")
 
-            # Ensure all channels have the same length by padding or truncating
-            max_length = max(loaded[region].size(0) for region in regions)
-            for region in regions:
-                current_length = loaded[region].size(0)
-                if current_length < max_length:
-                    padding = torch.full((max_length - current_length,), pad_token,
-                                         dtype=loaded[region].dtype)
-                    loaded[region] = torch.cat((loaded[region], padding), dim=0)
-                elif current_length > max_length:
-                    loaded[region] = loaded[region][:max_length]
+        self.start_ptr = self.B * self.per_channel_length * self.process_rank
+        self.ptr = self.start_ptr
 
-            min_length = min(loaded[region].size(0) for region in regions)
-            print(f"  After alignment: all regions have length {min_length}")
-
-            # Simple approach: non-overlapping fixed-size segments
-            # This ensures we get at least some samples if possible
-            num_full_sequences = min_length // T
-            sequences = []
-
-            print(f"  Can create {num_full_sequences} full sequences of length {T}")
-            if num_full_sequences < K:
-                print(f"  WARNING: Not enough data for {K} support samples (only {num_full_sequences})")
-                # If we have less than K samples, we'll extract overlapping sequences
-                overlap = 0.5
-                stride = int(T * (1 - overlap))
-                num_sequences = ((min_length - T) // stride) + 1
-                print(f"  Trying with {overlap * 100}% overlap: {num_sequences} sequences")
-
-                if num_sequences < K:
-                    # If still not enough, use highest possible overlap to get K samples
-                    if min_length >= T:  # At least one full sequence is possible
-                        max_sequences = min_length - T + 1  # Maximum possible with 1-token stride
-                        if max_sequences >= K:
-                            stride = (min_length - T) // (K - 1) if K > 1 else T
-                            num_sequences = ((min_length - T) // stride) + 1
-                            print(f"  Using high overlap (stride={stride}): {num_sequences} sequences")
-                        else:
-                            # We'll extract what we can and duplicate if needed
-                            stride = 1
-                            num_sequences = max_sequences
-                            print(f"  Using maximum overlap: {num_sequences} sequences (will duplicate)")
-                    else:
-                        # Not even one full sequence is possible
-                        print(f"  ERROR: Data too short ({min_length} < {T})")
-                        continue
-            else:
-                stride = T  # Non-overlapping if we have enough data
-
-            # Extract sequences
-            for i in range(num_sequences):
-                start = i * stride
-                end = start + T
-
-                if end <= min_length:  # Only use complete sequences
-                    seq = []
-                    for region in regions:
-                        channel_seq = loaded[region][start:end]
-                        seq.append(channel_seq.unsqueeze(0))
-                    seq = torch.cat(seq, dim=0)  # [C, T]
-                    sequences.append((seq, label))
-
-            # Handle case where we still don't have enough samples
-            if len(sequences) < K and len(sequences) > 0:
-                print(f"  Still only got {len(sequences)} < {K} samples, duplicating...")
-                while len(sequences) < K:
-                    # Duplicate a random sample
-                    sequences.append(random.choice(sequences))
-
-            if len(sequences) > 0:
-                print(f"  Created {len(sequences)} sequences for class {label}")
-                all_sequences.append(sequences)
-                class_sizes.append(len(sequences))
-            else:
-                print(f"  ERROR: Failed to create any sequences for class {label}")
-
-        except Exception as e:
-            print(f"Error loading shard {shard_path}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            continue  # Skip this shard but continue with others
-
-    if not all_sequences:
-        raise ValueError("No valid sequences could be extracted from any shard")
-
-    print(f"Loaded {len(all_sequences)} classes with sizes: {class_sizes}")
-
-    # Split into support and query sets
-    support_data = []
-    query_data = []
-
-    for sequences in all_sequences:
-        # Apply max_samples_per_class if specified
-        if max_samples_per_class and len(sequences) > max_samples_per_class:
-            sequences = random.sample(sequences, max_samples_per_class)
-
-        random.shuffle(sequences)
-
-        # Ensure we don't take more support samples than available
-        k_actual = min(K, len(sequences))
-        if k_actual < K:
-            print(f"WARNING: Using only {k_actual} support samples instead of {K}")
-
-        support_samples = sequences[:k_actual]
-        support_data.extend(support_samples)
-
-        # Remaining samples go to query set
-        if k_actual < len(sequences):
-            query_samples = sequences[k_actual:]
-            query_data.extend(query_samples)
-
-    print(f"Created support set with {len(support_data)} samples")
-    print(f"Created query set with {len(query_data)} samples")
-
-    # Balance query set if requested and possible
-    if balance_classes and query_data:
-        query_by_class = {}
-        for seq, label in query_data:
-            if label not in query_by_class:
-                query_by_class[label] = []
-            query_by_class[label].append((seq, label))
-
-        # Skip balancing if any class has no query samples
-        if any(len(samples) == 0 for samples in query_by_class.values()):
-            print("WARNING: Some classes have no query samples, skipping balancing")
-        elif query_by_class:  # Only balance if we have at least one class
-            min_class_size = min(len(samples) for samples in query_by_class.values())
-
-            # Balance classes
-            balanced_query_data = []
-            for label, samples in query_by_class.items():
-                if min_class_size > 0:
-                    # Take exactly min_class_size samples or duplicate if needed
-                    if len(samples) < min_class_size:
-                        # Need to duplicate some samples
-                        sampled = random.choices(samples, k=min_class_size)
-                    else:
-                        # Can take a true random sample
-                        sampled = random.sample(samples, min_class_size)
-                    balanced_query_data.extend(sampled)
-                    print(f"Class {label}: using {len(sampled)} query samples")
-
-            query_data = balanced_query_data
+    def _get_slice(self, token_tensor: torch.Tensor, start: int, length: int, pad_value: int) -> torch.Tensor:
+        total_length = token_tensor.size(0)
+        start = start % total_length  # Wrap around if exceeding length
+        end = start + length
+        if end <= total_length:
+            return token_tensor[start:end]
         else:
-            print("WARNING: No query samples available after processing")
+            first_part = token_tensor[start:]
+            remaining = length - first_part.size(0)
+            second_part = token_tensor[:remaining]
+            return torch.cat((first_part, second_part), dim=0)
+    def next_batch(self):
+        inputs_list = []
+        targets_list = []
 
-    # Double-check we actually have samples
-    if not support_data:
-        raise ValueError("No support samples could be created")
+        for region in REGIONS:
+            token_tensor = self.tokens[region]
+            channel_inputs = []
+            channel_targets = []
+            for b in range(self.B):
+                start = self.ptr + b * self.per_channel_length
+                # Input: T tokens, pad with pad_token
+                seq = self._get_slice(token_tensor, start, self.per_channel_length, pad_value=self.pad_token)  # [T]
+                channel_inputs.append(seq.unsqueeze(0))  # [1, T]
+                # Target: Next T tokens, pad with -100
+                target = self._get_slice(token_tensor, start + 1, self.per_channel_length, pad_value=-100)  # [T]
+                channel_targets.append(target.unsqueeze(0))  # [1, T]
+            channel_inputs = torch.cat(channel_inputs, dim=0)  # [B, T]
+            channel_targets = torch.cat(channel_targets, dim=0)  # [B, T]
+            inputs_list.append(channel_inputs.unsqueeze(1))  # [B, 1, T]
+            targets_list.append(channel_targets.unsqueeze(1))  # [B, 1, T]
 
-    if not query_data:
-        print("WARNING: No query samples available. Creating query set from support set.")
-        # If no query data, use some support data as query (for testing only)
-        if len(support_data) > K:
-            random.shuffle(support_data)
-            split_point = max(1, len(support_data) // 2)
-            query_data = support_data[split_point:]
-            support_data = support_data[:split_point]
-        else:
-            # If very little data, duplicate support samples for query
-            query_data = [(seq.clone(), label) for seq, label in support_data]
-            print("WARNING: Using duplicated support samples as query (evaluation will be unreliable)")
+        inputs = torch.cat(inputs_list, dim=1)  # [B, num_channels, T]
+        targets = torch.cat(targets_list, dim=1)  # [B, num_channels, T]
 
-    # Shuffle final sets
-    random.shuffle(support_data)
-    random.shuffle(query_data)
+        self.ptr += self.B * self.per_channel_length * self.num_processes
+        return inputs, targets
 
-    # Verify class distribution
-    support_counts = {}
-    for _, label in support_data:
-        support_counts[label] = support_counts.get(label, 0) + 1
+    def reset(self):
+        self.ptr = self.start_ptr
 
-    query_counts = {}
-    for _, label in query_data:
-        query_counts[label] = query_counts.get(label, 0) + 1
+    @property
+    def total_len(self):
+        return self.tokens[REGIONS[0]].size(0)
 
-    print(f"Final support set: {len(support_data)} samples, distribution: {support_counts}")
-    print(f"Final query set: {len(query_data)} samples, distribution: {query_counts}")
+    def __iter__(self):
+        return self
 
-    return support_data, query_data
+    def __next__(self):
+        return self.next_batch()
 
-def extract_embeddings(model, sequences):
+# --- Hyperparameters & Configurations ---
+# We use 512 tokens for prompt and 512 tokens for completion.
+PROMPT_LEN = 256
+COMP_LEN = 256
+# For the in-context (few-shot) classification, we prepend the candidate’s support pair.
+# Total sequence length = support (1024) + query prompt (512) + query completion (512) = 2048.
+SEQ_LEN = PROMPT_LEN + COMP_LEN + PROMPT_LEN + COMP_LEN
+
+# Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- Utility Functions ---
+def sample_support_and_query(token_tensor, prompt_len=PROMPT_LEN, comp_len=COMP_LEN):
     """
-    Extract embeddings using continuous segments of tokens for better context representation.
-
-    Args:
-        model: The model to extract embeddings
-        sequences: Tensor of shape [B, C, T] where B is batch size, C is channels, T is sequence length
-
-    Returns:
-        Tensor of embeddings with shape [B, E] where E is embedding dimension
+    Given a 1D tensor of tokens (from a shard corresponding to one class),
+    randomly sample two nonoverlapping contiguous segments:
+      - A support example: first prompt_len tokens as prompt and next comp_len tokens as support completion.
+      - A query example: same split from the next contiguous block.
     """
-    B, C, T = sequences.size()
-    config = model.config
+    total_needed = 2 * (prompt_len + comp_len)
+    total_tokens = token_tensor.size(0)
+    if total_tokens < total_needed:
+        raise ValueError("Not enough tokens to sample support and query examples.")
+    # Randomly choose a starting index such that the support and query segments fit
+    start = random.randint(0, total_tokens - total_needed)
+    support_seq = token_tensor[start : start + prompt_len + comp_len]
+    query_seq = token_tensor[start + prompt_len + comp_len : start + total_needed]
+    support_prompt = support_seq[:prompt_len]
+    support_completion = support_seq[prompt_len:]
+    query_prompt = query_seq[:prompt_len]
+    query_completion = query_seq[prompt_len:]
+    return support_prompt, support_completion, query_prompt, query_completion
 
-    # Process through the embedding layer and encoder
-    tok_emb = model.transformer.wte(sequences)  # [B, C, T, n_embd]
-    x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
-
-    # Use the same batched operation as in forward()
-    x_reshaped = x.permute(0, 2, 1, 3).contiguous().reshape(B * C, T, config.n_embd)
-    out = model.intra_channel_encoder(x_reshaped)
-    x = out.view(B, C, T, config.n_embd).permute(0, 2, 1, 3).contiguous()
-
-    # Process through transformer blocks
-    for block in model.transformer.h:
-        x = block(x)
-
-    # Apply the final layer norm to maintain consistency with forward pass
-    x_reshaped = x.transpose(1, 2).contiguous().reshape(B * C, T, config.n_embd)
-    x_norm = model.transformer.ln_f(x_reshaped)
-    x = x_norm.view(B, C, T, config.n_embd)
-
-    # Use continuous segments of tokens for context
-    # Divide the sequence into 4 segments and extract embedding from each
-    segment_length = T // 4
-    segment_embeddings = []
-
-    for i in range(4):
-        start_idx = i * segment_length
-        end_idx = start_idx + segment_length
-
-        # Get embedding for this segment (average across tokens in segment)
-        segment_emb = x[:, start_idx:end_idx, :, :].mean(dim=1)  # [B, C, E]
-        segment_emb = segment_emb.mean(dim=1)  # [B, E] - average across channels
-        segment_embeddings.append(segment_emb)
-
-    # Concatenate segment embeddings to capture the full temporal context
-    full_embedding = torch.cat(segment_embeddings, dim=1)  # [B, 4*E]
-
-    # Project back to original embedding dimension to keep consistent size
-    if not hasattr(model, 'context_projection'):
-        model.context_projection = torch.nn.Linear(
-            4 * config.n_embd, config.n_embd,
-            device=full_embedding.device
-        )
-        # Initialize weights to average the segments
-        torch.nn.init.constant_(model.context_projection.weight, 0.25)
-        torch.nn.init.zeros_(model.context_projection.bias)
-
-    final_embedding = model.context_projection(full_embedding)
-
-    return final_embedding
-
-
-def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, batch_size=8):
+def compute_loss_for_class(model, support_prompt, support_completion, query_prompt, query_completion):
     """
-    Evaluate few-shot classification with temporal augmentation for more robust results.
-
-    Args:
-        model: The model to use for evaluation
-        support_data: List of (sequence, label) tuples for support set
-        query_data: List of (sequence, label) tuples for query set
-        device: Device to run computation on
-        batch_size: Number of samples to process at once
-
-    Returns:
-        Dictionary of evaluation metrics
+    For a given candidate class (with its support pair), construct the input sequence:
+      [support_prompt, support_completion, query_prompt, query_completion]
+    Set targets to -100 for all tokens except for the query completion,
+    and then compute the LM loss (averaged over the query tokens).
     """
+    # Concatenate into one long sequence
+    # Order: support prompt (512) + support completion (512) + query prompt (512) + query completion (512)
+    input_seq = torch.cat([support_prompt, support_completion, query_prompt, query_completion], dim=0)
+    # Create targets: ignore support and query prompt tokens (set to -100), then use query_completion tokens.
+    num_ignore = support_prompt.size(0) + support_completion.size(0) + query_prompt.size(0)
+    ignore_tokens = torch.full((num_ignore,), -100, dtype=torch.long)
+    targets = torch.cat([ignore_tokens, query_completion], dim=0)
+    # Reshape as required by the model: [B, num_channels, T]. Here B = 1 and num_channels = 1.
+    input_seq = input_seq.unsqueeze(0).unsqueeze(0).to(device)   # shape: [1, 1, SEQ_LEN]
+    targets = targets.unsqueeze(0).unsqueeze(0).to(device)         # shape: [1, 1, SEQ_LEN]
+    with torch.no_grad():
+        _, loss = model(input_seq, targets=targets)
+    return loss.item()
+
+def evaluate_few_shot(model, class_tokens, num_trials=10):
+    """
+    For each trial, for every class (true label), sample a query example and then
+    compute the loss (i.e. negative log-likelihood) of generating its query completion
+    when conditioned on each candidate class’s support pair.
+    The predicted class is the one with the minimum loss.
+    Returns the overall accuracy.
+    """
+    correct = 0
+    total = 0
+    # Loop for several trials for stability
+    for _ in range(num_trials):
+        for true_class, token_tensor in class_tokens.items():
+            # Sample support and query for the true class (for the query example)
+            sp_true, sc_true, query_prompt, query_completion = sample_support_and_query(token_tensor)
+            losses = []
+            # For every candidate class, sample its own support pair (as the prototype)
+            for candidate_class, candidate_tokens in class_tokens.items():
+                sp_candidate, sc_candidate, _, _ = sample_support_and_query(candidate_tokens)
+                loss = compute_loss_for_class(model, sp_candidate, sc_candidate, query_prompt, query_completion)
+                losses.append(loss)
+            # The candidate with the smallest loss is predicted.
+            predicted_class = min(range(len(losses)), key=lambda i: losses[i])
+            if predicted_class == true_class:
+                correct += 1
+            total += 1
+    return correct / total
+
+# --- Load Class Data ---
+# Here each shard file corresponds to one class. Adjust shard_paths as needed.
+shard_paths = [
+    "./local_shards_val/mydata_train_2.pt",
+    "./local_shards_val/mydata_train_0.pt",
+    # Add more paths if available...
+]
+
+# For simplicity, we assume each shard contains a dict with one or more channels;
+# we use the "frontal" channel if available, else the first key.
+class_tokens = {}
+for i, shard_path in enumerate(shard_paths):
+    if not os.path.exists(shard_path):
+        raise FileNotFoundError(f"Shard file {shard_path} not found.")
+    data = torch.load(shard_path, map_location="cpu")
+    if "frontal" in data:
+        tokens = data["frontal"]
+    else:
+        tokens = next(iter(data.values()))
+    class_tokens[i] = tokens
+
+# --- Initialize the Model ---
+# We update block_size to 2048 (to accommodate support+query) and set num_channels to 1.
+
+
+config = GPTConfig()
+model = GPT(config).to(device)
+model.eval()  # Set to evaluation mode
+
+# --- Evaluate with the Raw (Randomly Initialized) Model ---
+print("Evaluating raw model (random initialization)...")
+acc_raw = evaluate_few_shot(model, class_tokens, num_trials=10)
+print(f"Raw model few-shot accuracy: {acc_raw * 100:.2f}%")
+
+# --- Load Pretrained Weights & Evaluate Again ---
+checkpoint_path = "checkpoints/model_last_checkpoint.pt"
+if not os.path.exists(checkpoint_path):
+    raise FileNotFoundError(f"Checkpoint {checkpoint_path} not found.")
+
+try:
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
+    )
+    state_dict = checkpoint['model_state_dict']
+    # Fix keys if needed (e.g. remove DDP prefix)
+    fixed_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(fixed_state_dict)
     model.eval()
+except Exception as e:
+    print("Error loading pretrained weights:", e)
 
-    # 1. Create multiple augmented views of the support set through minor time shifts
-    augmented_support_data = []
-    for seq, label in support_data:
-        C, T = seq.size()
-
-        # Original sample
-        augmented_support_data.append((seq, label))
-
-        # Add time-shifted versions (shifts of 5% of sequence length)
-        shift_amount = max(1, int(0.05 * T))
-        for shift in [shift_amount, 2 * shift_amount]:
-            # Shift right (take from beginning)
-            shifted_seq = torch.roll(seq.clone(), shifts=shift, dims=1)
-            augmented_support_data.append((shifted_seq, label))
-
-            # Shift left (take from end)
-            shifted_seq = torch.roll(seq.clone(), shifts=-shift, dims=1)
-            augmented_support_data.append((shifted_seq, label))
-
-    # 2. Compute prototypes from augmented support set
-    prototypes = compute_prototypes(model, augmented_support_data, device, batch_size)
-
-    # 3. Process query data with multiple views through time offsets
-    all_true_labels = []
-    all_pred_labels = []
-
-    for i in range(0, len(query_data), batch_size):
-        batch = query_data[i:i + batch_size]
-        batch_sequences = [seq for seq, _ in batch]
-        batch_labels = [label for _, label in batch]
-        all_true_labels.extend(batch_labels)
-
-        # For each sequence, create multiple temporal views
-        batch_predictions = []
-
-        for j, orig_seq in enumerate(batch_sequences):
-            C, T = orig_seq.size()
-            views = [orig_seq]  # Start with original sequence
-
-            # Add time-shifted versions for robustness
-            shift_amount = max(1, int(0.05 * T))
-
-            # Add right-shifted version
-            shifted_seq = torch.roll(orig_seq.clone(), shifts=shift_amount, dims=1)
-            views.append(shifted_seq)
-
-            # Add left-shifted version
-            shifted_seq = torch.roll(orig_seq.clone(), shifts=-shift_amount, dims=1)
-            views.append(shifted_seq)
-
-            # Process all views to get embeddings
-            view_embeddings = []
-            for view in views:
-                view_tensor = view.unsqueeze(0).to(device)  # [1, C, T]
-                with torch.no_grad():
-                    embedding = extract_embeddings(model, view_tensor)
-                    view_embeddings.append(embedding)
-
-            # Combine view predictions with voting
-            view_predictions = []
-            for embedding in view_embeddings:
-                # Compute similarity to each prototype
-                similarities = {}
-                for label, prototype in prototypes.items():
-                    # Normalize for cosine similarity
-                    embedding_norm = F.normalize(embedding, p=2, dim=0)
-                    similarity = torch.dot(embedding_norm, prototype).item()
-                    similarities[label] = similarity
-
-                # Get prediction from this view
-                pred = max(similarities, key=similarities.get)
-                view_predictions.append(pred)
-
-            # Take majority vote across views
-            from collections import Counter
-            votes = Counter(view_predictions)
-            final_pred = votes.most_common(1)[0][0]
-            batch_predictions.append(final_pred)
-
-        all_pred_labels.extend(batch_predictions)
-
-    # 4. Compute metrics
-    correct = sum(1 for p, t in zip(all_pred_labels, all_true_labels) if p == t)
-    total = len(all_true_labels)
-    accuracy = correct / total if total > 0 else 0
-
-    # Compute per-class metrics
-    class_metrics = {}
-    for label in set(all_true_labels):
-        class_correct = sum(1 for p, t in zip(all_pred_labels, all_true_labels)
-                            if p == t and t == label)
-        class_total = sum(1 for t in all_true_labels if t == label)
-        class_accuracy = class_correct / class_total if class_total > 0 else 0
-        class_metrics[label] = {
-            'accuracy': class_accuracy,
-            'support': class_total
-        }
-
-    # Print results
-    print(f"Overall Accuracy: {accuracy:.4f} (Total query samples: {total})")
-    print("Per-class Accuracy:")
-    for label, metrics in class_metrics.items():
-        print(f"  Class {label}: {metrics['accuracy']:.4f} (Support: {metrics['support']})")
-
-    # Return results
-    results = {
-        'accuracy': accuracy,
-        'class_metrics': class_metrics,
-        'predictions': all_pred_labels,
-        'true_labels': all_true_labels
-    }
-
-    return results
-
-
-
-
-
-# Main execution code
-if __name__ == "__main__":
-    import torch
-    import os
-
-    # Device setup
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-
-    # Model configuration
-    config = GPTConfig()
-    model = GPT(config).to(device)
-
-    # Example shard paths (replace with actual paths)
-    shard_paths = [
-        "./local_shards_val/mydata_train_2.pt",
-        "./local_shards_val/mydata_train_0.pt",
-    ]
-
-    # Load data with improved handling
-    support_data, query_data = load_fewshot_data(
-        shard_paths,
-        T=config.block_size,
-        K=10,
-        pad_token=config.pad_token,
-        num_channels=config.num_channels,
-        balance_classes=True,
-        max_samples_per_class=5  # Limit samples per class for faster training/evaluation
-    )
-
-    # Evaluate with random weights
-    print("Evaluating with random weights")
-    random_results = evaluate_fewshot_with_augmentation(
-        model, support_data, query_data, device, batch_size=16
-    )
-
-    # Optionally, load pretrained weights and evaluate
-    try:
-        checkpoint = torch.load(
-            "checkpoints/model_last_checkpoint.pt",
-            map_location=device,
-            weights_only=False
-        )
-        state_dict = checkpoint['model_state_dict']
-        # Fix state dict keys if needed (remove _orig_mod prefix common in DDP training)
-        model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
-        model.eval()
-
-        print("\nEvaluating with pretrained weights")
-        pretrained_results = evaluate_fewshot_with_augmentation(
-            model, support_data, query_data, device, batch_size=16
-        )
-
-        # Compare results
-        print(f"\nImprovement: {pretrained_results['accuracy'] - random_results['accuracy']:.4f}")
-
-    except FileNotFoundError:
-        print("\nPretrained weights not found; skipping pretrained evaluation.")
+print("Evaluating pretrained model...")
+acc_pretrained = evaluate_few_shot(model, class_tokens, num_trials=10)
+print(f"Pretrained model few-shot accuracy: {acc_pretrained * 100:.2f}%")
