@@ -232,12 +232,19 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
     return model_path, encoder, min_val, max_val
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device):
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)[..., np.newaxis]
-    coeffs_array = (coeffs_array - min_val) / (max_val - min_val) if max_val > min_val else coeffs_array
+    # Stack coefficients to shape (N, 25, 512)
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)
+    # Add the channel dimension at axis 1 to get (N, 1, 25, 512)
+    coeffs_array = np.expand_dims(coeffs_array, axis=1)
+    # Normalize the data
+    if max_val > min_val:
+        coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
+    # Convert to a PyTorch tensor and move to device
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
     with torch.no_grad():
         latent_reps = encoder(coeffs_tensor).cpu().numpy()
     return latent_reps
+
 
 # Train GMM on latent space
 def train_gmm(latent_reps, max_components=10, output_folder="/tmp", region="unknown"):
