@@ -382,7 +382,7 @@ class GPT(nn.Module):
 
 def compute_prototypes(model, support_data, device, batch_size=8):
     """
-    Compute class prototypes from support set with improved batching and representation.
+    Compute class prototypes from support set.
 
     Args:
         model: The model to extract embeddings
@@ -399,18 +399,21 @@ def compute_prototypes(model, support_data, device, batch_size=8):
     # Process in batches to save memory
     for i in range(0, len(support_data), batch_size):
         batch = support_data[i:i + batch_size]
-        sequences = torch.stack([seq for seq, _ in batch], dim=0).to(device)
+        batch_sequences = [seq for seq, _ in batch]
         batch_labels = [label for _, label in batch]
 
-        with torch.no_grad():
-            # Get embeddings using the consistent method
-            embeddings = extract_embeddings(model, sequences)
+        # Process each sequence individually to handle varying shapes
+        for seq, label in zip(batch_sequences, batch_labels):
+            seq_tensor = seq.unsqueeze(0).to(device)  # Add batch dimension [1, C, T]
 
-            # Store embeddings by class
-            for emb, label in zip(embeddings, batch_labels):
+            with torch.no_grad():
+                # Get embedding
+                embedding = extract_embeddings(model, seq_tensor)
+
+                # Store by class
                 if label not in label_to_embeddings:
                     label_to_embeddings[label] = []
-                label_to_embeddings[label].append(emb.cpu())  # Store on CPU to save GPU memory
+                label_to_embeddings[label].append(embedding.cpu())  # Store on CPU to save memory
 
     # Compute prototypes for each class
     prototypes = {}
@@ -428,7 +431,8 @@ def compute_prototypes(model, support_data, device, batch_size=8):
 
 def extract_embeddings(model, sequences):
     """
-    Extract embeddings from sequences using the same processing pipeline as training.
+    Extract embeddings using continuous segments of tokens for better context representation.
+    This version avoids modifying the model structure.
 
     Args:
         model: The model to extract embeddings
@@ -440,7 +444,7 @@ def extract_embeddings(model, sequences):
     B, C, T = sequences.size()
     config = model.config
 
-    # Follow the same processing as in forward()
+    # Process through the embedding layer and encoder
     tok_emb = model.transformer.wte(sequences)  # [B, C, T, n_embd]
     x = tok_emb.transpose(1, 2)  # [B, T, C, n_embd]
 
@@ -453,17 +457,30 @@ def extract_embeddings(model, sequences):
     for block in model.transformer.h:
         x = block(x)
 
-    # Use a more comprehensive representation than just the last token
-    # Get the last 4 tokens and average them for a better representation
-    last_n_tokens = x[:, -4:, :, :].mean(dim=1)  # [B, C, n_embd]
+    # Apply the final layer norm to maintain consistency with forward pass
+    x_reshaped = x.transpose(1, 2).contiguous().reshape(B * C, T, config.n_embd)
+    x_norm = model.transformer.ln_f(x_reshaped)
+    x = x_norm.view(B, C, T, config.n_embd)
 
-    # Take mean across channels
-    embedding = last_n_tokens.mean(dim=1)  # [B, n_embd]
+    # Use continuous segments of tokens for context
+    # Divide the sequence into 4 segments
+    segment_length = T // 4
+    segment_embeddings = []
 
-    # Apply layer norm for consistency with forward pass
-    embedding = model.transformer.ln_f(embedding)
+    for i in range(4):
+        start_idx = i * segment_length
+        end_idx = min(start_idx + segment_length, T)
 
-    return embedding
+        # Get embedding for this segment (average across tokens in segment)
+        segment_emb = x[:, start_idx:end_idx, :, :].mean(dim=1)  # [B, C, E]
+        segment_emb = segment_emb.mean(dim=1)  # [B, E] - average across channels
+        segment_embeddings.append(segment_emb)
+
+    # Instead of adding a new layer to the model, we'll average the segment
+    # embeddings here directly
+    final_embedding = torch.stack(segment_embeddings, dim=0).mean(dim=0)
+
+    return final_embedding
 
 
 def compute_cosine_similarities(query_embeddings, prototypes):
@@ -574,8 +591,8 @@ def evaluate_fewshot(model, support_data, query_data, device, batch_size=8, retu
     return results
 
 
-def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(REGIONS),
-                      balance_classes=True, max_samples_per_class=None, seed=42):
+def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=3,
+                      balance_classes=True, max_samples_per_class=10, seed=42):
     """
     Load few-shot data with improved handling of class imbalance.
 
@@ -593,6 +610,11 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
         support_data: List of (sequence, label) tuples for support set
         query_data: List of (sequence, label) tuples for query set
     """
+    import random
+    import numpy as np
+    import os
+    import torch
+
     random.seed(seed)
     np.random.seed(seed)
 
@@ -600,7 +622,9 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
         raise ValueError("No shard paths provided.")
 
     all_sequences = []
-    min_num_sequences = float('inf')
+
+    # Define regions globally
+    regions = ["frontal", "motor_temporal", "parietal_occipital"]
 
     # Load data from shards
     for label, shard_path in enumerate(shard_paths):
@@ -611,7 +635,7 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
             loaded = torch.load(shard_path, map_location="cpu", weights_only=False)
 
             # Handle missing regions
-            for region in REGIONS:
+            for region in regions:
                 if region not in loaded:
                     available_regions = list(loaded.keys())
                     if available_regions:
@@ -621,8 +645,8 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
                         raise ValueError(f"Shard {shard_path} has no channels.")
 
             # Ensure all channels have the same length
-            max_length = max(loaded[region].size(0) for region in REGIONS)
-            for region in REGIONS:
+            max_length = max(loaded[region].size(0) for region in regions)
+            for region in regions:
                 current_length = loaded[region].size(0)
                 if current_length < max_length:
                     padding = torch.full((max_length - current_length,), pad_token,
@@ -631,28 +655,31 @@ def load_fewshot_data(shard_paths, T=1024, K=3, pad_token=0, num_channels=len(RE
                 elif current_length > max_length:
                     loaded[region] = loaded[region][:max_length]
 
-            # Extract non-overlapping sequences
-            min_length = min(loaded[region].size(0) for region in REGIONS)
-            num_sequences = (min_length - T) // T + 1
-            min_num_sequences = min(min_num_sequences, num_sequences)
+            # Extract overlapping sequences with 50% overlap for better coverage
+            min_length = min(loaded[region].size(0) for region in regions)
+            stride = T // 2  # 50% overlap
 
+            # Ensure we can extract enough samples (at least K)
+            num_sequences = ((min_length - T) // stride) + 1
             if num_sequences < K:
-                raise ValueError(f"Shard {shard_path} has too few sequences ({num_sequences}) for K={K}")
+                print(f"Warning: Shard {shard_path} has only {num_sequences} sequences for K={K}")
+                # Fall back to non-overlapping if we can't get enough samples
+                stride = T
+                num_sequences = ((min_length - T) // stride) + 1
+                if num_sequences < K:
+                    raise ValueError(f"Shard {shard_path} has too few tokens for K={K} samples")
 
             sequences = []
             for i in range(num_sequences):
-                start = i * T
+                start = i * stride
                 end = start + T
-                seq = []
-                for region in REGIONS:
-                    channel_seq = loaded[region][start:end]
-                    if channel_seq.size(0) < T:
-                        padding = torch.full((T - channel_seq.size(0),), pad_token,
-                                             dtype=channel_seq.dtype)
-                        channel_seq = torch.cat((channel_seq, padding), dim=0)
-                    seq.append(channel_seq.unsqueeze(0))
-                seq = torch.cat(seq, dim=0)  # [C, T]
-                sequences.append((seq, label))
+                if end <= min_length:  # Ensure we don't go out of bounds
+                    seq = []
+                    for region in regions:
+                        channel_seq = loaded[region][start:end]
+                        seq.append(channel_seq.unsqueeze(0))
+                    seq = torch.cat(seq, dim=0)  # [C, T]
+                    sequences.append((seq, label))
 
             all_sequences.append(sequences)
 
@@ -789,7 +816,7 @@ def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, 
     # 1. Create multiple augmented views of the support set through minor time shifts
     augmented_support_data = []
     for seq, label in support_data:
-        B, C, T = 1, seq.size(0), seq.size(1)
+        C, T = seq.size()
 
         # Original sample
         augmented_support_data.append((seq, label))
@@ -822,10 +849,10 @@ def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, 
         batch_predictions = []
 
         for j, orig_seq in enumerate(batch_sequences):
+            C, T = orig_seq.size()
             views = [orig_seq]  # Start with original sequence
 
             # Add time-shifted versions for robustness
-            T = orig_seq.size(1)
             shift_amount = max(1, int(0.05 * T))
 
             # Add right-shifted version
@@ -851,8 +878,8 @@ def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, 
                 similarities = {}
                 for label, prototype in prototypes.items():
                     # Normalize for cosine similarity
-                    embedding_norm = F.normalize(embedding, p=2, dim=1)
-                    similarity = torch.matmul(embedding_norm, prototype.unsqueeze(1)).item()
+                    embedding_norm = F.normalize(embedding, p=2, dim=0)
+                    similarity = torch.dot(embedding_norm, prototype).item()
                     similarities[label] = similarity
 
                 # Get prediction from this view
@@ -901,14 +928,20 @@ def evaluate_fewshot_with_augmentation(model, support_data, query_data, device, 
     return results
 
 
-# Usage example
+
+
+
+# Main execution code
 if __name__ == "__main__":
+    import torch
+    import os
+
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Model configuration
 
+    # Model configuration
     config = GPTConfig()
     model = GPT(config).to(device)
 
@@ -918,18 +951,19 @@ if __name__ == "__main__":
         "./local_shards_val/mydata_train_0.pt",
     ]
 
-    # Load data
+    # Load data with improved handling
     support_data, query_data = load_fewshot_data(
         shard_paths,
         T=config.block_size,
         K=10,
         pad_token=config.pad_token,
         num_channels=config.num_channels,
-        balance_classes=True
+        balance_classes=True,
+        max_samples_per_class=5  # Limit samples per class for faster training/evaluation
     )
 
     # Evaluate with random weights
-    print("Evaluating with random weights and continuous context extraction")
+    print("Evaluating with random weights")
     random_results = evaluate_fewshot_with_augmentation(
         model, support_data, query_data, device, batch_size=16
     )
@@ -942,13 +976,17 @@ if __name__ == "__main__":
             weights_only=False
         )
         state_dict = checkpoint['model_state_dict']
+        # Fix state dict keys if needed (remove _orig_mod prefix common in DDP training)
         model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in state_dict.items()})
         model.eval()
 
-        print("\nEvaluating with pretrained weights and continuous context extraction")
+        print("\nEvaluating with pretrained weights")
         pretrained_results = evaluate_fewshot_with_augmentation(
             model, support_data, query_data, device, batch_size=16
         )
+
+        # Compare results
+        print(f"\nImprovement: {pretrained_results['accuracy'] - random_results['accuracy']:.4f}")
 
     except FileNotFoundError:
         print("\nPretrained weights not found; skipping pretrained evaluation.")
