@@ -154,39 +154,41 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Correctly set input_shape
-    input_shape = coeffs_2d_list[0].shape  # (25, 512)
+    # Set the input shape based on the first sample, e.g. (25, 512)
+    input_shape = coeffs_2d_list[0].shape
     print(f"Region '{region}' - Input shape for CAE: {input_shape}")
 
-    # Stack coefficients
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)  # (200, 25, 512)
-    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # (200, 1, 25, 512)
+    # Stack coefficients into an array of shape (N, 25, 512)
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)
+    # Add a channel dimension: (N, 1, 25, 512)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]
     print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
 
-    # Normalize
+    # Normalize the data
     min_val = coeffs_array.min()
     max_val = coeffs_array.max()
     if max_val > min_val:
         coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
 
-    # Convert to tensor
+    # Convert the numpy array to a PyTorch tensor and send to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
     print(f"Region '{region}' - Final input tensor shape: {coeffs_tensor.shape}")
+
+    # Initialize the CAE model with the correct input shape
     cae = CAE(input_shape, latent_dim).to(device)
-    # DataLoader
+
+    # Create a DataLoader for training
     dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-
-    # Optimizer and loss
+    # Set up the optimizer and loss function
     optimizer = optim.Adam(cae.parameters())
     criterion = nn.MSELoss()
 
-    # Train
+    # Training loop
     for epoch in range(epochs):
-        for data in dataloader:
-            inputs, _ = data
+        for inputs, _ in dataloader:
             optimizer.zero_grad()
             outputs, _ = cae(inputs)
             loss = criterion(outputs, inputs)
@@ -194,11 +196,11 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
             optimizer.step()
         print(f"Region '{region}' - Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
 
-    # Save model
+    # Save the trained CAE model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
 
-    # Extract encoder
+    # Extract the encoder part from the CAE
     encoder = nn.Sequential(*list(cae.encoder.children()))
     return model_path, encoder, min_val, max_val
 
