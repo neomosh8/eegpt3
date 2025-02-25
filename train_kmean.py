@@ -154,7 +154,7 @@ def train_kmeans_models(all_coeffs, num_clusters=256, output_folder="/tmp", samp
 if __name__ == "__main__":
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    num_folders_to_select = 10
+    num_folders_to_select = 30
     selected_folders = all_folders[:num_folders_to_select]
 
     csv_files = []
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     all_coeffs = collect_coeffs_from_s3(
         csv_files,
         "dataframes--use1-az6--x-s3",
-        num_samples_per_file=200,
+        num_samples_per_file=100,
         window_length_sec=2,
         wvlet='db2',  # Note: Main call uses 'db2', but process_csv_for_coeffs uses Morlet
         level=4
