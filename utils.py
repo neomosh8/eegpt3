@@ -45,60 +45,94 @@ def plot_amplitude_histogram(data, channel_name='Unknown', bins=50):
     plt.tight_layout()
     plt.show()
 
-def wavelet_decompose_window(window, wavelet='db2', level=4, normalization=True):
-    """
-    Apply wavelet decomposition to each channel in the window.
+import numpy as np
+import pywt
 
-    :param window: 2D numpy array (channels x samples)
-    :param wavelet: Wavelet type
-    :param level: Decomposition level
-    :param normalization: If True, use z-score normalization. If False, use magnitude-based scaling
-    :return: (decomposed_channels, coeffs_lengths, original_signal_length, normalized_data)
+import numpy as np
+import pywt
+
+def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
+    """
+    Apply continuous wavelet decomposition (CWT) to each channel in the window using the Morlet wavelet,
+    with scales defined for standard EEG frequency bands (delta, theta, alpha, beta, gamma).
+
+    Args:
+        window (numpy.ndarray): 2D array (channels x samples).
+        wavelet (str): Wavelet type (e.g., 'cmor1.5-1.0' for Morlet with bandwidth=1.5, center frequency=1.0).
+        scales (list or numpy.ndarray): Scales for CWT (if None, computed for EEG bands: 0.5–40 Hz).
+        normalization (bool): If True, use z-score normalization. If False, use raw values.
+        sampling_period (float): Sampling period in seconds (1/sampling_rate).
+
+    Returns:
+        tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
+            - decomposed_channels: Array of CWT coefficients (channels x scales x samples).
+            - scales: Array of scales used in CWT.
+            - original_signal_length: Number of samples in the original signal.
+            - normalized_data: Normalized input data (channels x samples).
     """
     num_channels, num_samples = window.shape
     decomposed_channels = []
-    coeffs_lengths = []
     normalized_data = []
 
-    # ---- NORMALIZATION / SCALING ----
+    # --- Normalization / Scaling ---
     if normalization:
-        # Z-score normalization for the entire dataset (all channels combined).
         mean = np.mean(window)
         std = np.std(window)
         if std == 0:
             std = 1  # Prevent division by zero
         window_normalized = (window - mean) / std
     else:
-        window_normalized = window.copy()  # Keep original values
+        window_normalized = window.copy()
 
-    # ---- PLOT HISTOGRAM: amplitude distribution before wavelet decomposition ----
-    # You can call the plotting function here to see how your data looks
-    # (either channel-by-channel or the entire window at once)
-    # plot_amplitude_histogram(window_normalized, channel_name='All Channels', bins=50)
+    # --- Define Scales for Standard EEG Bands (if not provided) ---
+    if scales is None:
+        # Sampling frequency = 1 / sampling_period
+        fs = 1.0 / sampling_period
 
-    # ---- PER-CHANNEL WAVELET DECOMPOSITION ----
+        # Define standard EEG frequency bands (in Hz)
+        eeg_bands = {
+            "delta": (0.2, 4),
+            "theta": (4, 8),
+            "alpha": (8, 12),
+            "beta": (12, 30),
+            "gamma": (30, 80),
+
+        }
+
+        # Number of scales per band (adjustable)
+        scales_per_band = 6  # 5 scales per band, totaling 25 scales across all bands
+
+        # Compute scales for each band
+        scales = []
+        for band, (f_min, f_max) in eeg_bands.items():
+            # Convert frequency range to scales
+            scale_max = pywt.scale2frequency(wavelet, f_min) * fs  # Scale for lowest frequency in band
+            scale_min = pywt.scale2frequency(wavelet, f_max) * fs  # Scale for highest frequency in band
+            # Logarithmic spacing within each band
+            band_scales = np.logspace(np.log10(scale_min), np.log10(scale_max), scales_per_band)
+            scales.extend(band_scales)
+
+        # Sort scales in ascending order (since lower frequencies correspond to larger scales)
+        scales = np.sort(scales)
+
+    # --- Per-Channel Wavelet Decomposition (CWT) ---
     for channel_index in range(num_channels):
-        # Extract single channel data
         channel_data_normalized = window_normalized[channel_index, :]
         normalized_data.append(channel_data_normalized)
 
-        # Perform wavelet decomposition on normalized data
-        coeffs = pywt.wavedec(channel_data_normalized, wavelet, level=level)
+        # Perform continuous wavelet transform
+        coeffs, freqs = pywt.cwt(channel_data_normalized, scales, wavelet, sampling_period=sampling_period)
 
-        # Flatten the coefficients
-        flattened_coeffs = np.hstack([comp.flatten() for comp in coeffs])
-
-        # Store the lengths of each coefficient array (needed for reconstruction)
-        lengths = np.array([len(comp) for comp in coeffs])
+        # coeffs shape: (scales x samples)
+        # Keep the 2D structure or flatten based on downstream needs
+        flattened_coeffs = coeffs.flatten()  # Flatten for vector quantization compatibility
 
         decomposed_channels.append(flattened_coeffs)
-        coeffs_lengths.append(lengths)
 
-    decomposed_channels = np.array(decomposed_channels)
-    coeffs_lengths = np.array(coeffs_lengths)  # shape: (channels x (num_levels + 1))
-    normalized_data = np.array(normalized_data)
+    decomposed_channels = np.array(decomposed_channels)  # Shape: (channels x (scales * samples))
+    normalized_data = np.array(normalized_data)  # Shape: (channels x samples)
 
-    return decomposed_channels, coeffs_lengths, num_samples, normalized_data
+    return decomposed_channels, scales, num_samples, normalized_data
 
 def wavelet_reconstruct_window(decomposed_channels, coeffs_lengths, num_samples, wavelet='db2'):
     """
@@ -415,7 +449,7 @@ def filter_band_pass_windows(ndarray, sps):
     # f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
     # filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # return filtered_data
-    f_b, f_a = signal.butter(N=5, Wn=60, btype='low', fs=sps)
+    f_b, f_a = signal.butter(N=5, Wn=80, btype='low', fs=sps)
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
