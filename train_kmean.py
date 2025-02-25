@@ -119,70 +119,89 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
 def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2):
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec))
 
-# Define the CAE model in PyTorch
+
+# Define the CAE model with corrected dimensions
 class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim):
+        """
+        input_shape: tuple (height, width) of each 2D coefficient sample (e.g., (25, 512))
+        latent_dim: dimensionality of the latent representation
+        """
         super(CAE, self).__init__()
-        self.input_shape = input_shape
-        flattened_size = 4 * (self.input_shape[0] // 2) * (self.input_shape[1] // 2)
+        self.input_shape = input_shape  # e.g. (25, 512)
+        # For the encoder, we use a pooling layer with ceil_mode=True so that odd dimensions are rounded up.
+        encoder_height = int(np.ceil(self.input_shape[0] / 2))  # For 25, this becomes 13.
+        encoder_width = self.input_shape[1] // 2  # For 512, this becomes 256.
+        flattened_size = 4 * encoder_height * encoder_width  # 4 channels * 13 * 256
+
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),
+            nn.Conv2d(1, 8, kernel_size=3, padding=1),  # (B, 8, 25, 512)
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(8, 4, kernel_size=3, padding=1),
+            nn.MaxPool2d(2, ceil_mode=True),  # (B, 8, 13, 256)
+            nn.Conv2d(8, 4, kernel_size=3, padding=1),  # (B, 4, 13, 256)
             nn.ReLU(),
-            nn.Flatten(),
+            nn.Flatten(),  # (B, 4*13*256)
             nn.Linear(flattened_size, latent_dim)
         )
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, flattened_size),
-            nn.Unflatten(1, (4, self.input_shape[0] // 2, self.input_shape[1] // 2)),
-            nn.ConvTranspose2d(4, 8, kernel_size=3, padding=1),
+            nn.Unflatten(1, (4, encoder_height, encoder_width)),  # (B, 4, 13, 256)
+            nn.ConvTranspose2d(4, 8, kernel_size=3, padding=1),  # (B, 8, 13, 256)
             nn.ReLU(),
-            nn.Upsample(scale_factor=2),
-            nn.ConvTranspose2d(8, 1, kernel_size=3, padding=1),
+            # This transposed convolution upsamples with stride 2.
+            # With kernel_size=3, padding=1, and output_padding=(0,1),
+            # the height is recovered as: (13-1)*2 - 2*1 + 3 + 0 = 25
+            # and the width as: (256-1)*2 - 2*1 + 3 + 1 = 512.
+            nn.ConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1, output_padding=(0, 1)),
             nn.Sigmoid()
         )
+
     def forward(self, x):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded, encoded
 
-# Train the CAE using PyTorch
+
+# Train CAE function
 def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
+    """
+    Trains a convolutional autoencoder (CAE) on a list of 2D coefficient arrays.
+    coeffs_2d_list: list of numpy arrays, each with shape (height, width) (e.g., (25,512))
+    Returns the model file path, extracted encoder, and normalization values.
+    """
     if not coeffs_2d_list or len(coeffs_2d_list) == 0:
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Set the input shape based on the first sample, e.g. (25, 512)
+    # Determine the input shape from the first sample (e.g., (25,512))
     input_shape = coeffs_2d_list[0].shape
     print(f"Region '{region}' - Input shape for CAE: {input_shape}")
 
-    # Stack coefficients into an array of shape (N, 25, 512)
+    # Stack coefficients: (N, height, width)
     coeffs_array = np.stack(coeffs_2d_list, axis=0)
-    # Add a channel dimension: (N, 1, 25, 512)
+    # Add a channel dimension: (N, 1, height, width)
     coeffs_array = coeffs_array[:, np.newaxis, :, :]
     print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
 
-    # Normalize the data
+    # Normalize the data to [0,1]
     min_val = coeffs_array.min()
     max_val = coeffs_array.max()
     if max_val > min_val:
         coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
 
-    # Convert the numpy array to a PyTorch tensor and send to device
+    # Convert to PyTorch tensor and move to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
     print(f"Region '{region}' - Final input tensor shape: {coeffs_tensor.shape}")
 
-    # Initialize the CAE model with the correct input shape
+    # Initialize the CAE model
     cae = CAE(input_shape, latent_dim).to(device)
 
-    # Create a DataLoader for training
+    # Create DataLoader
     dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Set up the optimizer and loss function
+    # Define optimizer and loss function
     optimizer = optim.Adam(cae.parameters())
     criterion = nn.MSELoss()
 
@@ -191,19 +210,26 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
         for inputs, _ in dataloader:
             optimizer.zero_grad()
             outputs, _ = cae(inputs)
-            loss = criterion(outputs, inputs)
+            # If by any chance the output shape mismatches the input, crop them
+            if outputs.shape != inputs.shape:
+                min_h = min(outputs.shape[2], inputs.shape[2])
+                min_w = min(outputs.shape[3], inputs.shape[3])
+                inputs_cropped = inputs[:, :, :min_h, :min_w]
+                outputs = outputs[:, :, :min_h, :min_w]
+                loss = criterion(outputs, inputs_cropped)
+            else:
+                loss = criterion(outputs, inputs)
             loss.backward()
             optimizer.step()
-        print(f"Region '{region}' - Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+        print(f"Region '{region}' - Epoch {epoch + 1}/{epochs}, Loss: {loss.item():.4f}")
 
-    # Save the trained CAE model
+    # Save the trained model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
 
-    # Extract the encoder part from the CAE
+    # Extract the encoder portion for later use
     encoder = nn.Sequential(*list(cae.encoder.children()))
     return model_path, encoder, min_val, max_val
-
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device):
     coeffs_array = np.stack(coeffs_2d_list, axis=0)[..., np.newaxis]
