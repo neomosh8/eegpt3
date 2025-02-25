@@ -626,9 +626,9 @@ shard_paths = [
 ]
 
 # Set few-shot parameters
-K = 10  # Number of support examples per class
-Q = 5  # Number of query examples per class
-T = 128  # Sequence length per channel
+K = 5  # Number of support examples per class
+Q = 10 # Number of query examples per class
+T = 1024  # Sequence length per channel
 
 # Evaluate with randomly initialized model
 random_accuracy = matching_network_evaluation(model, shard_paths, K, Q, T, device)
