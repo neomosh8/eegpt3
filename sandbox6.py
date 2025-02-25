@@ -2,46 +2,45 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# Read the training log file assuming it is whitespace-delimited.
-# The file should have a header like "step train_loss".
+# -----------------------------
+# 1. Read the data from file
+# -----------------------------
 data = pd.read_csv("training.log", delim_whitespace=True)
+steps = data['step'].values
+loss = data['train_loss'].values
 
-# Extract training steps and loss values.
-steps = data['step']
-loss = data['train_loss']
+# -----------------------------
+# 2. Calculate cumulative percentage of losses ≤ 1.03
+# -----------------------------
+threshold = 1.03
+cumulative_below = np.cumsum(loss <= threshold)
+cumulative_percent = (cumulative_below / np.arange(1, len(loss) + 1)) * 100
 
-# Compute a smoothed loss curve using a moving average.
-def moving_average(data, window_size=3):
+# -----------------------------
+# 3. Calculate moving average of actual loss
+# -----------------------------
+def moving_average(data, window_size=50):
     return np.convolve(data, np.ones(window_size) / window_size, mode='valid')
 
-window_size = 3  # You can adjust the window size as needed.
+window_size = 50
 smoothed_loss = moving_average(loss, window_size)
-smoothed_steps = steps[window_size - 1:]  # Adjust steps to match the smoothed data.
+smoothed_steps = steps[window_size - 1:]  # Align steps with smoothed data
 
-# Compute the pace of loss change: the difference between consecutive loss values.
-loss_diff = np.diff(loss)
-steps_diff = steps[1:]  # Corresponding steps for the differences.
+# Print moving average values of loss
+print(f"Moving Average of Loss Values (window size = {window_size}):")
+for step, value in zip(smoothed_steps, smoothed_loss):
+    print(f"Step {step}: {value:.4f}")
 
-# Create two subplots: one for the loss curves, one for the pace analysis.
-fig, axes = plt.subplots(2, 1, figsize=(10, 10))
-
-# Plot the raw training loss and the smoothed loss.
-axes[0].plot(steps, loss, 'o-', label='Raw Training Loss', alpha=0.7)
-axes[0].plot(smoothed_steps, smoothed_loss, 's--', label='Smoothed Loss (MA)', alpha=0.9)
-axes[0].set_title('Training Loss vs. Steps')
-axes[0].set_xlabel('Training Steps')
-axes[0].set_ylabel('Loss')
-axes[0].grid(True)
-axes[0].legend()
-
-# Plot the pace of training: the change (delta) in loss between successive steps.
-axes[1].plot(steps_diff, loss_diff, 'o-', color='orange', label='Loss Change (Delta)')
-axes[1].axhline(0, color='black', linewidth=0.8, linestyle='--')
-axes[1].set_title('Pace of Training Loss Change')
-axes[1].set_xlabel('Training Steps')
-axes[1].set_ylabel('Loss Difference')
-axes[1].grid(True)
-axes[1].legend()
-
+# -----------------------------
+# 4. Plotting the Results (only cumulative percentage)
+# -----------------------------
+plt.figure(figsize=(12, 6))
+plt.plot(steps, cumulative_percent, 'b.-', label=f'Cumulative % of Loss ≤ {threshold}')
+plt.title('Cumulative Percentage of Losses ≤ 1.03 vs. Steps')
+plt.xlabel('Training Step')
+plt.ylabel('Cumulative Percentage (%)')
+plt.grid(True)
+plt.legend()
 plt.tight_layout()
 plt.show()
+print(cumulative_percent[-1])

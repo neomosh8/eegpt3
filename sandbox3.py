@@ -2,8 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 
 # Parameters
-base_lr =  4e-3
-max_steps = 75000  # Total training steps
+base_lr =  5e-4
+max_steps = 152600  # Total training steps
 
 # Dummy optimizer
 optimizer = torch.optim.AdamW([torch.zeros(1)], lr=base_lr)
