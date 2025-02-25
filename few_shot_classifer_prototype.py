@@ -491,8 +491,8 @@ class DataLoaderLiteAllInMemory:
 
 # --- Hyperparameters & Configurations ---
 # We use 512 tokens for prompt and 512 tokens for completion.
-PROMPT_LEN = 256
-COMP_LEN = 256
+PROMPT_LEN = 512
+COMP_LEN = 512
 # For the in-context (few-shot) classification, we prepend the candidate’s support pair.
 # Total sequence length = support (1024) + query prompt (512) + query completion (512) = 2048.
 SEQ_LEN = PROMPT_LEN + COMP_LEN + PROMPT_LEN + COMP_LEN
