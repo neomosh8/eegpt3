@@ -233,7 +233,7 @@ class CausalSelfAttentionWithRoPE(nn.Module):
         return y
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 1024
     vocab_size: int = 82
     # vocab_size: int = 10799
     # Small model configuration
