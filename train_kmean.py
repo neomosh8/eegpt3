@@ -1,5 +1,3 @@
-import io
-
 import numpy as np
 from sklearn.cluster import KMeans
 import joblib
@@ -9,9 +7,17 @@ import asyncio
 import aioboto3
 from concurrent.futures import ProcessPoolExecutor
 import os
+import io
 
 from create_text_files_from_csv_2 import create_regional_bipolar_channels
 from utils import list_csv_files_in_folder, list_s3_folders, call_gpt_for_instructions, calculate_sps, preprocess_data, wavelet_decompose_window
+
+# Updated calculate_sps (example implementation - adjust based on your utils.py)
+def calculate_sps_from_df(df):
+    # Assuming timestamp is in a column named 'timestamp' or the first column
+    time_col = df.get('timestamp', df.columns[0])
+    dt = np.diff(time_col).mean()
+    return 1.0 / dt if dt != 0 else 1.0
 
 def process_csv_for_coeffs(csv_key, bucket, local_dir=None, window_length_sec=1.96, wvlet='db2', level=4, num_samples_per_file=10):
     s3 = boto3.client("s3")
@@ -30,7 +36,7 @@ def process_csv_for_coeffs(csv_key, bucket, local_dir=None, window_length_sec=1.
     print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
 
     regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
-    original_sps = calculate_sps(csv_key)  # Adjust if calculate_sps needs a file path
+    original_sps = calculate_sps_from_df(df)  # Pass DataFrame instead of csv_key
     regional_preprocessed = {}
     new_sps_val = None
     for key, signal_array in regional_bipolar.items():
