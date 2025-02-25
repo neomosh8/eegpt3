@@ -154,27 +154,26 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Stack coefficients into (n_samples, scales, time_points)
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)  # Shape: (200, 25, 512)
-    if len(coeffs_array.shape) != 3:
-        print(f"Invalid CWT coefficients shape in region '{region}': {coeffs_array.shape}")
-        return None, None, None, None
+    # Correctly set input_shape
+    input_shape = coeffs_2d_list[0].shape  # (25, 512)
+    print(f"Region '{region}' - Input shape for CAE: {input_shape}")
 
-    # Add channel dimension: (n_samples, 1, scales, time_points)
-    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # Shape: (200, 1, 25, 512)
+    # Stack coefficients
+    coeffs_array = np.stack(coeffs_2d_list, axis=0)  # (200, 25, 512)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # (200, 1, 25, 512)
     print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
 
-    # Normalize the array
+    # Normalize
     min_val = coeffs_array.min()
     max_val = coeffs_array.max()
     if max_val > min_val:
         coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
 
-    # Convert to PyTorch tensor
+    # Convert to tensor
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
     print(f"Region '{region}' - Final input tensor shape: {coeffs_tensor.shape}")
-
+    cae = CAE(input_shape, latent_dim).to(device)
     # DataLoader
     dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
