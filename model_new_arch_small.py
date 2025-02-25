@@ -496,9 +496,9 @@ class DataLoaderLiteAllInMemory:
 # Training Setup & Loop (No Epochs)
 #########################
 # Training hyperparameters
-B = 16  # micro-batch size (sequences per mini-batch)
+B = 8  # micro-batch size (sequences per mini-batch)
 T = GPTConfig.block_size  # sequence length (tokens per sequence)
-desired_B_eff = 16  # effective batch size (number of sequences per optimizer step)
+desired_B_eff = 32  # effective batch size (number of sequences per optimizer step)
 grad_accum_steps = desired_B_eff // B  # number of micro-steps to accumulate gradients
 if master_process:
     print(f"Using grad_accum_steps: {grad_accum_steps}")
@@ -726,7 +726,7 @@ def train_step_TESLA(model, optimizer, scheduler, train_loader, grad_accum_steps
 
 val_steps_needed = (val_loader.total_len + B * T * ddp_world_size - 1) // (
         B * T * ddp_world_size)  # Ceiling division
-val_steps_needed = 10
+# val_steps_needed = 10
 if master_process:
     print("Starting training...")
     loss_plotter = LossPlotter(plot_interval=10, window=50)
@@ -775,7 +775,7 @@ for step in range(max_steps):
             f.write(f"{step} {loss:.6f}\n")
 
     # Validation (unchanged logic, just ensure val_loader provides [B, C, T] targets)
-    if (step % 1000 == 0):
+    if (step % 100 == 0):
         model.eval()
         val_loader.reset()
         if master_process:
