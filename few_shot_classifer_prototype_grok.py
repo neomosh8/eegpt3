@@ -627,8 +627,8 @@ shard_paths = [
 ]
 
 # Set few-shot parameters
-K = 10  # Number of support examples per class
-Q = 10 # Number of query examples per class
+K = 50  # Number of support examples per class
+Q = 50 # Number of query examples per class
 T = 1024  # Sequence length per channel
 
 # Evaluate with randomly initialized model
