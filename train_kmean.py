@@ -397,7 +397,7 @@ def get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device):
 
 
 # Train GMM on latent space
-def train_gmm(latent_reps, max_components=10, output_folder="/tmp", region="unknown"):
+def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unknown"):
     if len(latent_reps) < 2:
         print(f"Not enough data for GMM in region '{region}'.")
         return None, None, None
