@@ -457,7 +457,8 @@ if __name__ == "__main__":
     # Select random folders from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    selected_folders = all_folders[:1]
+    # selected_folders = all_folders[:1]
+    selected_folders = ['ds002336']
 
     # Collect CSV files from selected folders
     csv_files = []
@@ -499,8 +500,6 @@ if __name__ == "__main__":
         latent_reps = get_latent_reps(
             encoder,
             all_coeffs_unified,
-            min_val,
-            max_val,
             device
         )
         print(f"Latent space shape: {latent_reps.shape}")
