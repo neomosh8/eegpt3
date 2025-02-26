@@ -330,7 +330,7 @@ class CAE(nn.Module):
         return x, encoded  # Return reconstructed output and encoded representation
 
 
-def train_cae(coeffs_2d_list, latent_dim=64, epochs=30, batch_size=32, output_folder="/tmp", region="unknown"):
+def train_cae(coeffs_2d_list, latent_dim=64, epochs=100, batch_size=32, output_folder="/tmp", region="unknown"):
     """
     Train a Convolutional Autoencoder on 2D CWT coefficients with per-image standardization.
 
@@ -432,7 +432,7 @@ from sklearn.mixture import BayesianGaussianMixture
 from sklearn.model_selection import KFold
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
-def train_gmm(latent_reps, max_components=30, output_folder="/tmp", region="unknown", use_gpu=False):
+def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unknown", use_gpu=False):
     if len(latent_reps) < 2:
         print(f"Not enough data for GMM in region '{region}'.")
         return None, None, None
@@ -482,15 +482,15 @@ if __name__ == "__main__":
     # Select random folders from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    # selected_folders = all_folders[:1]
-    selected_folders = ['ds002336']
+    selected_folders = all_folders[:10]
+    # selected_folders = ['ds002336']
 
     # Collect CSV files from selected folders
     csv_files = []
     for i, folder in enumerate(selected_folders):
         print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(2, len(all_files)))
+        selected_files = random.sample(all_files, min(5, len(all_files)))
         csv_files.extend(selected_files)
         print(f"Selected {len(selected_files)} files")
 
@@ -500,7 +500,7 @@ if __name__ == "__main__":
     all_coeffs = collect_coeffs_from_s3(
         csv_files,
         "dataframes--use1-az6--x-s3",
-        num_samples_per_file=250,
+        num_samples_per_file=400,
         window_length_sec=2
     )
 
