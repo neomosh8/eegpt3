@@ -336,9 +336,11 @@ class CAE(nn.Module):
         return x, encoded  # Return reconstructed output and encoded representation
 
 
-def train_cae(coeffs_2d_list, latent_dim=64, epochs=100, batch_size=32, output_folder="/tmp", region="unknown"):
+def train_cae(coeffs_2d_list, latent_dim=128, epochs=300, batch_size=8, output_folder="/tmp", region="unknown",
+              early_stop_patience=10):
     """
-    Train a Convolutional Autoencoder on 2D CWT coefficients with per-image standardization.
+    Train a Convolutional Autoencoder on 2D CWT coefficients with per-image standardization,
+    incorporating a learning rate scheduler and early stopping.
 
     Args:
         coeffs_2d_list (list): List of 2D CWT coefficient arrays.
@@ -347,6 +349,7 @@ def train_cae(coeffs_2d_list, latent_dim=64, epochs=100, batch_size=32, output_f
         batch_size (int): Batch size for training.
         output_folder (str): Folder to save the model.
         region (str): Region name for logging.
+        early_stop_patience (int): Number of epochs with no improvement before stopping early.
 
     Returns:
         tuple: (model_path, encoder, None, None)
@@ -383,21 +386,51 @@ def train_cae(coeffs_2d_list, latent_dim=64, epochs=100, batch_size=32, output_f
     optimizer = optim.Adam(cae.parameters())
     criterion = nn.MSELoss()
 
+    # Learning rate scheduler: reduce LR when the loss plateaus
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=5, verbose=True)
+
+    best_loss = float('inf')
+    early_stop_counter = 0
+
     # Training loop
     for epoch in range(epochs):
+        cae.train()
+        running_loss = 0.0
+        num_batches = 0
+
         for inputs, _ in dataloader:
             optimizer.zero_grad()
             outputs, _ = cae(inputs)
             loss = criterion(outputs, inputs)
             loss.backward()
             optimizer.step()
-        print(f"Region '{region}' - Epoch {epoch + 1}/{epochs}, Loss: {loss.item():.4f}")
+
+            running_loss += loss.item()
+            num_batches += 1
+
+        epoch_loss = running_loss / num_batches
+        print(f"Region '{region}' - Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}")
+
+        # Step the scheduler with the average epoch loss
+        scheduler.step(epoch_loss)
+
+        # Early stopping check
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= early_stop_patience:
+                print(f"Early stopping triggered after epoch {epoch + 1}.")
+                break
 
     # Save model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
     encoder = cae.encoder  # This now works!
     return model_path, encoder, None, None
+
+
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, device):
     """
@@ -488,7 +521,7 @@ if __name__ == "__main__":
     # Select random folders from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    selected_folders = all_folders[:10]
+    selected_folders = all_folders[:50]
     # selected_folders = ['ds002336']
 
     # Collect CSV files from selected folders
@@ -496,7 +529,7 @@ if __name__ == "__main__":
     for i, folder in enumerate(selected_folders):
         print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(5, len(all_files)))
+        selected_files = random.sample(all_files, min(2, len(all_files)))
         csv_files.extend(selected_files)
         print(f"Selected {len(selected_files)} files")
 
