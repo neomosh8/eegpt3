@@ -537,7 +537,7 @@ if __name__ == "__main__":
         # Step 5: Generate QA plots if both models trained successfully
         if gmm_path is not None:
             # Load the full CAE model
-            cae = CAE(input_shape=(25, 512), latent_dim=32)  # Adjust parameters as per your CAE definition
+            cae = CAE(input_shape=(25, 512), latent_dim=64)  # Adjust parameters as per your CAE definition
             cae.load_state_dict(torch.load(cae_path))
             cae.to(device)
 
