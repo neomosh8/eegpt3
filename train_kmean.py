@@ -532,8 +532,6 @@ if __name__ == "__main__":
         gmm_path, n_components, silhouette = train_gmm(
             latent_reps,
             region="unified",  # For logging purposes
-            n_init=10,  # Optional: number of initializations
-            cv_splits=5  # Optional: number of cross-validation splits (set to 0 if not used)
         )
 
         # Step 5: Generate QA plots if both models trained successfully
