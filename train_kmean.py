@@ -303,12 +303,11 @@ class CAE(nn.Module):
         )
 
     def forward(self, x):
-        x = self.encoder_conv(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        encoded = self.encoder_fc(x)
-        x = self.decoder_fc(encoded)
-        x = x.view(x.size(0), 16, self.encoder_height, self.encoder_width)  # Unflatten
-        decoded = self.decoder_conv(x)
+        x = self.encoder_conv(x)  # [B, 16, 13, 256]
+        x = x.view(x.size(0), -1)  # [B, 53,248]
+        encoded = self.encoder_fc(x)  # [B, latent_dim]
+        x = self.decoder_fc(encoded)  # [B, 53,248]
+        decoded = self.decoder_conv(x)  # [B, 53,248] -> [B, 16, 13, 256] -> [B, 1, 25, 512]
         return decoded, encoded
 
 
@@ -446,14 +445,14 @@ if __name__ == "__main__":
     # Select random folders from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    selected_folders = all_folders[:5]
+    selected_folders = all_folders[:1]
 
     # Collect CSV files from selected folders
     csv_files = []
     for i, folder in enumerate(selected_folders):
         print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(10, len(all_files)))
+        selected_files = random.sample(all_files, min(2, len(all_files)))
         csv_files.extend(selected_files)
         print(f"Selected {len(selected_files)} files")
 
