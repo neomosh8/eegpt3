@@ -386,7 +386,7 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
     encoder = cae.encoder  # This now works!
-    return model_path, encoder, min_val, max_val
+    return model_path, encoder, None, None
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, device):
     """
