@@ -45,23 +45,6 @@ from utils import (
 from train_kmean import CAE
 
 # --------------------------------------------------------------------------------
-# Utility functions for EEG channel processing
-def average_eeg_channels(df, channels_to_drop):
-    filtered_columns = [col for col in df.columns if col not in channels_to_drop]
-    left_channels = []
-    right_channels = []
-    for ch in filtered_columns:
-        if ch.endswith('z'):
-            continue
-        if not ch[-1].isdigit():
-            continue
-        if int(ch[-1]) % 2 == 0:
-            right_channels.append(ch)
-        else:
-            left_channels.append(ch)
-    left_data = df[left_channels].mean(axis=1).values if left_channels else np.zeros(len(df))
-    right_data = df[right_channels].mean(axis=1).values if right_channels else np.zeros(len(df))
-    return left_data, right_data
 
 def create_regional_bipolar_channels(df, channels_to_drop):
     valid_channels = [col for col in df.columns if col not in channels_to_drop]

@@ -302,26 +302,47 @@ if __name__ == "__main__":
         window_length_sec=2
     )
 
+    # Step 1: Combine coefficients from all regions into one list
+    all_coeffs_unified = []
+    for region in all_coeffs:  # e.g., ["frontal", "motor_temporal", "parietal_occipital"]
+        all_coeffs_unified.extend(all_coeffs[region])
+    print(f"Total coefficients across all regions: {len(all_coeffs_unified)}")
+
+    # Set up S3 client and device
     s3 = boto3.client("s3")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for region, coeffs_2d_list in all_coeffs.items():
-        print(f"\n--- Region: {region} ---")
-        if not coeffs_2d_list:
-            print("No data. Skipping.")
-            continue
 
-        cae_path, encoder, min_val, max_val = train_cae(coeffs_2d_list, region=region)
-        if cae_path is None:
-            continue
+    # Step 2: Train a unified CAE
+    cae_path, encoder, min_val, max_val = train_cae(
+        all_coeffs_unified,
+        region="unified"  # For logging purposes
+    )
 
-        latent_reps = get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device)
+    if cae_path is not None:
+        # Step 3: Get latent representations
+        latent_reps = get_latent_reps(
+            encoder,
+            all_coeffs_unified,
+            min_val,
+            max_val,
+            device
+        )
         print(f"Latent space shape: {latent_reps.shape}")
 
-        gmm_path, n_components, silhouette = train_gmm(latent_reps, region=region)
+        # Step 4: Train a shared GMM
+        gmm_path, n_components, silhouette = train_gmm(
+            latent_reps,
+            region="unified"  # For logging purposes
+        )
 
+        # Step 5: Upload models to S3 and clean up
         if cae_path:
-            s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", f"cae_models/cae_{region}.pt")
+            s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", "cae_models/cae_unified.pt")
             os.remove(cae_path)
+            print("Uploaded unified CAE model")
         if gmm_path:
-            s3.upload_file(gmm_path, "dataframes--use1-az6--x-s3", f"gmm_models/gmm_{region}.pkl")
+            s3.upload_file(gmm_path, "dataframes--use1-az6--x-s3", "gmm_models/gmm_unified.pkl")
             os.remove(gmm_path)
+            print("Uploaded unified GMM model")
+    else:
+        print("CAE training failed, skipping GMM training")
