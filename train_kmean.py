@@ -313,7 +313,7 @@ class CAE(nn.Module):
         self.decoder_fc = nn.Linear(latent_dim, flattened_size)
         self.decoder_conv = nn.Sequential(
             nn.Unflatten(1, (16, self.encoder_height, self.encoder_width)),
-            nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1)
+            nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=(0, 1))
         )
 
     def forward(self, x):
@@ -386,7 +386,7 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
     encoder = cae.encoder  # This now works!
-    return cae_path, encoder, min_val, max_val
+    return model_path, encoder, min_val, max_val
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, device):
     """
