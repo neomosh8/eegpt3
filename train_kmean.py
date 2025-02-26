@@ -276,39 +276,53 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
 def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold))
 # Define the CAE model with corrected dimensions
+import torch
+import torch.nn as nn
+
 class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim):
         super(CAE, self).__init__()
-        self.input_shape = input_shape  # (25, 512)
+        self.input_shape = input_shape
 
-        # Encoder
+        # Define convolutional part of the encoder
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),  # [B, 16, 25, 512]
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True),  # [B, 16, 13, 256]
+            nn.MaxPool2d(2, ceil_mode=True)
         )
+
+        # Calculate the size after convolution for the fully connected layer
         with torch.no_grad():
             dummy_input = torch.zeros(1, 1, *input_shape)
-            dummy_output = self.encoder_conv(dummy_input)
-            self.encoder_height = dummy_output.shape[2]  # 13
-            self.encoder_width = dummy_output.shape[3]  # 256
-            self.flattened_size = 16 * self.encoder_height * self.encoder_width
-        self.encoder_fc = nn.Linear(self.flattened_size, latent_dim)
+            conv_output = self.encoder_conv(dummy_input)
+            self.encoder_height = conv_output.shape[2]
+            self.encoder_width = conv_output.shape[3]
+            flattened_size = 16 * self.encoder_height * self.encoder_width
 
-        # Decoder
-        self.decoder_fc = nn.Linear(latent_dim, self.flattened_size)
+        # Define fully connected part
+        self.encoder_fc = nn.Linear(flattened_size, latent_dim)
+
+        # Combine into a single encoder module
+        self.encoder = nn.Sequential(
+            self.encoder_conv,
+            nn.Flatten(),  # Flatten the output of convolutions
+            self.encoder_fc
+        )
+
+        # Define decoder (example)
+        self.decoder_fc = nn.Linear(latent_dim, flattened_size)
         self.decoder_conv = nn.Sequential(
-            nn.Unflatten(1, (16, self.encoder_height, self.encoder_width)),  # [B, 16, 13, 256]
-            nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=(0, 1)),  # [B, 1, 25, 512]
+            nn.Unflatten(1, (16, self.encoder_height, self.encoder_width)),
+            nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1)
         )
 
     def forward(self, x):
-        x = self.encoder_conv(x)  # [B, 16, 13, 256]
-        x = x.view(x.size(0), -1)  # [B, 53,248]
-        encoded = self.encoder_fc(x)  # [B, latent_dim]
-        x = self.decoder_fc(encoded)  # [B, 53,248]
-        decoded = self.decoder_conv(x)  # [B, 53,248] -> [B, 16, 13, 256] -> [B, 1, 25, 512]
-        return decoded, encoded
+        # Pass input through encoder
+        encoded = self.encoder(x)
+        # Decode from the latent representation
+        x = self.decoder_fc(encoded)
+        x = self.decoder_conv(x)
+        return x, encoded  # Return reconstructed output and encoded representation
 
 
 def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
@@ -371,10 +385,8 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_fol
     # Save model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
-    encoder = cae.encoder
-
-    # No min/max values needed since we standardize per image
-    return model_path, encoder, None, None
+    encoder = cae.encoder  # This now works!
+    return cae_path, encoder, min_val, max_val
 # Get latent representations
 def get_latent_reps(encoder, coeffs_2d_list, device):
     """
