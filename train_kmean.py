@@ -19,6 +19,114 @@ from create_text_files_from_csv_2 import create_regional_bipolar_channels
 from utils import call_gpt_for_instructions, preprocess_data, wavelet_decompose_window, list_csv_files_in_folder, \
     list_s3_folders
 
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import torch
+import joblib
+
+
+def generate_qa_plots(all_coeffs_unified, cae, gmm, min_val, max_val, device):
+    """
+    Generate quality assurance plots for latent space and autoencoder performance.
+
+    Parameters:
+    - all_coeffs_unified: List of 2D wavelet coefficient arrays (e.g., [(25, 512), ...])
+    - cae: Trained Convolutional Autoencoder model
+    - gmm: Trained Gaussian Mixture Model
+    - min_val: Minimum value used for normalization during training
+    - max_val: Maximum value used for normalization during training
+    - device: PyTorch device (e.g., 'cuda' or 'cpu')
+    """
+    # Create QA folder if it doesn’t exist
+    os.makedirs('QA', exist_ok=True)
+
+    # Prepare the data: stack coefficients and normalize
+    coeffs_array = np.stack(all_coeffs_unified, axis=0)  # Shape: (N, 25, 512)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # Shape: (N, 1, 25, 512)
+    coeffs_array = (coeffs_array - min_val) / (max_val - min_val)  # Normalize to [0,1]
+    coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
+
+    # Generate latent representations using the encoder
+    cae.eval()  # Set to evaluation mode
+    with torch.no_grad():
+        latent_reps = cae.encoder(coeffs_tensor).cpu().numpy()  # Shape: (N, 32)
+
+    # Get GMM cluster labels
+    labels = gmm.predict(latent_reps)
+
+    # **Plot 1: PCA of Latent Space**
+    pca = PCA(n_components=2)
+    latent_2d_pca = pca.fit_transform(latent_reps)
+    explained_var = pca.explained_variance_ratio_  # How much variance is explained
+
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(latent_2d_pca[:, 0], latent_2d_pca[:, 1], c=labels, cmap='tab10', alpha=0.6)
+    plt.colorbar(scatter)
+    plt.title(
+        f'PCA of Latent Space with GMM Clusters\nExplained Variance: {explained_var[0]:.2f}, {explained_var[1]:.2f}')
+    plt.xlabel('PCA Component 1')
+    plt.ylabel('PCA Component 2')
+    plt.savefig('QA/latent_space_pca.png')
+    plt.close()
+
+    # **Plot 2: t-SNE of Latent Space**
+    tsne = TSNE(n_components=2, random_state=42)
+    latent_2d_tsne = tsne.fit_transform(latent_reps)
+
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(latent_2d_tsne[:, 0], latent_2d_tsne[:, 1], c=labels, cmap='tab10', alpha=0.6)
+    plt.colorbar(scatter)
+    plt.title('t-SNE of Latent Space with GMM Clusters')
+    plt.xlabel('t-SNE Component 1')
+    plt.ylabel('t-SNE Component 2')
+    plt.savefig('QA/latent_space_tsne.png')
+    plt.close()
+
+    # **Plot 3: Encoder/Decoder Reconstructions**
+    num_samples = 5
+    indices = np.random.choice(len(all_coeffs_unified), num_samples, replace=False)
+
+    for i, idx in enumerate(indices):
+        # Prepare original sample
+        original = all_coeffs_unified[idx]  # Shape: (25, 512)
+        original_norm = (original - min_val) / (max_val - min_val)  # Normalize
+        original_tensor = torch.tensor(original_norm[np.newaxis, np.newaxis, :, :], dtype=torch.float32).to(device)
+
+        # Get reconstruction
+        with torch.no_grad():
+            reconstructed, _ = cae(original_tensor)
+            reconstructed = reconstructed.cpu().numpy()[0, 0]  # Shape: (25, 512)
+
+        # Calculate Mean Squared Error
+        mse = np.mean((original_norm - reconstructed) ** 2)
+
+        # Create side-by-side plot
+        plt.figure(figsize=(12, 4))
+
+        # Original heatmap
+        plt.subplot(1, 2, 1)
+        plt.imshow(original_norm, aspect='auto', cmap='viridis', vmin=0, vmax=1)
+        plt.title(f'Original Sample {i + 1} (Normalized)')
+        plt.xlabel('Time')
+        plt.ylabel('Frequency Scale')
+        plt.colorbar()
+
+        # Reconstructed heatmap
+        plt.subplot(1, 2, 2)
+        plt.imshow(reconstructed, aspect='auto', cmap='viridis', vmin=0, vmax=1)
+        plt.title(f'Reconstructed Sample {i + 1}\nMSE: {mse:.6f}')
+        plt.xlabel('Time')
+        plt.ylabel('Frequency Scale')
+        plt.colorbar()
+
+        plt.tight_layout()
+        plt.savefig(f'QA/reconstruction_{i + 1}.png')
+        plt.close()
+
+
 
 def calculate_sps_from_df(df):
     time_col = df.get('timestamp', df.columns[0])
@@ -281,10 +389,12 @@ def train_gmm(latent_reps, max_components=10, output_folder="/tmp", region="unkn
 
 # Main execution
 if __name__ == "__main__":
+    # Select random folders from S3
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
     selected_folders = all_folders[:3]
 
+    # Collect CSV files from selected folders
     csv_files = []
     for i, folder in enumerate(selected_folders):
         print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
@@ -295,6 +405,7 @@ if __name__ == "__main__":
 
     print(f"Total files: {len(csv_files)}")
 
+    # Collect wavelet coefficients from S3
     all_coeffs = collect_coeffs_from_s3(
         csv_files,
         "dataframes--use1-az6--x-s3",
@@ -335,7 +446,20 @@ if __name__ == "__main__":
             region="unified"  # For logging purposes
         )
 
-        # Step 5: Upload models to S3 and clean up
+        # Step 5: Generate QA plots if both models trained successfully
+        if gmm_path is not None:
+            # Load the full CAE model
+            cae = CAE(input_shape=(25, 512), latent_dim=32)  # Adjust parameters as per your CAE definition
+            cae.load_state_dict(torch.load(cae_path))
+            cae.to(device)
+
+            # Load the GMM model
+            gmm = joblib.load(gmm_path)
+
+            # Generate quality assurance plots
+            generate_qa_plots(all_coeffs_unified, cae, gmm, min_val, max_val, device)
+
+        # Step 6: Upload models to S3 and clean up
         if cae_path:
             s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", "cae_models/cae_unified.pt")
             os.remove(cae_path)
