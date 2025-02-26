@@ -136,7 +136,20 @@ def calculate_sps_from_df(df):
 
 
 # Process CSV to collect 2D CWT coefficients
-def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per_file=10):
+def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per_file=10, z_threshold=3.0):
+    """
+    Process a CSV file to extract wavelet coefficients with artifact rejection during normalization.
+
+    Parameters:
+    - csv_key: S3 key of the CSV file
+    - bucket: S3 bucket name
+    - window_length_sec: Length of each window in seconds
+    - num_samples_per_file: Number of windows to sample per file
+    - z_threshold: Z-score threshold for artifact rejection (default: 3.0)
+
+    Returns:
+    - Dictionary of wavelet coefficients for each brain region
+    """
     s3 = boto3.client("s3")
     response = s3.get_object(Bucket=bucket, Key=csv_key)
     df = pd.read_csv(response['Body'])
@@ -163,22 +176,50 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
         if new_sps_val is None:
             new_sps_val = new_sps
 
-    all_data = np.concatenate([regional_preprocessed[region] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
+    # Concatenate all regional signals for global statistics
+    all_data = np.concatenate(
+        [regional_preprocessed[region] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
     if len(all_data) == 0:
         return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
+
+    # Initial global mean and std (used later for final normalization)
     global_mean = np.mean(all_data)
     global_std = np.std(all_data) if np.std(all_data) > 0 else 1e-8
-    for key in regional_preprocessed:
-        regional_preprocessed[key] = (regional_preprocessed[key] - global_mean) / global_std
 
-    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed if len(regional_preprocessed[region]) > 0)
+    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed if
+                     len(regional_preprocessed[region]) > 0)
     if min_length == 0:
         return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     n_window_samples = int(window_length_sec * new_sps_val)
     num_windows = min_length // n_window_samples
 
-    selected_indices = np.random.choice(num_windows, min(num_samples_per_file, num_windows), replace=False)
+    # Step 1: Artifact rejection - Calculate window-level statistics
+    window_stats = []
+    for i in range(num_windows):
+        window_start = i * n_window_samples
+        window_end = window_start + n_window_samples
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
+                                 for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
+        if window_data.size == 0:
+            continue
+        window_mean = np.mean(window_data)  # Using mean as the summary statistic
+        window_stats.append(window_mean)
 
+    # Step 2 & 3: Compute global statistics and Z-scores for windows
+    window_stats = np.array(window_stats)
+    window_mu = np.mean(window_stats)
+    window_sigma = np.std(window_stats) if np.std(window_stats) > 0 else 1e-8
+    z_scores = (window_stats - window_mu) / window_sigma
+
+    # Step 4 & 5: Identify and retain non-outlier windows
+    keep_indices = np.where(np.abs(z_scores) <= z_threshold)[0]
+    discarded_count = num_windows - len(keep_indices)
+    print(f"Discarded {discarded_count} windows out of {num_windows} due to artifact rejection (|Z| > {z_threshold}).")
+
+    # Step 6: Sample from retained windows
+    selected_indices = np.random.choice(keep_indices, min(num_samples_per_file, len(keep_indices)), replace=False)
+
+    # Step 7: Process retained windows
     coeffs_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     for i in selected_indices:
         window_start = i * n_window_samples
@@ -187,6 +228,8 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
                                  for region in coeffs_dict if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
+        # Normalize retained window data
+        window_data = (window_data - global_mean) / global_std
         decomposed_channels, _, _, _ = wavelet_decompose_window(
             window_data,
             wavelet='cmor1.5-1.0',
@@ -208,7 +251,8 @@ async def download_file(s3_client, bucket, csv_key):
     return csv_key, body
 
 # Collect coefficients from S3
-async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2):
+# Collect coefficients from S3
+async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
     all_coeffs = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     async with aioboto3.Session().client("s3") as s3_client:
         tasks = [download_file(s3_client, bucket, csv_file) for csv_file in csv_files]
@@ -216,7 +260,7 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
         csv_data = {key: pd.read_csv(io.BytesIO(body)) for key, body in results}
 
         with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(process_csv_for_coeffs, key, bucket, window_length_sec, num_samples_per_file)
+            futures = [executor.submit(process_csv_for_coeffs, key, bucket, window_length_sec, num_samples_per_file, z_threshold)
                        for key in csv_data.keys()]
             for future in futures:
                 coeffs = future.result()
@@ -224,10 +268,8 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
                     all_coeffs[region].extend(coeffs[region])
     return all_coeffs
 
-def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2):
-    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec))
-
-
+def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
+    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold))
 # Define the CAE model with corrected dimensions
 class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim):
@@ -271,7 +313,7 @@ class CAE(nn.Module):
 
 
 # Train CAE function
-def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
+def train_cae(coeffs_2d_list, latent_dim=32, epochs=100, batch_size=32, output_folder="/tmp", region="unknown"):
     """
     Trains a convolutional autoencoder (CAE) on a list of 2D coefficient arrays.
     coeffs_2d_list: list of numpy arrays, each with shape (height, width) (e.g., (25,512))
