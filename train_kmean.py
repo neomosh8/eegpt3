@@ -138,18 +138,20 @@ def calculate_sps_from_df(df):
 # Process CSV to collect 2D CWT coefficients
 def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per_file=10, z_threshold=3.0):
     """
-    Process a CSV file to extract wavelet coefficients with artifact rejection during normalization.
+    Process a CSV file from S3, normalize per regional channel, window the signal, and reject artifacts.
 
-    Parameters:
-    - csv_key: S3 key of the CSV file
-    - bucket: S3 bucket name
-    - window_length_sec: Length of each window in seconds
-    - num_samples_per_file: Number of windows to sample per file
-    - z_threshold: Z-score threshold for artifact rejection (default: 3.0)
+    Args:
+        csv_key (str): S3 key to the CSV file.
+        bucket (str): S3 bucket name.
+        window_length_sec (float): Length of each window in seconds.
+        num_samples_per_file (int): Number of windows to sample after artifact rejection.
+        z_threshold (float): Z-score threshold for artifact rejection.
 
     Returns:
-    - Dictionary of wavelet coefficients for each brain region
+        dict: Dictionary with regional keys ("frontal", "motor_temporal", "parietal_occipital")
+              mapping to lists of CWT coefficients.
     """
+    # Initialize S3 client and load CSV
     s3 = boto3.client("s3")
     response = s3.get_object(Bucket=bucket, Key=csv_key)
     df = pd.read_csv(response['Body'])
@@ -158,6 +160,7 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
     all_columns = list(df.columns)
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
 
+    # Skip if instructed
     if instructions.get("action") == "skip":
         print(f"Skipping dataset '{base_name}'.")
         return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
@@ -165,10 +168,13 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
     channels_to_drop = instructions.get("channels_to_drop", [])
     print(f"Processing '{base_name}'. Dropping: {channels_to_drop}")
 
+    # Create regional bipolar channels
     regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
     original_sps = calculate_sps_from_df(df)
     regional_preprocessed = {}
     new_sps_val = None
+
+    # Preprocess each regional channel
     for key, signal_array in regional_bipolar.items():
         signal_2d = signal_array[np.newaxis, :]
         preprocessed_signal, new_sps = preprocess_data(signal_2d, original_sps)
@@ -176,60 +182,60 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
         if new_sps_val is None:
             new_sps_val = new_sps
 
-    # Concatenate all regional signals for global statistics
-    all_data = np.concatenate(
-        [regional_preprocessed[region] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
-    if len(all_data) == 0:
-        return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
+    # Step 1: Global Normalization per Regional Channel (Standardization)
+    for key in regional_preprocessed:
+        signal = regional_preprocessed[key]
+        mean_signal = np.mean(signal)
+        std_signal = np.std(signal) if np.std(signal) > 0 else 1e-8  # Avoid division by zero
+        regional_preprocessed[key] = (signal - mean_signal) / std_signal
 
-    # Initial global mean and std (used later for final normalization)
-    global_mean = np.mean(all_data)
-    global_std = np.std(all_data) if np.std(all_data) > 0 else 1e-8
-
-    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed if
-                     len(regional_preprocessed[region]) > 0)
+    # Check minimum length across regions
+    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed
+                     if len(regional_preprocessed[region]) > 0)
     if min_length == 0:
         return {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
+
+    # Step 2: Windowing and Artifact Rejection
     n_window_samples = int(window_length_sec * new_sps_val)
     num_windows = min_length // n_window_samples
 
-    # Step 1: Artifact rejection - Calculate window-level statistics
+    # Calculate window-level statistics (e.g., mean) for Z-score computation
     window_stats = []
     for i in range(num_windows):
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
         window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
-                                 for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
+                                 for region in regional_preprocessed
+                                 if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
-        window_mean = np.mean(window_data)  # Using mean as the summary statistic
+        window_mean = np.mean(window_data)  # Summary statistic for the window
         window_stats.append(window_mean)
 
-    # Step 2 & 3: Compute global statistics and Z-scores for windows
+    # Compute Z-scores across all windows
     window_stats = np.array(window_stats)
     window_mu = np.mean(window_stats)
     window_sigma = np.std(window_stats) if np.std(window_stats) > 0 else 1e-8
     z_scores = (window_stats - window_mu) / window_sigma
 
-    # Step 4 & 5: Identify and retain non-outlier windows
+    # Identify windows to keep (Z-score <= threshold)
     keep_indices = np.where(np.abs(z_scores) <= z_threshold)[0]
     discarded_count = num_windows - len(keep_indices)
     print(f"Discarded {discarded_count} windows out of {num_windows} due to artifact rejection (|Z| > {z_threshold}).")
 
-    # Step 6: Sample from retained windows
+    # Sample from retained windows
     selected_indices = np.random.choice(keep_indices, min(num_samples_per_file, len(keep_indices)), replace=False)
 
-    # Step 7: Process retained windows
+    # Step 3: Process retained windows into CWT coefficients
     coeffs_dict = {"frontal": [], "motor_temporal": [], "parietal_occipital": []}
     for i in selected_indices:
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
         window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
-                                 for region in coeffs_dict if len(regional_preprocessed[region]) > 0])
+                                 for region in coeffs_dict
+                                 if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
-        # Normalize retained window data
-        window_data = (window_data - global_mean) / global_std
         decomposed_channels, _, _, _ = wavelet_decompose_window(
             window_data,
             wavelet='cmor1.5-1.0',
@@ -243,7 +249,6 @@ def process_csv_for_coeffs(csv_key, bucket, window_length_sec=2, num_samples_per
                 coeffs_dict[region].append(coeffs_2d)
 
     return coeffs_dict
-
 # Async helper to download files
 async def download_file(s3_client, bucket, csv_key):
     response = await s3_client.get_object(Bucket=bucket, Key=csv_key)
@@ -271,87 +276,76 @@ async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=1
 def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold))
 # Define the CAE model with corrected dimensions
-class CAE(nn.Module):
+class CAE(nn.Module):  # Assuming CAE is defined elsewhere
     def __init__(self, input_shape, latent_dim):
-        """
-        input_shape: tuple (height, width) of each 2D coefficient sample (e.g., (25, 512))
-        latent_dim: dimensionality of the latent representation
-        """
         super(CAE, self).__init__()
-        self.input_shape = input_shape  # e.g. (25, 512)
-        # For the encoder, we use a pooling layer with ceil_mode=True so that odd dimensions are rounded up.
-        encoder_height = int(np.ceil(self.input_shape[0] / 2))  # For 25, this becomes 13.
-        encoder_width = self.input_shape[1] // 2  # For 512, this becomes 256.
-        flattened_size = 4 * encoder_height * encoder_width  # 4 channels * 13 * 256
-
+        # Define encoder and decoder architecture here (simplified placeholder)
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),  # (B, 8, 25, 512)
+            nn.Conv2d(1, 16, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True),  # (B, 8, 13, 256)
-            nn.Conv2d(8, 4, kernel_size=3, padding=1),  # (B, 4, 13, 256)
-            nn.ReLU(),
-            nn.Flatten(),  # (B, 4*13*256)
-            nn.Linear(flattened_size, latent_dim)
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+            nn.Linear(16 * (input_shape[0] // 2) * (input_shape[1] // 2), latent_dim),
+            nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, flattened_size),
-            nn.Unflatten(1, (4, encoder_height, encoder_width)),  # (B, 4, 13, 256)
-            nn.ConvTranspose2d(4, 8, kernel_size=3, padding=1),  # (B, 8, 13, 256)
+            nn.Linear(latent_dim, 16 * (input_shape[0] // 2) * (input_shape[1] // 2)),
             nn.ReLU(),
-            # This transposed convolution upsamples with stride 2.
-            # With kernel_size=3, padding=1, and output_padding=(0,1),
-            # the height is recovered as: (13-1)*2 - 2*1 + 3 + 0 = 25
-            # and the width as: (256-1)*2 - 2*1 + 3 + 1 = 512.
-            nn.ConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1, output_padding=(0, 1)),
-            nn.Sigmoid()
+            nn.Unflatten(1, (16, input_shape[0] // 2, input_shape[1] // 2)),
+            nn.ConvTranspose2d(16, 1, 3, padding=1),
+            nn.ReLU()
         )
 
     def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return decoded, encoded
+        latent = self.encoder(x)
+        reconstructed = self.decoder(latent)
+        return reconstructed, latent
 
 
-# Train CAE function
-def train_cae(coeffs_2d_list, latent_dim=32, epochs=100, batch_size=32, output_folder="/tmp", region="unknown"):
+def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
     """
-    Trains a convolutional autoencoder (CAE) on a list of 2D coefficient arrays.
-    coeffs_2d_list: list of numpy arrays, each with shape (height, width) (e.g., (25,512))
-    Returns the model file path, extracted encoder, and normalization values.
+    Train a Convolutional Autoencoder on 2D CWT coefficients with per-image standardization.
+
+    Args:
+        coeffs_2d_list (list): List of 2D CWT coefficient arrays.
+        latent_dim (int): Size of the latent representation.
+        epochs (int): Number of training epochs.
+        batch_size (int): Batch size for training.
+        output_folder (str): Folder to save the model.
+        region (str): Region name for logging.
+
+    Returns:
+        tuple: (model_path, encoder, None, None)
     """
     if not coeffs_2d_list or len(coeffs_2d_list) == 0:
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    # Determine the input shape from the first sample (e.g., (25,512))
     input_shape = coeffs_2d_list[0].shape
     print(f"Region '{region}' - Input shape for CAE: {input_shape}")
 
-    # Stack coefficients: (N, height, width)
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)
-    # Add a channel dimension: (N, 1, height, width)
-    coeffs_array = coeffs_array[:, np.newaxis, :, :]
-    print(f"Region '{region}' - Input tensor shape before normalization: {coeffs_array.shape}")
+    # Step: Standardize each 2D CWT image individually
+    standardized_coeffs = []
+    for img in coeffs_2d_list:
+        mean_img = np.mean(img)
+        std_img = np.std(img) if np.std(img) > 0 else 1e-8  # Avoid division by zero
+        standardized_img = (img - mean_img) / std_img
+        standardized_coeffs.append(standardized_img)
 
-    # Normalize the data to [0,1]
-    min_val = coeffs_array.min()
-    max_val = coeffs_array.max()
-    if max_val > min_val:
-        coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
+    # Stack standardized images and add channel dimension
+    coeffs_array = np.stack(standardized_coeffs, axis=0)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # Shape: (samples, 1, height, width)
 
-    # Convert to PyTorch tensor and move to device
+    # Convert to tensor
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
-    print(f"Region '{region}' - Final input tensor shape: {coeffs_tensor.shape}")
 
-    # Initialize the CAE model
+    # Initialize CAE
     cae = CAE(input_shape, latent_dim).to(device)
-
-    # Create DataLoader
-    dataset = TensorDataset(coeffs_tensor, coeffs_tensor)
+    dataset = TensorDataset(coeffs_tensor, coeffs_tensor)  # Input and target are the same
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Define optimizer and loss function
+    # Training setup
     optimizer = optim.Adam(cae.parameters())
     criterion = nn.MSELoss()
 
@@ -360,44 +354,52 @@ def train_cae(coeffs_2d_list, latent_dim=32, epochs=100, batch_size=32, output_f
         for inputs, _ in dataloader:
             optimizer.zero_grad()
             outputs, _ = cae(inputs)
-            # If by any chance the output shape mismatches the input, crop them
-            if outputs.shape != inputs.shape:
-                min_h = min(outputs.shape[2], inputs.shape[2])
-                min_w = min(outputs.shape[3], inputs.shape[3])
-                inputs_cropped = inputs[:, :, :min_h, :min_w]
-                outputs = outputs[:, :, :min_h, :min_w]
-                loss = criterion(outputs, inputs_cropped)
-            else:
-                loss = criterion(outputs, inputs)
+            loss = criterion(outputs, inputs)
             loss.backward()
             optimizer.step()
         print(f"Region '{region}' - Epoch {epoch + 1}/{epochs}, Loss: {loss.item():.4f}")
 
-    # Save the trained model
+    # Save model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
+    encoder = cae.encoder
 
-    # Extract the encoder portion for later use
-    encoder = nn.Sequential(*list(cae.encoder.children()))
-    return model_path, encoder, min_val, max_val
+    # No min/max values needed since we standardize per image
+    return model_path, encoder, None, None
 # Get latent representations
-def get_latent_reps(encoder, coeffs_2d_list, min_val, max_val, device):
-    # Stack coefficients to shape (N, 25, 512)
-    coeffs_array = np.stack(coeffs_2d_list, axis=0)
-    # Add the channel dimension at axis 1 to get (N, 1, 25, 512)
-    coeffs_array = np.expand_dims(coeffs_array, axis=1)
-    # Normalize the data
-    if max_val > min_val:
-        coeffs_array = (coeffs_array - min_val) / (max_val - min_val)
-    # Convert to a PyTorch tensor and move to device
+def get_latent_reps(encoder, coeffs_2d_list, device):
+    """
+    Generate latent representations from 2D CWT coefficients using the trained encoder.
+
+    Args:
+        encoder (nn.Module): Trained CAE encoder.
+        coeffs_2d_list (list): List of 2D CWT coefficient arrays.
+        device (torch.device): Device to perform computation on.
+
+    Returns:
+        np.ndarray: Latent representations.
+    """
+    # Standardize each 2D CWT image individually
+    standardized_coeffs = []
+    for img in coeffs_2d_list:
+        mean_img = np.mean(img)
+        std_img = np.std(img) if np.std(img) > 0 else 1e-8  # Avoid division by zero
+        standardized_img = (img - mean_img) / std_img
+        standardized_coeffs.append(standardized_img)
+
+    # Stack and add channel dimension
+    coeffs_array = np.stack(standardized_coeffs, axis=0)
+    coeffs_array = coeffs_array[:, np.newaxis, :, :]  # Shape: (samples, 1, height, width)
+
+    # Convert to tensor and compute latent representations
     coeffs_tensor = torch.tensor(coeffs_array, dtype=torch.float32).to(device)
     with torch.no_grad():
         latent_reps = encoder(coeffs_tensor).cpu().numpy()
+
     return latent_reps
 
-
 # Train GMM on latent space
-def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unknown"):
+def train_gmm(latent_reps, max_components=30, output_folder="/tmp", region="unknown"):
     if len(latent_reps) < 2:
         print(f"Not enough data for GMM in region '{region}'.")
         return None, None, None
