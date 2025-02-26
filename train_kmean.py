@@ -134,7 +134,13 @@ def generate_qa_plots(all_coeffs_unified, cae, gmm, device):
 
 
 def calculate_sps_from_df(df):
-    time_col = df.get('timestamp', df.columns[0])
+    # Check if 'timestamp' exists in the DataFrame's columns
+    if 'timestamp' in df.columns:
+        time_col = df['timestamp']
+    else:
+        time_col = df[df.columns[0]]  # Use the first column's data
+    # Convert to a numpy array (in case it's not already)
+    time_col = np.array(time_col)
     dt = np.diff(time_col).mean()
     return 1.0 / dt if dt != 0 else 1.0
 
