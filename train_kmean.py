@@ -430,71 +430,52 @@ import numpy as np
 import joblib
 from sklearn.mixture import BayesianGaussianMixture
 from sklearn.model_selection import KFold
-from sklearn.metrics import silhouette_score, calinski_harabasz_score
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
-
-def train_bayesian_gmm(latent_reps, max_components=30, output_folder="/tmp",
-                       region="unknown", n_init=10, cv_splits=0, cv_threshold=1e-2):
-    """
-    Train a Bayesian Gaussian Mixture Model on latent representations.
-
-    Parameters:
-        latent_reps (np.ndarray): Array of latent representations.
-        max_components (int): Maximum number of mixture components.
-        output_folder (str): Folder to save the model.
-        region (str): Region name for logging.
-        n_init (int): Number of initializations to avoid local minima.
-        cv_splits (int): Number of K-Fold splits for cross-validation. If 0, no CV is performed.
-        cv_threshold (float): Threshold to count effective components based on weight.
-
-    Returns:
-        tuple: (model_path, effective_components, silhouette, calinski)
-    """
+def train_gmm(latent_reps, max_components=30, output_folder="/tmp", region="unknown", use_gpu=False):
     if len(latent_reps) < 2:
-        print(f"Not enough data for BGMM in region '{region}'.")
-        return None, None, None, None
+        print(f"Not enough data for GMM in region '{region}'.")
+        return None, None, None
 
-    # Optionally perform K-Fold cross-validation for BIC
-    if cv_splits > 1:
-        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=0)
-        bic_scores = []
-        for train_idx, test_idx in kf.split(latent_reps):
-            bgmm_cv = BayesianGaussianMixture(n_components=max_components, n_init=n_init, random_state=0)
-            bgmm_cv.fit(latent_reps[train_idx])
-            bic_cv = bgmm_cv.bic(latent_reps[test_idx])
-            bic_scores.append(bic_cv)
-        cv_bic = np.mean(bic_scores)
-        print(f"Region '{region}' - Cross-validated BGMM BIC: {cv_bic:.2f}")
+    if use_gpu:
+        try:
+            from cuml import GaussianMixture as cuGMM
+            import cudf
+            latent_reps_gpu = cudf.DataFrame(latent_reps)
+            gmm = cuGMM(n_components=max_components, random_state=0)
+            gmm.fit(latent_reps_gpu)
+            labels = gmm.predict(latent_reps_gpu)
+            effective_components = max_components  # Adjust based on BIC if needed
+        except ImportError:
+            print("cuML not installed; falling back to CPU.")
+            use_gpu = False
 
-    # Fit the full BGMM on all latent representations
-    bgmm = BayesianGaussianMixture(n_components=max_components, n_init=n_init, random_state=0)
-    bgmm.fit(latent_reps)
+    if not use_gpu:
+        bgmm = BayesianGaussianMixture(
+            n_components=max_components,
+            weight_concentration_prior=1e-2,
+            n_init=5,
+            random_state=0
+        )
+        bgmm.fit(latent_reps)
+        weights = bgmm.weights_
+        effective_components = sum(weights > 1e-6)
+        labels = bgmm.predict(latent_reps)
+        print(f"Region '{region}' - Effective GMM components: {effective_components}")
 
-    # Determine effective number of components based on weights threshold
-    effective_components = np.sum(bgmm.weights_ > cv_threshold)
-    print(f"Region '{region}' - Effective BGMM components: {effective_components}")
-
-    # Compute BIC on full data
-    bic = bgmm.bic(latent_reps)
-    print(f"Region '{region}' - BGMM BIC: {bic:.2f}")
-
-    # Predict labels and compute additional metrics
-    labels = bgmm.predict(latent_reps)
     if len(set(labels)) > 1:
         silhouette = silhouette_score(latent_reps, labels)
-        calinski = calinski_harabasz_score(latent_reps, labels)
-        print(f"Region '{region}' - BGMM Silhouette Score: {silhouette:.3f}")
-        print(f"Region '{region}' - BGMM Calinski-Harabasz Score: {calinski:.3f}")
+        ch_score = calinski_harabasz_score(latent_reps, labels)
+        db_score = davies_bouldin_score(latent_reps, labels)
+        print(f"Region '{region}' - GMM Silhouette Score: {silhouette:.3f}")
+        print(f"Region '{region}' - CH Score: {ch_score:.2f}, DB Score: {db_score:.2f}")
     else:
         silhouette = None
-        calinski = None
-        print(f"Region '{region}' - BGMM: Only one cluster found; cannot compute metrics.")
+        print(f"Region '{region}' - GMM Silhouette Score: N/A (single cluster)")
 
-    # Save model
-    model_path = os.path.join(output_folder, f"bgmm_{region}.pkl")
-    joblib.dump(bgmm, model_path)
-    return model_path, effective_components, silhouette, calinski
-
+    model_path = os.path.join(output_folder, f"gmm_{region}.pkl")
+    joblib.dump(bgmm if not use_gpu else gmm, model_path)
+    return model_path, effective_components, silhouette
 
 # Main execution
 if __name__ == "__main__":
@@ -548,14 +529,13 @@ if __name__ == "__main__":
         )
         print(f"Latent space shape: {latent_reps.shape}")
 
-        gmm_path, n_components, silhouette, calinski = train_bayesian_gmm(
+        gmm_path, n_components, silhouette = train_gmm(
             latent_reps,
             region="unified",  # For logging purposes
             n_init=10,  # Optional: number of initializations
             cv_splits=5  # Optional: number of cross-validation splits (set to 0 if not used)
         )
 
-        print("calinski: ",calinski)
         # Step 5: Generate QA plots if both models trained successfully
         if gmm_path is not None:
             # Load the full CAE model
