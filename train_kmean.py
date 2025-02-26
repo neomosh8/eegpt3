@@ -415,7 +415,7 @@ def train_cae(coeffs_2d_list, latent_dim=128, epochs=300, batch_size=8, output_f
         scheduler.step(epoch_loss)
 
         # Early stopping check
-        if epoch_loss < best_loss:
+        if epoch_loss <= best_loss:
             best_loss = epoch_loss
             early_stop_counter = 0
         else:
