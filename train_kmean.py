@@ -330,7 +330,7 @@ class CAE(nn.Module):
         return x, encoded  # Return reconstructed output and encoded representation
 
 
-def train_cae(coeffs_2d_list, latent_dim=32, epochs=5, batch_size=32, output_folder="/tmp", region="unknown"):
+def train_cae(coeffs_2d_list, latent_dim=64, epochs=30, batch_size=32, output_folder="/tmp", region="unknown"):
     """
     Train a Convolutional Autoencoder on 2D CWT coefficients with per-image standardization.
 
