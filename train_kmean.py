@@ -20,9 +20,7 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 from create_text_files_from_csv_2 import create_regional_bipolar_channels
-from utils import call_gpt_for_instructions, preprocess_data, wavelet_decompose_window, list_csv_files_in_folder, \
-    list_s3_folders, calculate_sps
-
+from utils import call_gpt_for_instructions, preprocess_data, wavelet_decompose_window, list_csv_files_in_folder, list_s3_folders
 
 # Custom Dataset for loading coefficients from disk
 class CoeffsDataset(Dataset):
@@ -44,18 +42,8 @@ class CoeffsDataset(Dataset):
 
 # Process CSV and save coefficients to disk
 def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_file=10, z_threshold=3.0):
-    import os
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-
     base_name = os.path.splitext(os.path.basename(csv_key))[0]
     all_columns = list(df.columns)
-
-    # Calculate original sampling rate before dropping any columns
-    original_sps = calculate_sps(df)
-
-    # Get instructions from GPT
     instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
 
     if instructions.get("action") == "skip":
@@ -65,45 +53,36 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
     channels_to_drop = instructions.get("channels_to_drop", [])
     print(f"Processing '{base_name}'. Dropping: {channels_to_drop}")
 
-    # Step 1: Drop the specified channels from the DataFrame
-    df = df.drop(columns=channels_to_drop, errors='ignore')
+    regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
+    original_sps = calculate_sps_from_df(df)
+    regional_preprocessed = {}
+    new_sps_val = None
 
-    # Identify EEG channels (excluding timestamp columns)
-    eeg_channels = [col for col in df.columns if col not in ['timestamp', 'TimeStamp']]
+    for key, signal_array in regional_bipolar.items():
+        signal_2d = signal_array[np.newaxis, :]
+        preprocessed_signal, new_sps = preprocess_data(signal_2d, original_sps)
+        regional_preprocessed[key] = preprocessed_signal[0, :]
+        if new_sps_val is None:
+            new_sps_val = new_sps
 
-    # Extract signal data as a 2D array (channels x samples)
-    signal_data = df[eeg_channels].values.T  # Shape: (num_channels, num_samples)
-
-    # Step 2: Preprocess the entire file
-    preprocessed_signal, new_sps = preprocess_data(signal_data, original_sps)
-
-    # Create a preprocessed DataFrame to maintain channel names
-    preprocessed_df = pd.DataFrame(preprocessed_signal.T, columns=eeg_channels)
-
-    # Step 3: Create regional bipolar channels from the preprocessed data
-    regional_bipolar = create_regional_bipolar_channels(preprocessed_df)
-
-    # Step 4: Normalize each regional bipolar signal
-    for key in regional_bipolar:
-        signal = regional_bipolar[key]
+    for key in regional_preprocessed:
+        signal = regional_preprocessed[key]
         mean_signal = np.mean(signal)
         std_signal = np.std(signal) if np.std(signal) > 0 else 1e-8
-        regional_bipolar[key] = (signal - mean_signal) / std_signal
+        regional_preprocessed[key] = (signal - mean_signal) / std_signal
 
-    # Continue with the remaining processing
-    min_length = min(len(regional_bipolar[region]) for region in regional_bipolar if len(regional_bipolar[region]) > 0)
+    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed if len(regional_preprocessed[region]) > 0)
     if min_length == 0:
         return []
 
-    n_window_samples = int(window_length_sec * new_sps)
+    n_window_samples = int(window_length_sec * new_sps_val)
     num_windows = min_length // n_window_samples
 
     window_stats = []
     for i in range(num_windows):
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
-        window_data = np.vstack([regional_bipolar[region][window_start:window_end] for region in regional_bipolar if
-                                 len(regional_bipolar[region]) > 0])
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
         window_mean = np.mean(window_data)
@@ -122,15 +101,16 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
     # Plotting three channels with rejected windows highlighted
     regions = ["frontal", "motor_temporal", "parietal_occipital"]
     fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
-    time = np.arange(min_length) / new_sps
+    time = np.arange(min_length) / new_sps_val
     for ax, region in zip(axes, regions):
-        if region in regional_bipolar:
-            signal = regional_bipolar[region]
+        if region in regional_preprocessed:
+            signal = regional_preprocessed[region]
             ax.plot(time, signal, label=region)
             ax.set_ylabel(region)
+            # Highlight rejected windows
             for i in rejected_indices:
-                start_time = (i * n_window_samples) / new_sps
-                end_time = ((i + 1) * n_window_samples) / new_sps
+                start_time = (i * n_window_samples) / new_sps_val
+                end_time = ((i + 1) * n_window_samples) / new_sps_val
                 ax.axvspan(start_time, end_time, color='red', alpha=0.3)
         else:
             ax.set_visible(False)
@@ -149,24 +129,26 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
     for i in selected_indices:
         window_start = i * n_window_samples
         window_end = window_start + n_window_samples
-        window_data = np.vstack([regional_bipolar[region][window_start:window_end] for region in regional_bipolar if
-                                 len(regional_bipolar[region]) > 0])
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
         if window_data.size == 0:
             continue
         decomposed_channels, _, _, _ = wavelet_decompose_window(
             window_data,
             wavelet='cmor1.5-1.0',
             scales=None,
-            normalization=False,  # Already normalized earlier
-            sampling_period=1.0 / new_sps
+            normalization=False,
+            sampling_period=1.0 / new_sps_val
         )
         for idx, region in enumerate(["frontal", "motor_temporal", "parietal_occipital"]):
             if idx < len(decomposed_channels):
-                coeffs_2d = decomposed_channels[idx]
+                coeffs_2d = decomposed_channels[idx]  # 2D array: rows = scales, columns = time points
+                # Standardize each scale separately
                 for i in range(coeffs_2d.shape[0]):
-                    mean_scale = np.mean(coeffs_2d[i, :])
-                    std_scale = np.std(coeffs_2d[i, :]) if np.std(coeffs_2d[i, :]) > 0 else 1e-8
-                    coeffs_2d[i, :] = (coeffs_2d[i, :] - mean_scale) / std_scale
+                    mean_scale = np.mean(coeffs_2d[i, :])  # Mean of the current scale
+                    std_scale = np.std(coeffs_2d[i, :]) if np.std(
+                        coeffs_2d[i, :]) > 0 else 1e-8  # Avoid division by zero
+                    coeffs_2d[i, :] = (coeffs_2d[i, :] - mean_scale) / std_scale  # Standardize the scale
+                # Save the standardized coefficients
                 safe_csv_key = csv_key.replace('/', '_').replace('.', '_')
                 file_name = f"{safe_csv_key}_{region}_window_{i}.npy"
                 file_path = os.path.join('training_data', 'coeffs', file_name)
@@ -603,7 +585,15 @@ def generate_qa_plots(file_paths, cae, gmm, device, num_samples=100):
         plt.savefig(f'QA/reconstruction_{i + 1}.png')
         plt.close()
 
-
+# Calculate sampling rate
+def calculate_sps_from_df(df):
+    if 'timestamp' in df.columns:
+        time_col = df['timestamp']
+    else:
+        time_col = df[df.columns[0]]
+    time_col = np.array(time_col)
+    dt = np.diff(time_col).mean()
+    return 1.0 / dt if dt != 0 else 1.0
 
 # Main execution
 if __name__ == "__main__":
