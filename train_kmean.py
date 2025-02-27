@@ -10,6 +10,7 @@ import io
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from botocore.exceptions import ClientError
 from torch.utils.data import DataLoader, Dataset
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
@@ -150,40 +151,88 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
     return saved_files
 
 # Async helper to download files
-async def download_file(s3_client, bucket, csv_key):
-    response = await s3_client.get_object(Bucket=bucket, Key=csv_key)
-    body = await response['Body'].read()
-    # Save to temporary disk location in /dev/shm
-    tmp_path = os.path.join('/dev/shm', f"{csv_key.replace('/', '_')}.csv")
+async def download_file(s3_client, bucket, csv_key, max_retries=3):
+    tmp_path = os.path.join("/dev/shm", f"{csv_key.replace('/', '_')}.csv")
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-    with open(tmp_path, 'wb') as f:
-        f.write(body)
-    return csv_key, tmp_path
-# Collect coefficients from S3 and save to disk
-async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0, batch_size=25):
+    for attempt in range(max_retries):
+        try:
+            response = await s3_client.get_object(Bucket=bucket, Key=csv_key)
+            body = await response["Body"].read()
+            with open(tmp_path, "wb") as f:
+                f.write(body)
+            return csv_key, tmp_path
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "AccessDenied":
+                print(f"Access Denied for {csv_key} (Attempt {attempt + 1}/{max_retries})")
+                if attempt + 1 == max_retries:
+                    print(f"Failed to download {csv_key} after {max_retries} attempts: {e}")
+                    return csv_key, None
+            else:
+                print(f"Error downloading {csv_key}: {e}")
+                return csv_key, None
+            await asyncio.sleep(1)  # Brief delay before retry
+    return csv_key, None# Collect coefficients from S3 and save to disk
+
+
+async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0,
+                                       batch_size=10):
     all_saved_files = []
+    total_files = len(csv_files)
+    downloaded_files = 0
+    processed_files = 0
+
     async with aioboto3.Session().client("s3") as s3_client:
-        for i in range(0, len(csv_files), batch_size):
+        for i in range(0, total_files, batch_size):
             batch = csv_files[i:i + batch_size]
+            # Download batch concurrently
             tasks = [download_file(s3_client, bucket, csv_file) for csv_file in batch]
             results = await asyncio.gather(*tasks)
+
+            # Prepare downloaded files for processing
+            csv_data = {}
+            tmp_paths = []
+            for key, tmp_path in results:
+                if tmp_path is not None:
+                    csv_data[key] = pd.read_csv(tmp_path)
+                    tmp_paths.append(tmp_path)
+                    downloaded_files += 1
+                else:
+                    print(f"Skipping {key} due to download failure.")
+            print(f"Downloaded {downloaded_files}/{total_files} files")
+
+            # Process downloaded files in parallel
             try:
-                csv_data = {key: pd.read_csv(tmp_path) for key, tmp_path in results}
                 with ProcessPoolExecutor() as executor:
-                    futures = [executor.submit(process_csv_for_coeffs, csv_data[key], key, window_length_sec, num_samples_per_file, z_threshold)
-                               for key in csv_data.keys()]
+                    futures = [
+                        executor.submit(
+                            process_csv_for_coeffs,
+                            csv_data[key],
+                            key,
+                            window_length_sec,
+                            num_samples_per_file,
+                            z_threshold
+                        )
+                        for key in csv_data.keys()
+                    ]
+                    batch_processed = 0
                     for future in futures:
-                        saved_files = future.result()
-                        all_saved_files.extend(saved_files)
+                        try:
+                            saved_files = future.result()
+                            all_saved_files.extend(saved_files)
+                            batch_processed += 1
+                        except Exception as e:
+                            print(f"Error processing file: {e}")
+                    processed_files += batch_processed
+                    print(f"Processed {processed_files}/{total_files} files")
             finally:
                 # Clean up temporary files
-                for _, tmp_path in results:
+                for tmp_path in tmp_paths:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
-    return all_saved_files
-def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
-    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold))
 
+    return all_saved_files
+def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0, batch_size=10):
+    return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold, batch_size))
 # Define the CAE model
 class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim):
