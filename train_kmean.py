@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from sklearn.mixture import GaussianMixture
-from sklearn.metrics import silhouette_score
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import joblib
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
