@@ -245,39 +245,36 @@ class CAE(nn.Module):
     def __init__(self, input_shape, latent_dim=256):
         """
         Args:
-            input_shape: (height, width) of the input if your data
-                         is shaped like (1, H, W) per sample.
-            latent_dim:  Dimension of the latent (bottleneck) vector.
+            input_shape: Tuple (H, W) of the input (without the channel dimension).
+            latent_dim: Dimension of the latent (bottleneck) vector.
         """
         super(CAE, self).__init__()
-        self.input_shape = input_shape
+        self.input_shape = input_shape  # Save original shape for later cropping
         self.latent_dim = latent_dim
 
         # ----- Encoder -----
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True),  # Halves spatial size
+            nn.MaxPool2d(2, ceil_mode=True),  # Halves spatial size (using ceil_mode)
 
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True),  # Halves spatial size again
+            nn.MaxPool2d(2, ceil_mode=True)  # Halves spatial size again
         )
 
-        # Dynamically figure out the shape after these convs/pools
+        # Dynamically determine the output size of encoder_conv
         with torch.no_grad():
-            # Create a dummy input: shape (batch=1, channels=1, height, width)
-            dummy_input = torch.zeros(1, 1, *input_shape)
+            dummy_input = torch.zeros(1, 1, *input_shape)  # shape: (1, 1, H, W)
             conv_output = self.encoder_conv(dummy_input)
-            self.out_channels = conv_output.shape[1]  # e.g. 32
-            self.out_height   = conv_output.shape[2]  # e.g. 6
-            self.out_width    = conv_output.shape[3]  # e.g. 128
+            self.out_channels = conv_output.shape[1]
+            self.out_height = conv_output.shape[2]
+            self.out_width = conv_output.shape[3]
             flattened_size = self.out_channels * self.out_height * self.out_width
 
-        # Fully-connected "bottleneck"
+        # Fully-connected bottleneck layer
         self.encoder_fc = nn.Linear(flattened_size, latent_dim)
 
-        # Combine the above into a single encoder
         self.encoder = nn.Sequential(
             self.encoder_conv,
             nn.Flatten(),
@@ -286,36 +283,46 @@ class CAE(nn.Module):
 
         # ----- Decoder -----
         self.decoder_fc = nn.Linear(latent_dim, flattened_size)
-
         self.decoder_conv = nn.Sequential(
-            # Expand back to (out_channels, out_height, out_width)
+            # Expand back to (channels, height, width)
             nn.Unflatten(1, (self.out_channels, self.out_height, self.out_width)),
-
             nn.ConvTranspose2d(self.out_channels, 16,
                                kernel_size=3, stride=2,
                                padding=1, output_padding=1),
             nn.ReLU(),
-
             nn.ConvTranspose2d(16, 1,
                                kernel_size=3, stride=2,
                                padding=1, output_padding=1)
-            # Optionally add an activation like Sigmoid if you need [0,1] outputs
-            # nn.Sigmoid()
         )
 
     def forward(self, x):
         """
         Args:
-            x: Tensor of shape (batch_size, 1, H, W)
-
+            x: Input tensor of shape (batch_size, 1, H, W)
         Returns:
-            reconstructed: Reconstructed tensor (same shape as x)
+            reconstructed: Tensor (batch_size, 1, H, W) after decoding
             encoded:       Latent vector of shape (batch_size, latent_dim)
         """
-        encoded = self.encoder(x)               # (batch_size, latent_dim)
-        x = self.decoder_fc(encoded)            # (batch_size, flattened_size)
-        reconstructed = self.decoder_conv(x)    # (batch_size, 1, H, W)
+        encoded = self.encoder(x)  # (batch_size, latent_dim)
+        x = self.decoder_fc(encoded)  # (batch_size, flattened_size)
+        reconstructed = self.decoder_conv(x)  # (batch_size, 1, H_decoded, W_decoded)
+
+        # --- Dynamic adjustment: Crop (or pad) to match the original input shape ---
+        target_h, target_w = self.input_shape
+        _, _, h_out, w_out = reconstructed.shape
+
+        # Crop if the decoder output is larger than the input dimensions
+        if h_out > target_h or w_out > target_w:
+            reconstructed = reconstructed[:, :, :target_h, :target_w]
+        # Optionally, pad if output is smaller (unlikely with current params)
+        elif h_out < target_h or w_out < target_w:
+            pad_h = target_h - h_out
+            pad_w = target_w - w_out
+            reconstructed = nn.functional.pad(reconstructed, (0, pad_w, 0, pad_h))
+
         return reconstructed, encoded
+
+
 # Train CAE using data from disk
 def train_cae(file_paths,
               latent_dim=256,
