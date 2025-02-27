@@ -242,92 +242,189 @@ def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_le
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold, batch_size))
 # Define the CAE model
 class CAE(nn.Module):
-    def __init__(self, input_shape, latent_dim):
+    def __init__(self, input_shape, latent_dim=256):
+        """
+        Args:
+            input_shape: (height, width) of the input if your data
+                         is shaped like (1, H, W) per sample.
+            latent_dim:  Dimension of the latent (bottleneck) vector.
+        """
         super(CAE, self).__init__()
         self.input_shape = input_shape
+        self.latent_dim = latent_dim
+
+        # ----- Encoder -----
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True),
+            nn.MaxPool2d(2, ceil_mode=True),  # Halves spatial size
+
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, ceil_mode=True)
+            nn.MaxPool2d(2, ceil_mode=True),  # Halves spatial size again
         )
+
+        # Dynamically figure out the shape after these convs/pools
         with torch.no_grad():
+            # Create a dummy input: shape (batch=1, channels=1, height, width)
             dummy_input = torch.zeros(1, 1, *input_shape)
             conv_output = self.encoder_conv(dummy_input)
-            self.encoder_height = conv_output.shape[2]
-            self.encoder_width = conv_output.shape[3]
-            flattened_size = conv_output.shape[1] * self.encoder_height * self.encoder_width
+            self.out_channels = conv_output.shape[1]  # e.g. 32
+            self.out_height   = conv_output.shape[2]  # e.g. 6
+            self.out_width    = conv_output.shape[3]  # e.g. 128
+            flattened_size = self.out_channels * self.out_height * self.out_width
+
+        # Fully-connected "bottleneck"
         self.encoder_fc = nn.Linear(flattened_size, latent_dim)
+
+        # Combine the above into a single encoder
         self.encoder = nn.Sequential(
             self.encoder_conv,
             nn.Flatten(),
             self.encoder_fc
         )
+
+        # ----- Decoder -----
         self.decoder_fc = nn.Linear(latent_dim, flattened_size)
+
         self.decoder_conv = nn.Sequential(
-            nn.Unflatten(1, (16, self.encoder_height, self.encoder_width)),
-            nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=(0, 1))
+            # Expand back to (out_channels, out_height, out_width)
+            nn.Unflatten(1, (self.out_channels, self.out_height, self.out_width)),
+
+            nn.ConvTranspose2d(self.out_channels, 16,
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.ReLU(),
+
+            nn.ConvTranspose2d(16, 1,
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1)
+            # Optionally add an activation like Sigmoid if you need [0,1] outputs
+            # nn.Sigmoid()
         )
 
     def forward(self, x):
-        encoded = self.encoder(x)
-        x = self.decoder_fc(encoded)
-        x = self.decoder_conv(x)
-        return x, encoded
+        """
+        Args:
+            x: Tensor of shape (batch_size, 1, H, W)
 
+        Returns:
+            reconstructed: Reconstructed tensor (same shape as x)
+            encoded:       Latent vector of shape (batch_size, latent_dim)
+        """
+        encoded = self.encoder(x)               # (batch_size, latent_dim)
+        x = self.decoder_fc(encoded)            # (batch_size, flattened_size)
+        reconstructed = self.decoder_conv(x)    # (batch_size, 1, H, W)
+        return reconstructed, encoded
 # Train CAE using data from disk
-def train_cae(file_paths, latent_dim=256, epochs=30, batch_size=16, output_folder="/tmp", region="unknown", early_stop_patience=10):
+def train_cae(file_paths,
+              latent_dim=256,
+              epochs=30,
+              batch_size=16,
+              output_folder="./",
+              region="unknown",
+              early_stop_patience=5):
+    """
+    Train the convolutional autoencoder on the given file paths.
+
+    Args:
+        file_paths: A list of .npy file paths containing your data arrays.
+                    Each .npy file is assumed to shape like (1, H, W).
+        latent_dim: Dimension of the latent bottleneck.
+        epochs:     Number of epochs to train.
+        batch_size: Training batch size.
+        output_folder: Where to save the trained .pt file.
+        region:     A label/string for logging or naming the model.
+        early_stop_patience: Number of epochs allowed without improvement
+                             before early stopping.
+
+    Returns:
+        model_path: Path to the saved CAE model.
+        encoder:    The encoder portion of the trained model.
+        None, None: Just placeholders, if you want to keep the same structure.
+    """
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+
+    # If no files, skip
     if not file_paths:
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
 
-    sample_img = np.load(file_paths[0])
-    input_shape = sample_img.shape
-    print(f"Region '{region}' - Input shape for CAE: {input_shape}")
+    # Load one example to get the shape (excluding the batch dimension)
+    sample = np.load(file_paths[0])  # shape e.g. (1, H, W)
+    if sample.ndim == 3:
+        # shape is (1, H, W): remove the batch dimension for CAE init
+        input_shape = sample.shape[1:]  # (H, W)
+    elif sample.ndim == 2:
+        # shape is (H, W): this means your dataset doesn't add a channel
+        # so we'll treat the input channel as 1
+        input_shape = sample.shape  # (H, W)
+    else:
+        raise ValueError(f"Sample data shape must be 2D or 3D, got {sample.shape}.")
 
+    # Initialize CAE
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cae = CAE(input_shape, latent_dim).to(device)
-    dataset = CoeffsDataset(file_paths)
+    cae = CAE(input_shape, latent_dim=latent_dim).to(device)
+
+    # Build dataset/dataloader
+    dataset = CoeffsDataset(file_paths)  # Make sure your dataset returns shape (batch, 1, H, W)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    optimizer = optim.Adam(cae.parameters())
+    # Optimizer and Loss
+    optimizer = optim.Adam(cae.parameters(), lr=1e-3)
     criterion = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.1, patience=3, verbose=True
+    )
 
+    # Training loop
     best_loss = float('inf')
     early_stop_counter = 0
 
     for epoch in range(epochs):
         cae.train()
-        running_loss = 0.0
+        total_loss = 0.0
         num_batches = 0
+
         for inputs in dataloader:
+            # inputs shape: (batch_size, 1, H, W)
             inputs = inputs.to(device)
+
             optimizer.zero_grad()
             outputs, _ = cae(inputs)
-            loss = criterion(outputs, inputs)
+            loss = criterion(outputs, inputs)  # Autoencoder MSE
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
+
+            total_loss += loss.item()
             num_batches += 1
-        epoch_loss = running_loss / num_batches
-        print(f"Region '{region}' - Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}")
+
+        epoch_loss = total_loss / num_batches
+        print(f"[Region: {region}] Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.6f}")
+
+        # Learning rate scheduler
         scheduler.step(epoch_loss)
-        if epoch_loss <= best_loss:
+
+        # Early stopping logic
+        if epoch_loss < best_loss:
             best_loss = epoch_loss
             early_stop_counter = 0
         else:
             early_stop_counter += 1
             if early_stop_counter >= early_stop_patience:
-                print(f"Early stopping triggered after epoch {epoch + 1}.")
+                print(f"Early stopping triggered at epoch {epoch + 1}.")
                 break
 
+    # Save the whole CAE model
     model_path = os.path.join(output_folder, f"cae_{region}.pt")
     torch.save(cae.state_dict(), model_path)
-    encoder = cae.encoder
-    return model_path, encoder, None, None
+    print(f"Saved CAE model to {model_path}")
+
+    # Return the path and the encoder portion
+    return model_path, cae.encoder, None, None
 
 # Get latent representations using data from disk
 def get_latent_reps(encoder, file_paths, device, batch_size=32):
