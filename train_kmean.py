@@ -194,7 +194,7 @@ class CAE(nn.Module):
         return x, encoded
 
 # Train CAE using data from disk
-def train_cae(file_paths, latent_dim=128, epochs=300, batch_size=8, output_folder="/tmp", region="unknown", early_stop_patience=10):
+def train_cae(file_paths, latent_dim=128, epochs=30, batch_size=16, output_folder="/tmp", region="unknown", early_stop_patience=10):
     if not file_paths:
         print(f"No data for CAE training in region '{region}'.")
         return None, None, None, None
