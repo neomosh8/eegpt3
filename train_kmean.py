@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score
 import joblib
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
@@ -93,8 +93,34 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
     z_scores = (window_stats - window_mu) / window_sigma
 
     keep_indices = np.where(np.abs(z_scores) <= z_threshold)[0]
-    discarded_count = num_windows - len(keep_indices)
+    rejected_indices = np.where(np.abs(z_scores) > z_threshold)[0]
+    discarded_count = len(rejected_indices)
     print(f"Discarded {discarded_count} windows out of {num_windows} due to artifact rejection (|Z| > {z_threshold}).")
+
+    # Plotting three channels with rejected windows highlighted
+    regions = ["frontal", "motor_temporal", "parietal_occipital"]
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    time = np.arange(min_length) / new_sps_val
+    for ax, region in zip(axes, regions):
+        if region in regional_preprocessed:
+            signal = regional_preprocessed[region]
+            ax.plot(time, signal, label=region)
+            ax.set_ylabel(region)
+            # Highlight rejected windows
+            for i in rejected_indices:
+                start_time = (i * n_window_samples) / new_sps_val
+                end_time = ((i + 1) * n_window_samples) / new_sps_val
+                ax.axvspan(start_time, end_time, color='red', alpha=0.3)
+        else:
+            ax.set_visible(False)
+    axes[0].set_title(f"EEG Signals with Rejected Windows - {base_name}")
+    axes[2].set_xlabel("Time (s)")
+    plt.tight_layout()
+    safe_csv_key = csv_key.replace('/', '_').replace('.', '_')
+    plot_path = os.path.join('QA', f"{safe_csv_key}_rejected_windows.png")
+    os.makedirs('QA', exist_ok=True)
+    plt.savefig(plot_path)
+    plt.close()
 
     selected_indices = np.random.choice(keep_indices, min(num_samples_per_file, len(keep_indices)), replace=False)
 
@@ -278,12 +304,7 @@ def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unk
             use_gpu = False
 
     if not use_gpu:
-        bgmm = BayesianGaussianMixture(
-            n_components=max_components,
-            weight_concentration_prior=1e-2,
-            n_init=5,
-            random_state=0
-        )
+        bgmm = GaussianMixture(n_components=max_components, random_state=0)  # Simplified for example
         bgmm.fit(latent_reps)
         weights = bgmm.weights_
         effective_components = sum(weights > 1e-6)
@@ -292,10 +313,7 @@ def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unk
 
     if len(set(labels)) > 1:
         silhouette = silhouette_score(latent_reps, labels)
-        ch_score = calinski_harabasz_score(latent_reps, labels)
-        db_score = davies_bouldin_score(latent_reps, labels)
         print(f"Region '{region}' - GMM Silhouette Score: {silhouette:.3f}")
-        print(f"Region '{region}' - CH Score: {ch_score:.2f}, DB Score: {db_score:.2f}")
     else:
         silhouette = None
         print(f"Region '{region}' - GMM Silhouette Score: N/A (single cluster)")
