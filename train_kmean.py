@@ -153,35 +153,34 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
 async def download_file(s3_client, bucket, csv_key):
     response = await s3_client.get_object(Bucket=bucket, Key=csv_key)
     body = await response['Body'].read()
-    # Save to temporary disk location
-    tmp_path = os.path.join('/tmp', f"{csv_key.replace('/', '_')}.csv")
+    # Save to temporary disk location in /dev/shm
+    tmp_path = os.path.join('/dev/shm', f"{csv_key.replace('/', '_')}.csv")
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
     with open(tmp_path, 'wb') as f:
         f.write(body)
     return csv_key, tmp_path
-
 # Collect coefficients from S3 and save to disk
-async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
+async def collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0, batch_size=25):
     all_saved_files = []
     async with aioboto3.Session().client("s3") as s3_client:
-        tasks = [download_file(s3_client, bucket, csv_file) for csv_file in csv_files]
-        results = await asyncio.gather(*tasks)
-        csv_data = {key: pd.read_csv(tmp_path) for key, tmp_path in results}
-
-        with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(process_csv_for_coeffs, csv_data[key], key, window_length_sec, num_samples_per_file, z_threshold)
-                       for key in csv_data.keys()]
-            for future in futures:
-                saved_files = future.result()
-                all_saved_files.extend(saved_files)
-
-        # Clean up temporary files
-        for _, tmp_path in results:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
+        for i in range(0, len(csv_files), batch_size):
+            batch = csv_files[i:i + batch_size]
+            tasks = [download_file(s3_client, bucket, csv_file) for csv_file in batch]
+            results = await asyncio.gather(*tasks)
+            try:
+                csv_data = {key: pd.read_csv(tmp_path) for key, tmp_path in results}
+                with ProcessPoolExecutor() as executor:
+                    futures = [executor.submit(process_csv_for_coeffs, csv_data[key], key, window_length_sec, num_samples_per_file, z_threshold)
+                               for key in csv_data.keys()]
+                    for future in futures:
+                        saved_files = future.result()
+                        all_saved_files.extend(saved_files)
+            finally:
+                # Clean up temporary files
+                for _, tmp_path in results:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
     return all_saved_files
-
 def collect_coeffs_from_s3(csv_files, bucket, num_samples_per_file=10, window_length_sec=2, z_threshold=3.0):
     return asyncio.run(collect_coeffs_from_s3_async(csv_files, bucket, num_samples_per_file, window_length_sec, z_threshold))
 
