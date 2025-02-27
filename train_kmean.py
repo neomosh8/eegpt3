@@ -422,12 +422,12 @@ def calculate_sps_from_df(df):
 if __name__ == "__main__":
     all_folders = list_s3_folders()
     random.shuffle(all_folders)
-    selected_folders = all_folders[:2]
+    selected_folders = all_folders
     csv_files = []
     for i, folder in enumerate(selected_folders):
         print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(2, len(all_files)))
+        selected_files = random.sample(all_files, min(4, len(all_files)))
         csv_files.extend(selected_files)
         print(f"Selected {len(selected_files)} files")
 
