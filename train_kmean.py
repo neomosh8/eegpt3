@@ -462,7 +462,7 @@ if __name__ == "__main__":
         )
 
         if gmm_path is not None:
-            cae = CAE(input_shape=(25, 512), latent_dim=64)
+            cae = CAE(input_shape=(25, 512), latent_dim=256)
             cae.load_state_dict(torch.load(cae_path))
             cae.to(device)
             gmm = joblib.load(gmm_path)
