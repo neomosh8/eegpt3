@@ -258,7 +258,7 @@ class CAE(nn.Module):
             conv_output = self.encoder_conv(dummy_input)
             self.encoder_height = conv_output.shape[2]
             self.encoder_width = conv_output.shape[3]
-            flattened_size = 16 * self.encoder_height * self.encoder_width
+            flattened_size = conv_output.shape[1] * self.encoder_height * self.encoder_width
         self.encoder_fc = nn.Linear(flattened_size, latent_dim)
         self.encoder = nn.Sequential(
             self.encoder_conv,
