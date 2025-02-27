@@ -468,7 +468,7 @@ def calculate_sps_from_df(df):
 
 # Main execution
 if __name__ == "__main__":
-    all_folders = list_s3_folders()
+    all_folders = list_s3_folders()[0:10]
     random.shuffle(all_folders)
     selected_folders = all_folders
     csv_files = []
