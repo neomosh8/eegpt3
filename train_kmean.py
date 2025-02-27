@@ -141,7 +141,14 @@ def process_csv_for_coeffs(df, csv_key, window_length_sec=2, num_samples_per_fil
         )
         for idx, region in enumerate(["frontal", "motor_temporal", "parietal_occipital"]):
             if idx < len(decomposed_channels):
-                coeffs_2d = decomposed_channels[idx]
+                coeffs_2d = decomposed_channels[idx]  # 2D array: rows = scales, columns = time points
+                # Standardize each scale separately
+                for i in range(coeffs_2d.shape[0]):
+                    mean_scale = np.mean(coeffs_2d[i, :])  # Mean of the current scale
+                    std_scale = np.std(coeffs_2d[i, :]) if np.std(
+                        coeffs_2d[i, :]) > 0 else 1e-8  # Avoid division by zero
+                    coeffs_2d[i, :] = (coeffs_2d[i, :] - mean_scale) / std_scale  # Standardize the scale
+                # Save the standardized coefficients
                 safe_csv_key = csv_key.replace('/', '_').replace('.', '_')
                 file_name = f"{safe_csv_key}_{region}_window_{i}.npy"
                 file_path = os.path.join('training_data', 'coeffs', file_name)
@@ -241,6 +248,9 @@ class CAE(nn.Module):
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.MaxPool2d(2, ceil_mode=True),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
             nn.MaxPool2d(2, ceil_mode=True)
         )
         with torch.no_grad():
@@ -338,27 +348,42 @@ def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unk
         print(f"Not enough data for GMM in region '{region}'.")
         return None, None, None
 
+    # GPU support (optional, requires cuML)
     if use_gpu:
         try:
             from cuml import GaussianMixture as cuGMM
             import cudf
             latent_reps_gpu = cudf.DataFrame(latent_reps)
-            gmm = cuGMM(n_components=max_components, random_state=0)
+            bic_scores = []
+            for n in range(1, max_components + 1):
+                gmm = cuGMM(n_components=n, random_state=0)
+                gmm.fit(latent_reps_gpu)
+                bic = gmm.bic(latent_reps_gpu)
+                bic_scores.append(bic)
+            optimal_n = np.argmin(bic_scores) + 1
+            gmm = cuGMM(n_components=optimal_n, random_state=0)
             gmm.fit(latent_reps_gpu)
             labels = gmm.predict(latent_reps_gpu)
-            effective_components = max_components
+            effective_components = optimal_n
         except ImportError:
             print("cuML not installed; falling back to CPU.")
             use_gpu = False
 
+    # CPU implementation (default)
     if not use_gpu:
-        bgmm = GaussianMixture(n_components=max_components, random_state=0)  # Simplified for example
-        bgmm.fit(latent_reps)
-        weights = bgmm.weights_
-        effective_components = sum(weights > 1e-6)
-        labels = bgmm.predict(latent_reps)
-        print(f"Region '{region}' - Effective GMM components: {effective_components}")
+        bic_scores = []
+        for n in range(1, max_components + 1):
+            gmm = GaussianMixture(n_components=n, random_state=0)
+            gmm.fit(latent_reps)
+            bic = gmm.bic(latent_reps)
+            bic_scores.append(bic)
+        optimal_n = np.argmin(bic_scores) + 1  # Select the number of components with lowest BIC
+        gmm = GaussianMixture(n_components=optimal_n, random_state=0)
+        gmm.fit(latent_reps)
+        labels = gmm.predict(latent_reps)
+        effective_components = optimal_n
 
+    # Evaluate clustering quality with silhouette score
     if len(set(labels)) > 1:
         silhouette = silhouette_score(latent_reps, labels)
         print(f"Region '{region}' - GMM Silhouette Score: {silhouette:.3f}")
@@ -366,10 +391,10 @@ def train_gmm(latent_reps, max_components=100, output_folder="/tmp", region="unk
         silhouette = None
         print(f"Region '{region}' - GMM Silhouette Score: N/A (single cluster)")
 
+    # Save the trained GMM model
     model_path = os.path.join(output_folder, f"gmm_{region}.pkl")
-    joblib.dump(bgmm if not use_gpu else gmm, model_path)
+    joblib.dump(gmm, model_path)
     return model_path, effective_components, silhouette
-
 # Generate QA plots using a subset of data
 def generate_qa_plots(file_paths, cae, gmm, device, num_samples=100):
     if len(file_paths) > num_samples:
@@ -468,7 +493,7 @@ def calculate_sps_from_df(df):
 
 # Main execution
 if __name__ == "__main__":
-    all_folders = list_s3_folders()[0:40]
+    all_folders = list_s3_folders()[0:5]
     random.shuffle(all_folders)
     selected_folders = all_folders
     csv_files = []
