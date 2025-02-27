@@ -79,16 +79,16 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
 
     # Define scales for EEG bands if not provided
     if scales is None:
-        fs = 1.0 / sampling_period
+        fs = 1.0 / sampling_period  # fs = 256 Hz in your case
         eeg_bands = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 12), "beta": (12, 30), "gamma": (30, 40)}
-        scales_per_band = 5
+        scales_per_band = 5  # Number of scales per band
         scales = []
         for f_min, f_max in eeg_bands.values():
-            scale_max = pywt.scale2frequency(wavelet, f_min) * fs
-            scale_min = pywt.scale2frequency(wavelet, f_max) * fs
+            scale_min = fs / f_max  # Smaller scale for higher frequency
+            scale_max = fs / f_min  # Larger scale for lower frequency
             band_scales = np.logspace(np.log10(scale_min), np.log10(scale_max), scales_per_band)
             scales.extend(band_scales)
-        scales = np.sort(scales)
+        scales = np.unique(np.sort(scales))  # Ensure unique, sorted scales
 
     # Perform CWT per channel and compute magnitude
     for channel_idx in range(num_channels):
