@@ -127,15 +127,25 @@ def get_latent_space(model, dataloader, device=torch.device("cpu")):
 class NpyDataset(Dataset):
     def __init__(self, directory):
         self.directory = directory
-        # Get a list of all .npy files in the directory
-        self.file_list = [f for f in os.listdir(directory) if f.endswith('.npy')]
-        # Load the first image to determine the shape
-        if len(self.file_list) > 0:
-            first_image_path = os.path.join(self.directory, self.file_list[0])
-            first_image = np.load(first_image_path)
-            self.image_shape = first_image.shape  # Expected to be (C, H, W)
-        else:
-            self.image_shape = None
+        self.file_list = []
+        files = [f for f in os.listdir(directory) if f.endswith('.npy')]
+        self.image_shape = None
+
+        # Loop over files to set the expected shape and filter out mismatches
+        for f in files:
+            file_path = os.path.join(directory, f)
+            try:
+                image = np.load(file_path)
+                # If we haven't set the expected shape yet, do it now.
+                if self.image_shape is None:
+                    self.image_shape = image.shape
+                # Check if the current file's shape matches the expected shape.
+                if image.shape == self.image_shape:
+                    self.file_list.append(f)
+                else:
+                    print(f"Skipping file {file_path} due to shape mismatch. Expected {self.image_shape}, got {image.shape}")
+            except Exception as e:
+                print(f"Skipping file {file_path} due to error: {e}")
 
     def __len__(self):
         # Return the total number of images
