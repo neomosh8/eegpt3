@@ -597,29 +597,31 @@ def calculate_sps_from_df(df):
 
 # Main execution
 if __name__ == "__main__":
-    all_folders = list_s3_folders()[0:5]
-    random.shuffle(all_folders)
-    selected_folders = all_folders
-    csv_files = []
-    for i, folder in enumerate(selected_folders):
-        print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
-        all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(3, len(all_files)))
-        csv_files.extend(selected_files)
-        print(f"Selected {len(selected_files)} files")
-
-    print(f"Total files: {len(csv_files)}")
-
-    all_saved_files = collect_coeffs_from_s3(
-        csv_files,
-        "dataframes--use1-az6--x-s3",
-        num_samples_per_file=400,
-        window_length_sec=2
-    )
-
-    s3 = boto3.client("s3")
+    # all_folders = list_s3_folders()[0:5]
+    # random.shuffle(all_folders)
+    # selected_folders = all_folders
+    # csv_files = []
+    # for i, folder in enumerate(selected_folders):
+    #     print(f"{i+1}/{len(selected_folders)}: Folder: {folder}")
+    #     all_files = list_csv_files_in_folder(folder)
+    #     selected_files = random.sample(all_files, min(3, len(all_files)))
+    #     csv_files.extend(selected_files)
+    #     print(f"Selected {len(selected_files)} files")
+    #
+    # print(f"Total files: {len(csv_files)}")
+    #
+    # all_saved_files = collect_coeffs_from_s3(
+    #     csv_files,
+    #     "dataframes--use1-az6--x-s3",
+    #     num_samples_per_file=400,
+    #     window_length_sec=2
+    # )
+    #
+    # s3 = boto3.client("s3")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    all_saved_files = [ "/Volumes/Untitled/sub-090_ses-03_task-VisualWorkingMemory_eeg.csv"]
+    process_csv_for_coeffs()
     cae_path, encoder, min_val, max_val = train_cae(
         all_saved_files,
         region="unified"
@@ -645,13 +647,13 @@ if __name__ == "__main__":
             gmm = joblib.load(gmm_path)
             generate_qa_plots(all_saved_files, cae, gmm, device, num_samples=100)
 
-        if cae_path:
-            s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", "cae_models/cae_unified.pt")
-            os.remove(cae_path)
-            print("Uploaded unified CAE model")
-        if gmm_path:
-            s3.upload_file(gmm_path, "dataframes--use1-az6--x-s3", "gmm_models/gmm_unified.pkl")
-            os.remove(gmm_path)
-            print("Uploaded unified GMM model")
+        # if cae_path:
+        #     s3.upload_file(cae_path, "dataframes--use1-az6--x-s3", "cae_models/cae_unified.pt")
+        #     os.remove(cae_path)
+        #     print("Uploaded unified CAE model")
+        # if gmm_path:
+        #     s3.upload_file(gmm_path, "dataframes--use1-az6--x-s3", "gmm_models/gmm_unified.pkl")
+        #     os.remove(gmm_path)
+        #     print("Uploaded unified GMM model")
     else:
         print("CAE training failed, skipping GMM training")

@@ -18,8 +18,8 @@ from  openai import OpenAI
 wvlet = 'db2'
 level = 4
 client = OpenAI(
-    api_key=os.getenv('api_key')
-)
+    # api_key='os.getenv('api_key')
+     api_key='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')
 
 def calculate_stats(data):
     """Calculate mean and order of magnitude."""
@@ -46,8 +46,84 @@ def plot_amplitude_histogram(data, channel_name='Unknown', bins=50):
     plt.show()
 
 
+import numpy as np
+import pywt
+import matplotlib.pyplot as plt
 
-def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
+
+def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0,
+                             verbose=True):
+    """
+    Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
+    Optionally, perform per-scale z-score normalization and plot the result.
+
+    Args:
+        window (numpy.ndarray): 2D array (channels x samples).
+        wavelet (str): Wavelet type (default: 'cmor1.5-1.0').
+        scales (list or None): Scales for CWT. If None, computed based on EEG bands.
+        normalization (bool): If True, apply per-scale z-score normalization to coefficients.
+        sampling_period (float): Sampling period in seconds.
+        verbose (bool): If True, plot the wavelet decomposition result for each channel.
+
+    Returns:
+        tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
+               - decomposed_channels: List of 2D arrays, each with shape (scales, time_points),
+                                      containing the (optionally normalized) coefficient magnitudes.
+               - scales: Array of scales used in CWT.
+               - original_signal_length: Number of samples in the input signal.
+               - normalized_data: Array of the input signals after any pre-normalization (here simply copied).
+    """
+    num_channels, num_samples = window.shape
+    decomposed_channels = []
+    normalized_data = []
+
+    # Make a copy of the input window data (if any pre-normalization is needed)
+    window_normalized = window.copy()
+
+    # Define scales if not provided, based on typical EEG bands
+    if scales is None:
+        fs = 1.0 / sampling_period  # For example, if sampling_period = 1/256, then fs = 256 Hz.
+        eeg_bands = {"delta": (0.1, 4), "theta": (4, 8), "alpha": (8, 12), "beta": (12, 30), "gamma": (30, 80)}
+        scales_per_band = 28  # Number of scales per EEG band
+        scales = []
+        for f_min, f_max in eeg_bands.values():
+            scale_min = fs / f_max  # Smaller scale for higher frequency components
+            scale_max = fs / f_min  # Larger scale for lower frequency components
+            band_scales = np.logspace(np.log10(scale_min), np.log10(scale_max), scales_per_band)
+            scales.extend(band_scales)
+        scales = np.unique(np.sort(scales))  # Ensure unique and sorted scales
+
+    # Process each channel
+    for channel_idx in range(num_channels):
+        # Perform continuous wavelet transform on the channel data
+        coeffs, _ = pywt.cwt(window_normalized[channel_idx, :], scales, wavelet, sampling_period=sampling_period)
+        # Take the absolute value to get the magnitude (resulting shape: [num_scales x num_samples])
+        magnitude = np.abs(coeffs)
+
+        # If normalization is enabled, standardize each scale (row) separately
+        if normalization:
+            for j in range(magnitude.shape[0]):
+                mean_scale = np.mean(magnitude[j, :])
+                std_scale = np.std(magnitude[j, :]) if np.std(magnitude[j, :]) > 0 else 1e-8
+                magnitude[j, :] = (magnitude[j, :] - mean_scale) / std_scale
+
+        decomposed_channels.append(magnitude)
+        normalized_data.append(window_normalized[channel_idx, :])
+
+        # If verbose, plot the wavelet coefficients for the current channel
+        if verbose:
+            plt.figure(figsize=(10, 6))
+            plt.imshow(magnitude, aspect='auto', extent=[0, num_samples, scales[0], scales[-1]], origin='lower')
+            plt.colorbar(label='Coefficient (normalized)' if normalization else 'Coefficient magnitude')
+            plt.title(f'Wavelet Decomposition (Channel {channel_idx})')
+            plt.xlabel('Time')
+            plt.ylabel('Scale')
+            plt.show()
+
+    return (decomposed_channels, scales, num_samples, np.array(normalized_data))
+
+
+def wavelet_decompose_window_old(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
     """
     Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
 
@@ -69,13 +145,8 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
     decomposed_channels = []
     normalized_data = []
 
-    # Normalization
-    if normalization:
-        mean = np.mean(window)
-        std = np.std(window) if np.std(window) > 0 else 1
-        window_normalized = (window - mean) / std
-    else:
-        window_normalized = window.copy()
+
+    window_normalized = window.copy()
 
     # Define scales for EEG bands if not provided
     if scales is None:
@@ -402,29 +473,43 @@ def resample_windows(ndarray, original_sps, new_rate=128):
     return np.array(resampled_ndarray)
 
 
-def filter_band_pass_windows(ndarray, sps):
+def filter_band_pass_windows(ndarray, sps,plot=False):
     """
-    Apply a bandpass filter to the data.
+    Apply a bandpass filter to the data and plot the PSD before and after filtering.
     :param ndarray: 2D numpy array (channels x samples).
     :param sps: Sampling rate.
     :return: 2D numpy array with bandpass filtered data.
     """
-    # # Example bandpass between 0.1 - 48 Hz
-    # f_b, f_a = signal.butter(N=5, Wn=[0.1, 48], btype='bandpass', fs=sps)
-    # filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
-    # return filtered_data
-    f_b, f_a = signal.butter(N=5, Wn=60, btype='low', fs=sps)
+    # Compute PSD before filtering for the first channel
+    freqs_before, psd_before = signal.welch(ndarray[0, :], fs=sps, nperseg=1024)
+
+    # Existing filter implementation
+    f_b, f_a = signal.butter(N=30, Wn=( sps / 4), btype='low', fs=sps)
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
     notch_freqs = [50, 60]  # Frequencies to notch out (in Hz)
-
     # Apply each notch filter in series
     for f0 in notch_freqs:
         b_notch, a_notch = signal.iirnotch(w0=f0, Q=quality_factor, fs=sps)
         filtered_data = signal.filtfilt(b_notch, a_notch, filtered_data, axis=1)
-    return filtered_data
 
+    if plot:
+        # Compute PSD after filtering for the first channel
+        freqs_after, psd_after = signal.welch(filtered_data[0, :], fs=sps, nperseg=1024)
+
+        # Create inline plot
+        plt.figure()
+        plt.semilogy(freqs_before, psd_before, label='Before Filtering')
+        plt.semilogy(freqs_after, psd_after, label='After Filtering')
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Power Spectral Density (dB/Hz)')
+        plt.title('PSD Before and After Filtering (First Channel)')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+    return filtered_data
 
 def preprocess_data(data, original_sps):
     """
