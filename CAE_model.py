@@ -198,7 +198,7 @@ if __name__ == "__main__":
     dataset = NpyDataset(training_data_directory)
 
     # Create the DataLoader
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
     # Define input shape (C, H, W) from the dataset
     try:
@@ -211,7 +211,7 @@ if __name__ == "__main__":
     # Initialize and train the CAE
     cae_model = CAE(input_shape, latent_dim=1024)
     device = torch.device("cuda" if torch.cuda.is_available() else  "mps" if torch.mps.is_available() else "cpu")
-    cae_model = train_cae(cae_model, dataloader, epochs=100, lr=1e-3, device=device)
+    cae_model = train_cae(cae_model, dataloader, epochs=100, lr=4e-3, device=device)
 
     # After training, extract the latent representations
     latent_reps = get_latent_space(cae_model, dataloader, device=device)
@@ -264,12 +264,13 @@ if __name__ == "__main__":
     ax.set_ylabel("Cluster Label")
     ax.axvline(x=sil_score, color="red", linestyle="--", label=f"Average Silhouette Score: {sil_score:.2f}")
     ax.legend()
-    plt.show()
+    plt.savefig("QA/Silhouette.png")
+    plt.close()
 
     # -------------------------
     # Visualizing the Latent Space using t-SNE
     # -------------------------
-    tsne = TSNE(n_components=2, random_state=42,perplexity=3)
+    tsne = TSNE(n_components=2, random_state=42)
     latent_2d = tsne.fit_transform(latent_reps)
 
     plt.figure(figsize=(8, 6))
@@ -278,4 +279,5 @@ if __name__ == "__main__":
     plt.title("t-SNE Projection of Latent Space Colored by DP-GMM Clusters")
     plt.xlabel("t-SNE Component 1")
     plt.ylabel("t-SNE Component 2")
-    plt.show()
+    plt.savefig("QA/latent_space_tsne.png")
+    plt.close()
