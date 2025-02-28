@@ -185,7 +185,7 @@ if __name__ == "__main__":
     from utils import list_s3_folders, list_csv_files_in_folder
 
     # Step 1: Get the list of CSV files from S3
-    all_folders = list_s3_folders()[0:5]
+    all_folders = list_s3_folders()
     random.shuffle(all_folders)
     selected_folders = all_folders
     csv_files = []

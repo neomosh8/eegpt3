@@ -211,11 +211,11 @@ if __name__ == "__main__":
     # Initialize and train the CAE
     cae_model = CAE(input_shape, latent_dim=1024)
     device = torch.device("cuda" if torch.cuda.is_available() else  "mps" if torch.mps.is_available() else "cpu")
-    cae_model = train_cae(cae_model, dataloader, epochs=100, lr=4e-3, device=device)
+    cae_model = train_cae(cae_model, dataloader, epochs=100, lr=3e-4, device=device)
 
     # After training, extract the latent representations
     latent_reps = get_latent_space(cae_model, dataloader, device=device)
-    dp_gmm = train_dp_gmm(latent_reps, n_components=4)
+    dp_gmm = train_dp_gmm(latent_reps, n_components=100)
 
     print("Latent space shape:", latent_reps.shape)
     # Optionally, predict cluster labels for the latent representations
