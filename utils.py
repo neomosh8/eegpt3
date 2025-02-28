@@ -18,8 +18,8 @@ from  openai import OpenAI
 wvlet = 'db2'
 level = 4
 client = OpenAI(
-    # api_key='os.getenv('api_key')
-     api_key='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')
+    api_key=os.getenv('api_key'))
+    #  api_key='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')
 
 def calculate_stats(data):
     """Calculate mean and order of magnitude."""
