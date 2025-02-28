@@ -142,13 +142,15 @@ class NpyDataset(Dataset):
         return len(self.file_list)
 
     def __getitem__(self, idx):
-        # Construct the full path to the .npy file
         file_path = os.path.join(self.directory, self.file_list[idx])
-        # Load the image from the .npy file
-        image = np.load(file_path)
-        # Convert the NumPy array to a PyTorch tensor
-        image = torch.from_numpy(image)
-        return image
+        try:
+            image = np.load(file_path)
+        except EOFError:
+            print(f"Skipping file {file_path} due to EOFError")
+            # Option 1: Return a default image (e.g., an array of zeros)
+            image = np.zeros(self.image_shape) if self.image_shape is not None else None
+            # Option 2: You could also raise a custom exception or handle it in a way that fits your training loop.
+        return torch.from_numpy(image)
 
     def get_image_shape(self):
         """
