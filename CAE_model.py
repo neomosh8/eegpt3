@@ -195,7 +195,7 @@ def train_dp_gmm(latent_data, n_components=10):
         covariance_type='full',
         weight_concentration_prior_type='dirichlet_process',
         weight_concentration_prior=1e-2,  # Adjust based on your dataset
-        max_iter=1000,
+        max_iter=10000,
         random_state=42,
     )
     dp_gmm.fit(latent_data)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     dataset = NpyDataset(training_data_directory)
 
     # Create the DataLoader
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     # Define input shape (C, H, W) from the dataset
     try:
@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
     # After training, extract the latent representations
     latent_reps = get_latent_space(cae_model, dataloader, device=device)
-    dp_gmm = train_dp_gmm(latent_reps, n_components=100)
+    dp_gmm = train_dp_gmm(latent_reps, n_components=1000)
 
     print("Latent space shape:", latent_reps.shape)
     # Optionally, predict cluster labels for the latent representations
