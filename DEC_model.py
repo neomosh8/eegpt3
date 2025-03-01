@@ -455,9 +455,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=16)
+    parser.add_argument("--latent_dim", type=int, default=32)
     parser.add_argument("--n_clusters", type=int, default=10)
-    parser.add_argument("--epochs_cae", type=int, default=100)
+    parser.add_argument("--epochs_cae", type=int, default=50)
     parser.add_argument("--epochs_dec", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -478,7 +478,7 @@ if __name__ == "__main__":
     input_shape = sample_data.shape  # e.g., (C, H, W)
     cae_model = CAE(input_shape, args.latent_dim)
     cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
-                             epochs=args.epochs_cae, lr=1e-3, device=args.device)
+                             epochs=args.epochs_cae, lr=3e-4, device=args.device)
 
     # ---- QA: Check reconstructions from validation set ----
     plot_ae_reconstructions(cae_model, val_loader, device=args.device,
