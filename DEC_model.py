@@ -91,7 +91,7 @@ class ConvDecoder(nn.Module):
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.Tanh()
+            # nn.Tanh()
         )
         self.out_channels = out_channels
         self.out_h = out_h
