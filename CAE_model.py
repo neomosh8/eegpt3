@@ -221,7 +221,7 @@ if __name__ == "__main__":
         print(f"Error: {e}")
 
     # Initialize and train the CAE
-    cae_model = CAE(input_shape, latent_dim=1024)
+    cae_model = CAE(input_shape, latent_dim=32)
     device = torch.device("cuda" if torch.cuda.is_available() else  "mps" if torch.mps.is_available() else "cpu")
     cae_model = train_cae(cae_model, dataloader, epochs=100, lr=3e-4, device=device)
 
