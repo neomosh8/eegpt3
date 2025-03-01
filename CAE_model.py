@@ -210,7 +210,7 @@ if __name__ == "__main__":
     dataset = NpyDataset(training_data_directory)
 
     # Create the DataLoader
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=256, shuffle=True)
 
     # Define input shape (C, H, W) from the dataset
     try:
