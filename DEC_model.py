@@ -111,7 +111,7 @@ class CAE(nn.Module):
 ##############################
 #   Train the CAE
 ##############################
-def pretrain_cae(cae_model, train_loader, val_loader=None, epochs=10, lr=1e-3, device='cuda'):
+def pretrain_cae(cae_model, train_loader, val_loader=None, epochs=10, lr=4e-3, device='cuda'):
     cae_model.to(device)
     optimizer = optim.Adam(cae_model.parameters(), lr=lr)
     criterion = nn.MSELoss()
@@ -306,7 +306,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=64)
+    parser.add_argument("--latent_dim", type=int, default=16)
     parser.add_argument("--n_clusters", type=int, default=10)
     parser.add_argument("--epochs_cae", type=int, default=50)
     parser.add_argument("--epochs_dec", type=int, default=10)
