@@ -455,7 +455,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=32)
+    parser.add_argument("--latent_dim", type=int, default=128)
     parser.add_argument("--n_clusters", type=int, default=10)
     parser.add_argument("--epochs_cae", type=int, default=50)
     parser.add_argument("--epochs_dec", type=int, default=10)
