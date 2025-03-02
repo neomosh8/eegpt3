@@ -425,7 +425,7 @@ def plot_most_frequent_cluster_images(dec_model, dataset, device='cuda',
         idx_counter = 0
         for batch in loader:
             batch = batch.to(device)
-            _, q = dec_model(batch)
+            _, _, q = dec_model(batch)
             lbls = torch.argmax(q, dim=1).cpu().numpy()
             for l in lbls:
                 idx_to_cluster.append(l)
@@ -565,15 +565,16 @@ class IDEC(nn.Module):
 
 
 def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
-                         device='cuda', lambda_recon=0.1, lambda_bal=0.1):
+                         device='cuda', lambda_recon=0.1, lambda_bal=0.3, lambda_entropy=0.1):
     """
-    Training loop for IDEC:
-      - First computes the soft assignments q over the entire training set.
-      - Then computes the refined target distribution p.
-      - Finally, trains the model by combining:
+    Training loop for IDEC with an additional entropy penalty regularizer.
+      - Computes the soft assignments q over the entire training set.
+      - Computes the refined target distribution p.
+      - Trains the model by combining:
            * KL divergence loss (between log q and p)
-           * Reconstruction loss (e.g. MSE between x and its reconstruction)
+           * Reconstruction loss (MSE between x and its reconstruction)
            * A balancing loss to encourage uniform cluster frequencies.
+           * An entropy penalty to explicitly discourage cluster collapse.
     """
     model.to(device)
     optimizer = optim.Adam([
@@ -583,6 +584,7 @@ def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
     ])
     loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
     train_data_size = len(train_loader.dataset)
+    model.target_beta = 0.3  # Increase beta to reduce over-sharpening
 
     for epoch in range(1, epochs + 1):
         # Step 1: Compute q for the entire dataset in evaluation mode
@@ -612,15 +614,19 @@ def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
             log_q = torch.log(q_batch + 1e-10)
             kl_loss = loss_fn_kl(log_q, p_batch)
 
-            # Reconstruction loss (e.g., MSE loss)
+            # Reconstruction loss (MSE)
             recon_loss = F.mse_loss(x_recon, batch)
 
-            # Balancing loss: penalize deviation from uniform cluster frequency
+            # Balancing loss: KL divergence from uniform to the average cluster frequency f
             f = torch.mean(q_batch, dim=0)
             uniform = torch.ones_like(f) / f.numel()
             balance_loss = torch.sum(uniform * (torch.log(uniform + 1e-10) - torch.log(f + 1e-10)))
 
-            total_loss = kl_loss + lambda_recon * recon_loss + lambda_bal * balance_loss
+            # Entropy penalty: encourage high entropy in f (i.e. a uniform distribution)
+            entropy = -torch.sum(f * torch.log(f + 1e-10))
+
+            # Combine losses: subtract the entropy penalty to encourage higher entropy (more balanced clusters)
+            total_loss = kl_loss + lambda_recon * recon_loss + lambda_bal * balance_loss - lambda_entropy * entropy
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -629,7 +635,8 @@ def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
 
         epoch_loss = running_loss / train_data_size
         print(f"[IDEC] Epoch {epoch}/{epochs}, Total Loss: {epoch_loss:.4f}, "
-              f"KL: {kl_loss.item():.4f}, Recon: {recon_loss.item():.4f}, Balance: {balance_loss.item():.4f}")
+              f"KL: {kl_loss.item():.4f}, Recon: {recon_loss.item():.4f}, "
+              f"Balance: {balance_loss.item():.4f}, Entropy: {entropy.item():.4f}")
 
         # Optional: Evaluate on validation data (e.g., using silhouette score)
         if val_loader is not None and epoch % 10 == 0:
@@ -652,6 +659,7 @@ def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
                 print("   [Val] Only one cluster => silhouette not defined.")
 
     return model
+
 
 # =========================
 #  6) Example Main Script
