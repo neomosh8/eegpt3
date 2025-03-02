@@ -242,10 +242,15 @@ class VaDE(nn.Module):
         return x_recon, mu_q, log_var_q, z
 
 
+# In the vae_loss function:
 def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
+
+    # Clamp log_var_q to prevent numerical instability
+    log_var_q = torch.clamp(log_var_q, min=-20, max=20)
+
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
     return recon_loss + beta * kl_div
 
@@ -436,7 +441,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--pretrain_epochs", type=int, default=50)
     parser.add_argument("--cluster_epochs", type=int, default=50)
     parser.add_argument("--warmup_epochs", type=int, default=25)
@@ -503,7 +508,7 @@ def main():
         # Wrap model in DDP with find_unused_parameters=True
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
         model._set_static_graph()
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,weight_decay=1e-5)
         scheduler = OneCycleLR(
             optimizer,
             max_lr=args.lr,
@@ -539,6 +544,7 @@ def main():
                 loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 total_train_loss += loss.item() * batch_size
@@ -620,6 +626,7 @@ def main():
                 loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 total_train_loss += loss.item() * batch_size
