@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+from sklearn.cluster import KMeans
 import os
 import numpy as np
 import torch
@@ -459,12 +464,7 @@ def plot_most_frequent_cluster_images(dec_model, dataset, device='cuda',
     plt.close()
     print(f"[QA] Saved images from most frequent cluster to {out_path}")
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import numpy as np
-from sklearn.cluster import KMeans
+
 
 class IDEC(nn.Module):
     """
@@ -692,7 +692,7 @@ if __name__ == "__main__":
                             n=8, out_path='QA/DEC/ae_recons.png')
 
     # 3) DEC Setup
-    dec_model = DEC(encoder=cae_model.encoder, n_clusters=args.n_clusters, alpha=1)
+    dec_model = IDEC(encoder=cae_model.encoder, n_clusters=args.n_clusters, alpha=1)
     # Initialize cluster centers
     print("[MAIN] Initializing DEC cluster centers...")
     dec_model.initialize_centers(train_loader, device=args.device)
