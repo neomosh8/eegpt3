@@ -7,11 +7,54 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 import math
 
-from DEC_model import EEGNpyDataset, plot_ae_reconstructions
+from DEC_model import EEGNpyDataset
 
-
+import os
+import matplotlib.pyplot as plt
+def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png'):
+    model.eval()
+    with torch.no_grad():
+        for batch in data_loader:
+            x = batch.to(device)
+            x_recon, _, _, _ = model(x)
+            break
+    x = x.cpu()[:n]
+    x_recon = x_recon.cpu()[:n]
+    fig, axes = plt.subplots(2, n, figsize=(n*2, 4))
+    for i in range(n):
+        axes[0, i].imshow(x[i].reshape(28, 28), cmap='gray')  # Adjust shape as needed
+        axes[1, i].imshow(x_recon[i].reshape(28, 28), cmap='gray')
+        axes[0, i].axis('off')
+        axes[1, i].axis('off')
+    plt.savefig(out_path)
+    plt.close()
+# Create QA/VaDE directory if it doesn't exist
+os.makedirs('QA/VaDE', exist_ok=True)
 # Assuming EEGNpyDataset and plot_ae_reconstructions are defined elsewhere
 # from your_module import EEGNpyDataset, plot_ae_reconstructions
+
+def predict_clusters(model, data_loader, device):
+    model.eval()
+    clusters = []
+    with torch.no_grad():
+        for batch in data_loader:
+            x = batch.to(device)
+            _, mu_q, log_var_q, z = model(x)
+            # Compute q(c|x)
+            diff = mu_q.unsqueeze(1) - model.mu_c  # (batch_size, K, latent_dim)
+            log_likelihood = (
+                -0.5 * model.latent_dim * math.log(2 * math.pi)
+                - 0.5 * model.latent_dim * model.log_var_c
+                - 0.5 / model.log_var_c.exp() * diff.pow(2).sum(2)
+            )  # (batch_size, K)
+            log_p_c = F.log_softmax(model.log_p_c, dim=0)  # (K,)
+            log_q_c_x_unnorm = log_p_c + log_likelihood
+            log_q_c_x = F.log_softmax(log_q_c_x_unnorm, dim=1)
+            q_c_x = log_q_c_x.exp()  # (batch_size, K)
+            cluster_assignments = q_c_x.argmax(dim=1)  # (batch_size,)
+            clusters.append(cluster_assignments.cpu().numpy())
+    clusters = np.concatenate(clusters)
+    return clusters
 
 class VaDE(nn.Module):
     """
@@ -158,7 +201,16 @@ def initialize_gmm_params(model, train_loader, device):
 
         # Initialize p(c) as uniform (log_p_c = 0)
         model.log_p_c.data = torch.zeros(model.n_clusters).to(device)
-
+def evaluate_vae(model, data_loader, device):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for batch in data_loader:
+            x = batch.to(device)
+            x_recon, mu_q, log_var_q, z = model(x)
+            loss = vae_loss(x, x_recon, mu_q, log_var_q)  # Assume vae_loss is defined
+            total_loss += loss.item()
+    return total_loss / len(data_loader)
 if __name__ == "__main__":
     import argparse
 
@@ -190,42 +242,92 @@ if __name__ == "__main__":
 
     # 3) Pretraining as VAE
     print("Starting VAE pretraining...")
+    pretrain_train_losses = []
+    pretrain_val_losses = []
+
     for epoch in range(args.pretrain_epochs):
         model.train()
         train_loss = 0
         for batch in train_loader:
             x = batch.to(args.device)
-            optimizer.zero_grad()
             x_recon, mu_q, log_var_q, z = model(x)
             loss = vae_loss(x, x_recon, mu_q, log_var_q)
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
-        print(f"Pretraining Epoch {epoch+1}/{args.pretrain_epochs}, "
-              f"Loss: {train_loss / len(train_loader):.4f}")
+        train_loss /= len(train_loader)
+        pretrain_train_losses.append(train_loss)
 
+        val_loss = evaluate_vae(model, val_loader, args.device)
+        pretrain_val_losses.append(val_loss)
+        print(f"Pretraining Epoch {epoch + 1}/{args.pretrain_epochs}, "
+              f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+    plt.plot(pretrain_train_losses, label='Train')
+    plt.plot(pretrain_val_losses, label='Val')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Pretraining Loss')
+    plt.legend()
+    plt.savefig('QA/VaDE/pretrain_loss.png')
+    plt.close()
     # 4) Initialize GMM parameters
     print("Initializing GMM parameters...")
     initialize_gmm_params(model, train_loader, args.device)
 
     # 5) Training with VaDE loss
     print("Starting VaDE clustering training...")
+
+
+    def evaluate_vade(model, data_loader, device):
+        model.eval()
+        total_loss = 0
+        with torch.no_grad():
+            for batch in data_loader:
+                x = batch.to(device)
+                x_recon, mu_q, log_var_q, z = model(x)
+                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)  # Assume vade_loss is defined
+                total_loss += loss.item()
+        return total_loss / len(data_loader)
+
+
+    cluster_train_losses = []
+    cluster_val_losses = []
+
     for epoch in range(args.cluster_epochs):
         model.train()
         train_loss = 0
         for batch in train_loader:
             x = batch.to(args.device)
-            optimizer.zero_grad()
             x_recon, mu_q, log_var_q, z = model(x)
             loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
-        print(f"Clustering Epoch {epoch+1}/{args.cluster_epochs}, "
-              f"Loss: {train_loss / len(train_loader):.4f}")
+        train_loss /= len(train_loader)
+        cluster_train_losses.append(train_loss)
 
-    # 6) Evaluate reconstructions
-    model.eval()
-    print("Generating reconstructions...")
-    plot_ae_reconstructions(model, val_loader, device=args.device,
-                            n=8, out_path='QA/DEC/ae_recons.png')
+        val_loss = evaluate_vade(model, val_loader, args.device)
+        cluster_val_losses.append(val_loss)
+        print(f"Clustering Epoch {epoch + 1}/{args.cluster_epochs}, "
+              f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+    plt.plot(cluster_train_losses, label='Train')
+    plt.plot(cluster_val_losses, label='Val')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Clustering Training Loss')
+    plt.legend()
+    plt.savefig('QA/VaDE/cluster_loss.png')
+    plt.close()
+    clusters = predict_clusters(model, val_loader, args.device)
+
+    # Plot histogram
+    plt.hist(clusters, bins=np.arange(model.n_clusters + 1) - 0.5, rwidth=0.8)
+    plt.xlabel('Cluster')
+    plt.ylabel('Frequency')
+    plt.title('Cluster Assignments Histogram')
+    plt.savefig('QA/VaDE/clusters_histogram.png')
+    plt.close()
+    plot_ae_reconstructions(model, val_loader, device=args.device, n=8, out_path='QA/VaDE/final_ae_recons.png')
