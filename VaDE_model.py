@@ -255,7 +255,7 @@ if __name__ == "__main__":
     input_shape = sample_data.shape  # (C, H, W)
 
     # 2) Model
-    model = VaDE(input_shape=input_shape, latent_dim=10, n_clusters=10).to(args.device)
+    model = VaDE(input_shape=input_shape, latent_dim=1024, n_clusters=1024).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # 3) Pretraining as VAE
