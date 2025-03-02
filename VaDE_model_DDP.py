@@ -169,38 +169,41 @@ class VaDE(nn.Module):
         self.n_clusters = n_clusters
         C, H, W = input_shape
 
-        # Encoder: Deeper with 4 conv layers
         self.encoder = nn.Sequential(
-            nn.Conv2d(C, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(C, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(128 * (H // 8) * (W // 8), 256),
+            nn.Linear(256 * (H // 8) * (W // 8), 512),
             nn.ReLU(),
-            nn.Linear(256, 2 * latent_dim)  # Outputs mu and log_var
+            nn.Linear(512, 2 * latent_dim)  # Outputs mu and log_var
         )
-
-        # Decoder: Deeper with 4 transposed conv layers
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256),
+            nn.Linear(latent_dim, 512),
             nn.ReLU(),
-            nn.Linear(256, 128 * (H // 8) * (W // 8)),
+            nn.Linear(512, 256 * (H // 8) * (W // 8)),
             nn.ReLU(),
-            nn.Unflatten(1, (128, H // 8, W // 8)),
+            nn.Unflatten(1, (256, H // 8, W // 8)),
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
             nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(16, C, kernel_size=3, stride=1, padding=1),
+            nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1)
         )
-
         # GMM parameters
         self.mu_c = nn.Parameter(torch.randn(n_clusters, latent_dim))
         self.log_var_c = nn.Parameter(torch.zeros(n_clusters))
