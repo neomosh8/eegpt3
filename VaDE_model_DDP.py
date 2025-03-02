@@ -9,7 +9,6 @@ import math
 import os
 import matplotlib.pyplot as plt
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from DEC_model import EEGNpyDataset
@@ -17,15 +16,23 @@ from DEC_model import EEGNpyDataset
 
 def setup(rank, world_size):
     """Initialize the distributed environment."""
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    if "MASTER_ADDR" not in os.environ:
+        os.environ["MASTER_ADDR"] = "localhost"
+    if "MASTER_PORT" not in os.environ:
+        os.environ["MASTER_PORT"] = "12355"
+
+    # torchrun sets up the process group for us, so we don't need to call init_process_group
+    if not dist.is_initialized():
+        dist.init_process_group("nccl")
     torch.cuda.set_device(rank)
+    print(
+        f"Process {rank}/{world_size} initialized with MASTER_ADDR={os.environ['MASTER_ADDR']}, MASTER_PORT={os.environ['MASTER_PORT']}")
 
 
 def cleanup():
     """Clean up the distributed environment."""
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png', rank=0):
@@ -85,14 +92,22 @@ def predict_clusters(model, data_loader, device):
             q_c_x = log_q_c_x.exp()  # (batch_size, K)
             cluster_assignments = q_c_x.argmax(dim=1)  # (batch_size,)
             clusters.append(cluster_assignments.cpu().numpy())
-    # Gather results from all processes
+
+    # Since we're using DistributedSampler, each process has a unique subset
+    # We need to gather all results
     all_clusters = [None for _ in range(dist.get_world_size())]
-    dist.all_gather_object(all_clusters, clusters)
-    # Flatten list of lists
-    if device == 0:  # Only process on rank 0
-        all_clusters_flat = [item for sublist in all_clusters for item in sublist]
-        return np.concatenate(all_clusters_flat)
-    return None
+    all_clusters_object = [clusters]  # What this process has
+
+    # Gather all cluster assignments from all processes
+    dist.all_gather_object(all_clusters, all_clusters_object)
+
+    # Flatten the nested list
+    result = []
+    for proc_clusters in all_clusters:
+        for batch_clusters in proc_clusters:
+            result.append(batch_clusters)
+
+    return np.concatenate(result)
 
 
 class VaDE(nn.Module):
@@ -228,7 +243,7 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     return recon_loss + beta * total_kl.mean()
 
 
-def initialize_gmm_params(model, train_loader, device, rank, world_size):
+def initialize_gmm_params(model, train_loader, device, rank):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
     # Only collect latent representations on current device
     with torch.no_grad():
@@ -240,15 +255,38 @@ def initialize_gmm_params(model, train_loader, device, rank, world_size):
         local_mu_q = torch.cat(all_mu_q, dim=0)
 
     # Gather all latent representations across devices
-    gathered_mu_q = [torch.zeros_like(local_mu_q) for _ in range(world_size)]
-    dist.all_gather(gathered_mu_q, local_mu_q)
+    local_size = torch.tensor([local_mu_q.shape[0]], device=device)
+    size_list = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(dist.get_world_size())]
+    dist.all_gather(size_list, local_size)
 
-    # Only process on rank 0 for K-means
+    max_size = max(size.item() for size in size_list)
+
+    # Pad tensor to same size for all_gather
+    if local_mu_q.shape[0] < max_size:
+        padding = torch.zeros(max_size - local_mu_q.shape[0], local_mu_q.shape[1], device='cpu')
+        padded_mu_q = torch.cat([local_mu_q, padding], dim=0)
+    else:
+        padded_mu_q = local_mu_q
+
+    # Move to the device for gathering
+    padded_mu_q = padded_mu_q.to(device)
+
+    # Gather tensors from all processes
+    gathered_mu_q = [torch.zeros_like(padded_mu_q) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered_mu_q, padded_mu_q)
+
+    # Process on rank 0 and then broadcast
     if rank == 0:
-        all_mu_q = torch.cat(gathered_mu_q, dim=0)
+        # Unpad and concatenate
+        all_mu_q = []
+        for i, size in enumerate(size_list):
+            all_mu_q.append(gathered_mu_q[i][:size.item()])
+        all_mu_q = torch.cat(all_mu_q, dim=0)
+
         mu_mean = all_mu_q.mean()
         mu_std = all_mu_q.std()
         print(f"Latent mu_q mean: {mu_mean.item():.4f}, std: {mu_std.item():.4f}")
+        print(f"Collected {all_mu_q.shape[0]} total latent vectors for clustering")
 
         # Run K-means
         kmeans = KMeans(n_clusters=model.module.n_clusters, random_state=42)
@@ -275,7 +313,7 @@ def initialize_gmm_params(model, train_loader, device, rank, world_size):
     dist.broadcast(model.module.log_p_c, 0)
 
 
-def evaluate_vae(model, data_loader, device, beta, rank, world_size):
+def evaluate_vae(model, data_loader, device, beta):
     model.eval()
     total_loss = 0
     total_samples = 0
@@ -299,7 +337,7 @@ def evaluate_vae(model, data_loader, device, beta, rank, world_size):
     return avg_loss
 
 
-def evaluate_vade(model, data_loader, device, rank, world_size):
+def evaluate_vade(model, data_loader, device):
     model.eval()
     total_loss = 0
     total_samples = 0
@@ -332,216 +370,13 @@ def save_checkpoint(model, optimizer, epoch, filename, rank=0):
         }, filename)
 
 
-def main_worker(rank, world_size, args):
-    print(f"Starting worker rank: {rank}, world_size: {world_size}")
-    setup(rank, world_size)
+def main():
+    # Get rank and world size from environment (set by torchrun)
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    # Create QA/VaDE directory if it doesn't exist (only on rank 0)
-    if rank == 0:
-        os.makedirs('QA/VaDE', exist_ok=True)
-
-    # Load dataset
-    dataset = EEGNpyDataset(args.data_dir, normalize=True)
-
-    # Split dataset
-    idxs = list(range(len(dataset)))
-    train_idx, val_idx = train_test_split(idxs, test_size=0.2, random_state=42)
-    train_ds = Subset(dataset, train_idx)
-    val_ds = Subset(dataset, val_idx)
-
-    # Use DistributedSampler
-    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False)
-
-    # Use DataLoader with the samplers
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler, num_workers=4,
-                              pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, sampler=val_sampler, num_workers=4, pin_memory=True)
-
-    # Get input shape
-    sample_data = dataset[0]
-    input_shape = sample_data.shape  # (C, H, W)
-    if rank == 0:
-        print(f"Input shape: {input_shape}")
-
-    # Create model
-    model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
-    # Wrap model in DDP
-    model = DDP(model, device_ids=[rank])
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
-    # Begin VAE pretraining
-    if rank == 0:
-        print("Starting VAE pretraining...")
-
-    pretrain_train_losses = []
-    pretrain_val_losses = []
-
-    for epoch in range(args.pretrain_epochs):
-        # Set epoch for sampler
-        train_sampler.set_epoch(epoch)
-
-        model.train()
-        beta = 0.0 if epoch < args.warmup_epochs else (epoch - args.warmup_epochs + 1) / (
-                    args.pretrain_epochs - args.warmup_epochs)
-
-        total_train_loss = 0
-        total_train_samples = 0
-        for batch in train_loader:
-            x = batch.to(rank)
-            batch_size = x.size(0)
-            x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_train_loss += loss.item() * batch_size
-            total_train_samples += batch_size
-
-        # Aggregate losses across all processes
-        train_loss_tensor = torch.tensor([total_train_loss], device=rank)
-        train_samples_tensor = torch.tensor([total_train_samples], device=rank)
-
-        dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(train_samples_tensor, op=dist.ReduceOp.SUM)
-
-        train_loss = train_loss_tensor.item() / train_samples_tensor.item() if train_samples_tensor.item() > 0 else 0
-
-        # Evaluate on validation set
-        val_loss = evaluate_vae(model, val_loader, rank, beta, rank, world_size)
-
-        if rank == 0:
-            pretrain_train_losses.append(train_loss)
-            pretrain_val_losses.append(val_loss)
-            print(f"Pretraining Epoch {epoch + 1}/{args.pretrain_epochs}, "
-                  f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-            # Save checkpoint periodically
-            if (epoch + 1) % 50 == 0:
-                save_checkpoint(model, optimizer, epoch, f'QA/VaDE/pretrain_checkpoint_epoch_{epoch + 1}.pt', rank)
-
-    # Plot pretraining losses (only on rank 0)
-    if rank == 0:
-        plt.plot(pretrain_train_losses, label='Train')
-        plt.plot(pretrain_val_losses, label='Val')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Pretraining Loss')
-        plt.legend()
-        plt.savefig('QA/VaDE/pretrain_loss.png')
-        plt.close()
-
-    # Initialize GMM parameters
-    if rank == 0:
-        print("Initializing GMM parameters...")
-    initialize_gmm_params(model, train_loader, rank, rank, world_size)
-
-    # Plot reconstructions (only on rank 0)
-    plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/pretrain_ae_recons.png', rank=rank)
-
-    # Begin VaDE clustering training
-    if rank == 0:
-        print("Starting VaDE clustering training...")
-
-    cluster_train_losses = []
-    cluster_val_losses = []
-
-    for epoch in range(args.cluster_epochs):
-        # Set epoch for sampler
-        train_sampler.set_epoch(epoch + args.pretrain_epochs)
-
-        model.train()
-        total_train_loss = 0
-        total_train_samples = 0
-        for batch in train_loader:
-            x = batch.to(rank)
-            batch_size = x.size(0)
-            x_recon, mu_q, log_var_q, z = model(x)
-            loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_train_loss += loss.item() * batch_size
-            total_train_samples += batch_size
-
-        # Aggregate losses across all processes
-        train_loss_tensor = torch.tensor([total_train_loss], device=rank)
-        train_samples_tensor = torch.tensor([total_train_samples], device=rank)
-
-        dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(train_samples_tensor, op=dist.ReduceOp.SUM)
-
-        train_loss = train_loss_tensor.item() / train_samples_tensor.item() if train_samples_tensor.item() > 0 else 0
-
-        # Evaluate on validation set
-        val_loss = evaluate_vade(model, val_loader, rank, rank, world_size)
-
-        if rank == 0:
-            cluster_train_losses.append(train_loss)
-            cluster_val_losses.append(val_loss)
-            print(f"Clustering Epoch {epoch + 1}/{args.cluster_epochs}, "
-                  f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-            # Save checkpoint periodically
-            if (epoch + 1) % 20 == 0:
-                save_checkpoint(model, optimizer, epoch, f'QA/VaDE/cluster_checkpoint_epoch_{epoch + 1}.pt', rank)
-
-    # Save final model (only on rank 0)
-    save_checkpoint(model, optimizer, args.cluster_epochs, 'QA/VaDE/final_model.pt', rank)
-
-    # Plot clustering losses (only on rank 0)
-    if rank == 0:
-        plt.plot(cluster_train_losses, label='Train')
-        plt.plot(cluster_val_losses, label='Val')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Clustering Training Loss')
-        plt.legend()
-        plt.savefig('QA/VaDE/cluster_loss.png')
-        plt.close()
-
-    # Predict clusters
-    clusters = None
-    if rank == 0:
-        clusters = predict_clusters(model, val_loader, rank)
-
-        # Plot histogram
-        plt.hist(clusters, bins=np.arange(model.module.n_clusters + 1) - 0.5, rwidth=0.8)
-        plt.xlabel('Cluster')
-        plt.ylabel('Frequency')
-        plt.title('Cluster Assignments Histogram')
-        plt.savefig('QA/VaDE/clusters_histogram.png')
-        plt.close()
-
-    # Plot final reconstructions (only on rank 0)
-    plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/final_ae_recons.png', rank=rank)
-
-    # Clean up
-    cleanup()
-
-
-def run_distributed(args):
-    """
-    Launches the distributed training across multiple processes.
-    """
-    world_size = torch.cuda.device_count()
-    if world_size < 1:
-        print("No CUDA devices available. Running on CPU.")
-        world_size = 1
-
-    print(f"Using {world_size} GPUs for distributed training")
-
-    mp.spawn(
-        main_worker,
-        args=(world_size, args),
-        nprocs=world_size,
-        join=True
-    )
-
-
-if __name__ == "__main__":
+    # Parse arguments
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
@@ -553,5 +388,231 @@ if __name__ == "__main__":
     parser.add_argument("--n_clusters", type=int, default=100)
     args = parser.parse_args()
 
-    # Launch distributed training
-    run_distributed(args)
+    try:
+        # Initialize process group
+        setup(rank, world_size)
+
+        # Create directory for outputs on rank 0
+        if rank == 0:
+            os.makedirs('QA/VaDE', exist_ok=True)
+            print(f"Starting training with {world_size} GPUs")
+
+        # Load dataset
+        if rank == 0:
+            print(f"Loading dataset from {args.data_dir}")
+
+        dataset = EEGNpyDataset(args.data_dir, normalize=True)
+
+        # Split dataset
+        idxs = list(range(len(dataset)))
+        train_idx, val_idx = train_test_split(idxs, test_size=0.2, random_state=42)
+        train_ds = Subset(dataset, train_idx)
+        val_ds = Subset(dataset, val_idx)
+
+        if rank == 0:
+            print(f"Dataset split: {len(train_ds)} training, {len(val_ds)} validation")
+
+        # Use DistributedSampler
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False)
+
+        # Use DataLoader with the samplers
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True,
+            drop_last=False
+        )
+
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            sampler=val_sampler,
+            num_workers=4,
+            pin_memory=True,
+            drop_last=False
+        )
+
+        # Get input shape
+        sample_data = dataset[0]
+        input_shape = sample_data.shape  # (C, H, W)
+        if rank == 0:
+            print(f"Input shape: {input_shape}")
+
+        # Create model
+        model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
+
+        # Wrap model in DDP (make sure to find_unused_parameters=True if needed)
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+        # Begin VAE pretraining
+        if rank == 0:
+            print("Starting VAE pretraining...")
+
+        pretrain_train_losses = []
+        pretrain_val_losses = []
+
+        for epoch in range(args.pretrain_epochs):
+            # Set epoch for sampler
+            train_sampler.set_epoch(epoch)
+
+            model.train()
+            beta = 0.0 if epoch < args.warmup_epochs else (epoch - args.warmup_epochs + 1) / (
+                        args.pretrain_epochs - args.warmup_epochs)
+
+            total_train_loss = 0
+            total_train_samples = 0
+            for batch in train_loader:
+                x = batch.to(rank)
+                batch_size = x.size(0)
+                x_recon, mu_q, log_var_q, z = model(x)
+                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_train_loss += loss.item() * batch_size
+                total_train_samples += batch_size
+
+            # Aggregate losses across all processes
+            train_loss_tensor = torch.tensor([total_train_loss], device=rank)
+            train_samples_tensor = torch.tensor([total_train_samples], device=rank)
+
+            dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(train_samples_tensor, op=dist.ReduceOp.SUM)
+
+            train_loss = train_loss_tensor.item() / train_samples_tensor.item() if train_samples_tensor.item() > 0 else 0
+
+            # Evaluate on validation set
+            val_loss = evaluate_vae(model, val_loader, rank, beta)
+
+            if rank == 0:
+                pretrain_train_losses.append(train_loss)
+                pretrain_val_losses.append(val_loss)
+                print(f"Pretraining Epoch {epoch + 1}/{args.pretrain_epochs}, "
+                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+                # Save checkpoint periodically
+                if (epoch + 1) % 50 == 0 or epoch + 1 == args.pretrain_epochs:
+                    save_checkpoint(model, optimizer, epoch, f'QA/VaDE/pretrain_checkpoint_epoch_{epoch + 1}.pt', rank)
+
+        # Plot pretraining losses (only on rank 0)
+        if rank == 0:
+            plt.figure(figsize=(10, 6))
+            plt.plot(pretrain_train_losses, label='Train')
+            plt.plot(pretrain_val_losses, label='Val')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Pretraining Loss')
+            plt.legend()
+            plt.savefig('QA/VaDE/pretrain_loss.png')
+            plt.close()
+            print("Pretraining completed successfully.")
+
+        # Initialize GMM parameters
+        if rank == 0:
+            print("Initializing GMM parameters...")
+
+        initialize_gmm_params(model, train_loader, rank, rank)
+        dist.barrier()  # Ensure all processes have updated parameters
+
+        # Plot reconstructions (only on rank 0)
+        plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/pretrain_ae_recons.png',
+                                rank=rank)
+
+        # Begin VaDE clustering training
+        if rank == 0:
+            print("Starting VaDE clustering training...")
+
+        cluster_train_losses = []
+        cluster_val_losses = []
+
+        for epoch in range(args.cluster_epochs):
+            # Set epoch for sampler
+            train_sampler.set_epoch(epoch + args.pretrain_epochs)
+
+            model.train()
+            total_train_loss = 0
+            total_train_samples = 0
+            for batch in train_loader:
+                x = batch.to(rank)
+                batch_size = x.size(0)
+                x_recon, mu_q, log_var_q, z = model(x)
+                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_train_loss += loss.item() * batch_size
+                total_train_samples += batch_size
+
+            # Aggregate losses across all processes
+            train_loss_tensor = torch.tensor([total_train_loss], device=rank)
+            train_samples_tensor = torch.tensor([total_train_samples], device=rank)
+
+            dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(train_samples_tensor, op=dist.ReduceOp.SUM)
+
+            train_loss = train_loss_tensor.item() / train_samples_tensor.item() if train_samples_tensor.item() > 0 else 0
+
+            # Evaluate on validation set
+            val_loss = evaluate_vade(model, val_loader, rank)
+
+            if rank == 0:
+                cluster_train_losses.append(train_loss)
+                cluster_val_losses.append(val_loss)
+                print(f"Clustering Epoch {epoch + 1}/{args.cluster_epochs}, "
+                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+                # Save checkpoint periodically
+                if (epoch + 1) % 20 == 0 or epoch + 1 == args.cluster_epochs:
+                    save_checkpoint(model, optimizer, epoch, f'QA/VaDE/cluster_checkpoint_epoch_{epoch + 1}.pt', rank)
+
+        # Save final model (only on rank 0)
+        save_checkpoint(model, optimizer, args.cluster_epochs, 'QA/VaDE/final_model.pt', rank)
+
+        # Plot clustering losses (only on rank 0)
+        if rank == 0:
+            plt.figure(figsize=(10, 6))
+            plt.plot(cluster_train_losses, label='Train')
+            plt.plot(cluster_val_losses, label='Val')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Clustering Training Loss')
+            plt.legend()
+            plt.savefig('QA/VaDE/cluster_loss.png')
+            plt.close()
+
+        # Predict clusters
+        if rank == 0:
+            print("Predicting clusters...")
+        clusters = predict_clusters(model, val_loader, rank)
+
+        # Plot histogram (only on rank 0)
+        if rank == 0 and clusters is not None:
+            plt.figure(figsize=(12, 6))
+            plt.hist(clusters, bins=np.arange(model.module.n_clusters + 1) - 0.5, rwidth=0.8)
+            plt.xlabel('Cluster')
+            plt.ylabel('Frequency')
+            plt.title('Cluster Assignments Histogram')
+            plt.savefig('QA/VaDE/clusters_histogram.png')
+            plt.close()
+
+        # Plot final reconstructions (only on rank 0)
+        plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/final_ae_recons.png', rank=rank)
+
+        if rank == 0:
+            print("Training completed successfully!")
+
+    except Exception as e:
+        print(f"Error on rank {rank}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean up
+        cleanup()
+
+
+if __name__ == "__main__":
+    main()
