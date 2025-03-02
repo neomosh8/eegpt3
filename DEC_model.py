@@ -249,7 +249,7 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
 
     optimizer = optim.Adam([
         {'params': dec_model.encoder.parameters(), 'lr': 0},  # Encoder frozen initially (lr=0)
-        {'params': [dec_model.cluster_centers], 'lr': 1e-4}  # Cluster centers trained with lr=1e-4
+        {'params': [dec_model.cluster_centers], 'lr': 1e-5}  # Cluster centers trained with lr=1e-4
     ])
     loss_fn = nn.KLDivLoss(reduction='batchmean')
 
@@ -269,8 +269,8 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
         # ---- 2) Compute p (target distribution) for entire dataset ----
         p = dec_model.target_distribution(all_q)
 
-        if epoch == 10:
-            optimizer.param_groups[0]['lr'] = 1e-5
+        if epoch == 100:
+            optimizer.param_groups[0]['lr'] = 1e-6
             print("[DEC] Switching to fine-tuning mode with encoder lr=1e-5")
 
         # ---- 3) Train in mini-batches, slicing p for each batch ----
@@ -463,9 +463,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--latent_dim", type=int, default=512)
-    parser.add_argument("--n_clusters", type=int, default=100)
-    parser.add_argument("--epochs_cae", type=int, default=100)
-    parser.add_argument("--epochs_dec", type=int, default=50)
+    parser.add_argument("--n_clusters", type=int, default=1000)
+    parser.add_argument("--epochs_cae", type=int, default=400)
+    parser.add_argument("--epochs_dec", type=int, default=200)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
