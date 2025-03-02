@@ -251,10 +251,12 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=4e-3)
-    parser.add_argument("--pretrain_epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=3e-2)
+    parser.add_argument("--pretrain_epochs", type=int, default=200)
     parser.add_argument("--cluster_epochs", type=int, default=20)
     parser.add_argument("--warmup_epochs", type=int, default=50)
+    parser.add_argument("--latent_dim", type=int, default=64)
+    parser.add_argument("--n_clusters", type=int, default=50)
     args = parser.parse_args()
 
     # 1) Dataset
@@ -272,7 +274,7 @@ if __name__ == "__main__":
     print(input_shape)
 
     # 2) Model
-    model = VaDE(input_shape=input_shape, latent_dim=16, n_clusters=100).to(args.device)
+    model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # 3) Pretraining as VAE
