@@ -269,7 +269,7 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
         # ---- 2) Compute p (target distribution) for entire dataset ----
         p = dec_model.target_distribution(all_q)
 
-        if epoch == 6:
+        if epoch == 10:
             optimizer.param_groups[0]['lr'] = 1e-5
             print("[DEC] Switching to fine-tuning mode with encoder lr=1e-5")
 
@@ -297,7 +297,7 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
         print(f"[DEC] Epoch {epoch}/{epochs}, KL Loss: {epoch_loss:.4f}")
 
         # Optional: measure cluster quality on val set
-        if val_loader is not None and epoch % 5 == 0:
+        if val_loader is not None and epoch % 10 == 0:
             dec_model.eval()
             z_vals = []
             labels = []
