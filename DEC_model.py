@@ -54,12 +54,10 @@ class ConvEncoder(nn.Module):
         C, H, W = input_shape
         # Define the conv layers
         self.conv_net = nn.Sequential(
-            nn.Conv2d(C, 16, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU()
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), nn.ReLU()
         )
         # Determine shape after convs
         with torch.no_grad():
@@ -86,12 +84,10 @@ class ConvDecoder(nn.Module):
         self.fc = nn.Linear(latent_dim, out_channels * out_h * out_w)
 
         self.deconv_net = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(16, 3, kernel_size=3, stride=2, padding=1, output_padding=1),
-            # nn.Tanh()
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(16, 3, kernel_size=3, stride=1, padding=1), nn.Tanh()
         )
         self.out_channels = out_channels
         self.out_h = out_h
@@ -454,8 +450,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--latent_dim", type=int, default=256)
     parser.add_argument("--n_clusters", type=int, default=10)
     parser.add_argument("--epochs_cae", type=int, default=50)
     parser.add_argument("--epochs_dec", type=int, default=10)
