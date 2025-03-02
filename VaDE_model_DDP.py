@@ -12,6 +12,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import Dataset
+from torch.amp import GradScaler, autocast
 
 from torch.cuda.amp import GradScaler, autocast
 
@@ -156,6 +157,14 @@ def predict_clusters(model, data_loader, device):
 
     return result
 
+def weights_init(m):
+    if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        nn.init.kaiming_normal_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+# Apply before training
+
 class VaDE(nn.Module):
     """
     Variational Deep Embedding (VaDE) model with a deeper convolutional encoder and decoder.
@@ -259,17 +268,18 @@ def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
 
     return recon_loss + beta * kl_div
 
+
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
-    # For DDP, we need to access parameters through model.module
+    # For DDP, access parameters through model.module
     if isinstance(model, DDP):
         d = model.module.latent_dim
-        var_c = model.module.log_var_c.exp()
+        var_c = torch.exp(model.module.log_var_c) + 1e-6  # Add epsilon for stability
         log_var_c = model.module.log_var_c
         mu_c = model.module.mu_c
         log_p_c = F.log_softmax(model.module.log_p_c, dim=0)
     else:
         d = model.latent_dim
-        var_c = model.log_var_c.exp()
+        var_c = torch.exp(model.log_var_c) + 1e-6  # Add epsilon for stability
         log_var_c = model.log_var_c
         mu_c = model.mu_c
         log_p_c = F.log_softmax(model.log_p_c, dim=0)
@@ -278,20 +288,29 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
 
+    # Compute difference with numerical stability
     diff = mu_q.unsqueeze(1) - mu_c
+
+    # Compute log likelihood with numerical safeguards
     log_likelihood = (
             -0.5 * d * math.log(2 * math.pi)
             - 0.5 * d * log_var_c
-            - 0.5 / var_c * diff.pow(2).sum(2)
+            - 0.5 * torch.div(diff.pow(2).sum(2) + 1e-8, var_c + 1e-8)  # Avoid division by zero
     )
-    log_q_c_x_unnorm = log_p_c + log_likelihood
-    log_q_c_x = F.log_softmax(log_q_c_x_unnorm, dim=1)
-    q_c_x = log_q_c_x.exp()
 
-    sum_var_q = log_var_q.exp().sum(1)
+    # More stable softmax computation
+    log_q_c_x = F.log_softmax(log_p_c + log_likelihood, dim=1)
+    q_c_x = torch.exp(log_q_c_x)
+
+    # Add numerical stability to variance calculation
+    var_q = torch.exp(log_var_q) + 1e-6
+    sum_var_q = var_q.sum(1)
     log_det_q = log_var_q.sum(1)
+
     diff_sq = diff.pow(2).sum(2)
-    inv_var_c = 1 / var_c
+    inv_var_c = 1.0 / (var_c + 1e-8)  # Add epsilon to denominator
+
+    # More stable KL computation
     kl_per_cluster = 0.5 * (
             inv_var_c.unsqueeze(0) * sum_var_q.unsqueeze(1) +
             inv_var_c.unsqueeze(0) * diff_sq +
@@ -299,11 +318,23 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
             log_det_q.unsqueeze(1)
     )
 
+    # Clip extremely large values to prevent numerical overflow
+    kl_per_cluster = torch.clamp(kl_per_cluster, max=1e6)
+
     expected_kl = (q_c_x * kl_per_cluster).sum(1)
     kl_categorical = (q_c_x * (log_q_c_x - log_p_c)).sum(1)
-    total_kl = expected_kl + kl_categorical
-    return recon_loss + beta * total_kl.mean()
 
+    total_kl = expected_kl + kl_categorical
+
+    # Clamp the final loss to prevent numerical issues
+    loss = recon_loss + beta * torch.clamp(total_kl.mean(), max=1e6)
+
+    # Early detection of NaN or Inf
+    if torch.isnan(loss) or torch.isinf(loss):
+        print("WARNING: Loss is NaN or Inf, using fallback loss")
+        return recon_loss  # Fallback to just reconstruction loss
+
+    return loss
 
 def initialize_gmm_params(model, train_loader, device, rank):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
@@ -507,24 +538,17 @@ def main():
         if rank == 0:
             print(f"Input shape: {input_shape}")
 
-        scaler = GradScaler()
+        scaler = GradScaler(device_type='cuda')
 
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
+        model.apply(weights_init)
 
         # Wrap model in DDP with find_unused_parameters=True
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
         model._set_static_graph()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,weight_decay=1e-5)
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=args.lr,
-            total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.3,
-            div_factor=25,
-            final_div_factor=1000,
-            anneal_strategy='cos'
-        )
+        OneCycleLR
         # Begin VAE pretraining
         if rank == 0:
             print("Starting VAE pretraining...")
@@ -546,7 +570,7 @@ def main():
                 x = batch.to(rank)
                 batch_size = x.size(0)
                 # Use mixed precision for forward pass
-                with autocast():
+                with autocast(device_type='cuda'):
                     x_recon, mu_q, log_var_q, z = model(x)
                     loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
 
@@ -613,9 +637,9 @@ def main():
         cluster_val_losses = []
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr,
-            total_steps=args.cluster_epochs * len(train_loader),
-            pct_start=0.3,
+            max_lr=args.lr / 10,  # Reduce max learning rate
+            total_steps=args.pretrain_epochs * len(train_loader),
+            pct_start=0.2,  # Slower warmup
             div_factor=25,
             final_div_factor=1000,
             anneal_strategy='cos'
@@ -633,7 +657,7 @@ def main():
                 batch_size = x.size(0)
 
                 # Use mixed precision for forward pass
-                with autocast():
+                with autocast(device_type='cuda'):
                     x_recon, mu_q, log_var_q, z = model(x)
                     loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
 
