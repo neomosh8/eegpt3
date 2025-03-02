@@ -662,10 +662,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=512)
-    parser.add_argument("--n_clusters", type=int, default=200)
-    parser.add_argument("--epochs_cae", type=int, default=10)
-    parser.add_argument("--epochs_dec", type=int, default=10)
+    parser.add_argument("--latent_dim", type=int, default=64)
+    parser.add_argument("--n_clusters", type=int, default=10)
+    parser.add_argument("--epochs_cae", type=int, default=50)
+    parser.add_argument("--epochs_dec", type=int, default=50)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -710,7 +710,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         for vbatch in val_loader:
             vb = vbatch.to(args.device)
-            _, vq = dec_model(vb)
+            _, _, vq = idec_model(vb)
             labels = torch.argmax(vq, dim=1).cpu().numpy()
             all_val_labels.extend(labels)
     all_val_labels = np.array(all_val_labels)
