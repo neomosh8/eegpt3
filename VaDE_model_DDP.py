@@ -324,7 +324,7 @@ def evaluate_vae(model, data_loader, device, beta):
             x = batch.to(device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q, model, beta=beta)
+            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)  # Remove model parameter
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
@@ -477,7 +477,8 @@ def main():
                 batch_size = x.size(0)
                 x_recon, mu_q, log_var_q, z = model(x)
                 # Pass the model to the loss function to include dummy terms for unused GMM params
-                loss = vae_loss(x, x_recon, mu_q, log_var_q, model=model, beta=beta)
+                # Change this line in the training loop:
+                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
