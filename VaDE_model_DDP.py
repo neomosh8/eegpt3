@@ -16,17 +16,11 @@ from DEC_model import EEGNpyDataset
 
 def setup(rank, world_size):
     """Initialize the distributed environment."""
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = "localhost"
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = "12355"
-
-    # torchrun sets up the process group for us, so we don't need to call init_process_group
     if not dist.is_initialized():
         dist.init_process_group("nccl")
     torch.cuda.set_device(rank)
     print(
-        f"Process {rank}/{world_size} initialized with MASTER_ADDR={os.environ['MASTER_ADDR']}, MASTER_PORT={os.environ['MASTER_PORT']}")
+        f"Process {rank}/{world_size} initialized with MASTER_ADDR={os.environ.get('MASTER_ADDR', 'unknown')}, MASTER_PORT={os.environ.get('MASTER_PORT', 'unknown')}")
 
 
 def cleanup():
@@ -186,15 +180,32 @@ class VaDE(nn.Module):
         mu_q, log_var_q = self.encode(x)
         z = self.reparameterize(mu_q, log_var_q)
         x_recon = self.decode(z)
+
+        # In VAE pretraining, the GMM parameters aren't used
+        # To ensure they get gradients for DDP, we add dummy ops
+        # These won't affect the actual output but will ensure parameters
+        # are registered in the computation graph
+        dummy = 0.0
+        if self.training:
+            dummy = dummy + self.mu_c.sum() * 0.0 + self.log_var_c.sum() * 0.0 + self.log_p_c.sum() * 0.0
+
         return x_recon, mu_q, log_var_q, z
 
 
-def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
+def vae_loss(x, x_recon, mu_q, log_var_q, model=None, beta=1.0):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
-    return recon_loss + beta * kl_div
+
+    # Add dummy terms for unused parameters if model is provided
+    dummy_term = 0.0
+    if model is not None and isinstance(model, DDP):
+        # Add dummy gradients for GMM parameters
+        dummy_term = (model.module.mu_c.sum() + model.module.log_var_c.sum() +
+                      model.module.log_p_c.sum()) * 0.0
+
+    return recon_loss + beta * kl_div + dummy_term
 
 
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
@@ -322,7 +333,7 @@ def evaluate_vae(model, data_loader, device, beta):
             x = batch.to(device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+            loss = vae_loss(x, x_recon, mu_q, log_var_q, model, beta=beta)
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
@@ -374,6 +385,10 @@ def main():
     # Get rank and world size from environment (set by torchrun)
     rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    # Set the TORCH_DISTRIBUTED_DEBUG environment variable to get more info if needed
+    if rank == 0:
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
 
     # Parse arguments
     import argparse
@@ -444,8 +459,8 @@ def main():
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
 
-        # Wrap model in DDP (make sure to find_unused_parameters=True if needed)
-        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+        # Wrap model in DDP with find_unused_parameters=True
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
         # Begin VAE pretraining
@@ -469,7 +484,8 @@ def main():
                 x = batch.to(rank)
                 batch_size = x.size(0)
                 x_recon, mu_q, log_var_q, z = model(x)
-                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+                # Pass the model to the loss function to include dummy terms for unused GMM params
+                loss = vae_loss(x, x_recon, mu_q, log_var_q, model=model, beta=beta)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
