@@ -217,7 +217,6 @@ class VaDE(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
 
         )
         # GMM parameters
@@ -568,7 +567,7 @@ def main():
         pretrain_val_losses = []
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr / 10,
+            max_lr=args.lr / 1000,
             total_steps=args.pretrain_epochs * len(train_loader),
             pct_start=0.1,
             anneal_strategy='cos'
@@ -667,7 +666,7 @@ def main():
         cluster_val_losses = []
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr / 10,
+            max_lr=args.lr / 1000,
             total_steps=args.pretrain_epochs * len(train_loader),
             pct_start=0.1,
             anneal_strategy='cos'
