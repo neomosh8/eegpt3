@@ -538,7 +538,7 @@ def main():
         if rank == 0:
             print(f"Input shape: {input_shape}")
 
-        scaler = GradScaler(device_type='cuda')
+        scaler = GradScaler()
 
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
@@ -570,7 +570,7 @@ def main():
                 x = batch.to(rank)
                 batch_size = x.size(0)
                 # Use mixed precision for forward pass
-                with autocast(device_type='cuda'):
+                with autocast():
                     x_recon, mu_q, log_var_q, z = model(x)
                     loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
 
@@ -657,7 +657,7 @@ def main():
                 batch_size = x.size(0)
 
                 # Use mixed precision for forward pass
-                with autocast(device_type='cuda'):
+                with autocast():
                     x_recon, mu_q, log_var_q, z = model(x)
                     loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
 
