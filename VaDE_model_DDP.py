@@ -10,6 +10,7 @@ import os
 import matplotlib.pyplot as plt
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import OneCycleLR
 
 from DEC_model import EEGNpyDataset
 
@@ -454,7 +455,15 @@ def main():
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
         model._set_static_graph()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=args.pretrain_epochs * len(train_loader),
+            pct_start=0.3,
+            div_factor=25,
+            final_div_factor=1000,
+            anneal_strategy='cos'
+        )
         # Begin VAE pretraining
         if rank == 0:
             print("Starting VAE pretraining...")
@@ -482,6 +491,7 @@ def main():
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
 
@@ -537,6 +547,15 @@ def main():
 
         cluster_train_losses = []
         cluster_val_losses = []
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=args.cluster_epochs * len(train_loader),
+            pct_start=0.3,
+            div_factor=25,
+            final_div_factor=1000,
+            anneal_strategy='cos'
+        )
 
         for epoch in range(args.cluster_epochs):
             # Set epoch for sampler
@@ -553,6 +572,7 @@ def main():
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
 
