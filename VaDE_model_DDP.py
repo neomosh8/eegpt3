@@ -415,7 +415,16 @@ def evaluate_vae(model, data_loader, device, beta):
             x = batch.to(device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)  # Remove model parameter
+            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+
+            if torch.isnan(loss):
+                print("Loss is NaN! Debugging values:")
+                print("x:", x.min().item(), x.max().item())
+                print("x_recon:", x_recon.min().item(), x_recon.max().item())
+                print("mu_q:", mu_q.min().item(), mu_q.max().item())
+                print("log_var_q:", log_var_q.min().item(), log_var_q.max().item())
+                # Possibly break or skip the update
+                continue
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 
@@ -557,9 +566,9 @@ def main():
         pretrain_val_losses = []
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr / 10,  # Reduce max learning rate
+            max_lr=args.lr / 10,
             total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.1,  # Slower warmup
+            pct_start=0.1,
             anneal_strategy='cos'
         )
         for epoch in range(args.pretrain_epochs):
@@ -580,12 +589,25 @@ def main():
                     x_recon, mu_q, log_var_q, z = model(x)
                     loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
 
+                    if torch.isnan(loss):
+                        print("Loss is NaN! Debugging values:")
+                        print("x:", x.min().item(), x.max().item())
+                        print("x_recon:", x_recon.min().item(), x_recon.max().item())
+                        print("mu_q:", mu_q.min().item(), mu_q.max().item())
+                        print("log_var_q:", log_var_q.min().item(), log_var_q.max().item())
+                        # Possibly break or skip the update
+                        continue
+
                 optimizer.zero_grad()
                 scaler.scale(loss).backward()
+
+                # Clip before stepping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scheduler.step()
+
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
 
@@ -643,9 +665,9 @@ def main():
         cluster_val_losses = []
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=args.lr / 10,  # Reduce max learning rate
+            max_lr=args.lr / 10,
             total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.2,  # Slower warmup
+            pct_start=0.1,
             anneal_strategy='cos'
         )
 
@@ -668,10 +690,14 @@ def main():
                 optimizer.zero_grad()
                 # Scale gradients
                 scaler.scale(loss).backward()
+
+                # Clip before stepping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
-
                 scheduler.step()
+
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
 
