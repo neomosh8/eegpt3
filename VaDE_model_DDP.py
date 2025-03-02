@@ -548,14 +548,22 @@ def main():
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
         model._set_static_graph()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,weight_decay=1e-5)
-        OneCycleLR
+
         # Begin VAE pretraining
         if rank == 0:
             print("Starting VAE pretraining...")
 
         pretrain_train_losses = []
         pretrain_val_losses = []
-
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=args.lr / 10,  # Reduce max learning rate
+            total_steps=args.pretrain_epochs * len(train_loader),
+            pct_start=0.2,  # Slower warmup
+            div_factor=25,
+            final_div_factor=1000,
+            anneal_strategy='cos'
+        )
         for epoch in range(args.pretrain_epochs):
             # Set epoch for sampler
             train_sampler.set_epoch(epoch)
