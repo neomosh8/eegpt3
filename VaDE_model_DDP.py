@@ -461,7 +461,7 @@ def main():
                 batch_size = x.size(0)
                 x_recon, mu_q, log_var_q, z = model(x)
                 # Pass the model to the loss function to include dummy terms for unused GMM params
-                loss = vae_loss(x, x_recon, mu_q, log_var_q, model=model, beta=beta)
+                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
