@@ -664,8 +664,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--latent_dim", type=int, default=512)
     parser.add_argument("--n_clusters", type=int, default=200)
-    parser.add_argument("--epochs_cae", type=int, default=20)
-    parser.add_argument("--epochs_dec", type=int, default=20)
+    parser.add_argument("--epochs_cae", type=int, default=10)
+    parser.add_argument("--epochs_dec", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -692,17 +692,17 @@ if __name__ == "__main__":
                             n=8, out_path='QA/DEC/ae_recons.png')
 
     # 3) DEC Setup
-    dec_model = IDEC(encoder=cae_model.encoder, n_clusters=args.n_clusters, alpha=1)
-    # Initialize cluster centers
+    idec_model = IDEC(encoder=cae_model.encoder, decoder=cae_model.decoder,
+                      n_clusters=10, alpha=1.0, target_beta=0.1)    # Initialize cluster centers
     print("[MAIN] Initializing DEC cluster centers...")
-    dec_model.initialize_centers(train_loader, device=args.device)
+    idec_model.initialize_centers(train_loader, device=args.device)
 
     # 4) DEC Training (two-pass each epoch)
     print("[MAIN] Starting DEC training/fine-tuning...")
     # dec_model = train_dec_full_pass(dec_model, train_loader, val_loader=val_loader,
     #                                 epochs=args.epochs_dec, device=args.device)
 
-    dec_model = train_idec_full_pass(dec_model, train_loader, val_loader=val_loader,
+    dec_model = train_idec_full_pass(idec_model, train_loader, val_loader=val_loader,
                                     epochs=args.epochs_dec, device=args.device)
     # 5) Evaluate final cluster distribution on validation
     dec_model.eval()
