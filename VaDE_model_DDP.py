@@ -390,9 +390,9 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--pretrain_epochs", type=int, default=50)
     parser.add_argument("--cluster_epochs", type=int, default=50)
-    parser.add_argument("--warmup_epochs", type=int, default=100)
-    parser.add_argument("--latent_dim", type=int, default=2048)
-    parser.add_argument("--n_clusters", type=int, default=100)
+    parser.add_argument("--warmup_epochs", type=int, default=25)
+    parser.add_argument("--latent_dim", type=int, default=512)
+    parser.add_argument("--n_clusters", type=int, default=50)
     args = parser.parse_args()
 
     try:
