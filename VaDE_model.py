@@ -197,6 +197,7 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     kl_categorical = (q_c_x * (log_q_c_x - log_p_c)).sum(1)
     total_kl = expected_kl + kl_categorical
     return recon_loss + beta * total_kl.mean()
+
 def initialize_gmm_params(model, train_loader, device):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
     with torch.no_grad():
@@ -253,6 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=4e-3)
     parser.add_argument("--pretrain_epochs", type=int, default=20)
     parser.add_argument("--cluster_epochs", type=int, default=20)
+    parser.add_argument("--warmup_epochs", type=int, default=50)
     args = parser.parse_args()
 
     # 1) Dataset
@@ -279,11 +281,9 @@ if __name__ == "__main__":
     pretrain_val_losses = []
 
     for epoch in range(args.pretrain_epochs):
-        if epoch < 10:  # No KL for first 5 epochs
-            beta = 0.0
-        else:
-            beta = 1.0
         model.train()
+        beta = 0.0 if epoch < args.warmup_epochs else (epoch - args.warmup_epochs + 1) / (args.pretrain_epochs - args.warmup_epochs)
+
         total_train_loss = 0
         total_train_samples = 0
         for batch in train_loader:
