@@ -13,6 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import Dataset
 
+from torch.cuda.amp import GradScaler, autocast
 
 
 class EEGNpyDataset(Dataset):
@@ -135,22 +136,25 @@ def predict_clusters(model, data_loader, device):
             cluster_assignments = q_c_x.argmax(dim=1)  # (batch_size,)
             clusters.append(cluster_assignments.cpu().numpy())
 
-    # Since we're using DistributedSampler, each process has a unique subset
-    # We need to gather all results
+    # Concatenate local predictions first
+    local_clusters = np.concatenate(clusters) if clusters else np.array([])
+
+    # Get size information from all processes
+    local_size = torch.tensor([len(local_clusters)], device=device)
+    sizes = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(dist.get_world_size())]
+    dist.all_gather(sizes, local_size)
+
+    # Convert sizes to integers
+    sizes = [size.item() for size in sizes]
+
+    # Gather all cluster data using object gathering (handles variable sizes)
     all_clusters = [None for _ in range(dist.get_world_size())]
-    all_clusters_object = [clusters]  # What this process has
+    dist.all_gather_object(all_clusters, local_clusters)
 
-    # Gather all cluster assignments from all processes
-    dist.all_gather_object(all_clusters, all_clusters_object)
+    # Concatenate all gathered clusters
+    result = np.concatenate([cluster for cluster in all_clusters if len(cluster) > 0])
 
-    # Flatten the nested list
-    result = []
-    for proc_clusters in all_clusters:
-        for batch_clusters in proc_clusters:
-            result.append(batch_clusters)
-
-    return np.concatenate(result)
-
+    return result
 
 class VaDE(nn.Module):
     """
@@ -503,6 +507,8 @@ def main():
         if rank == 0:
             print(f"Input shape: {input_shape}")
 
+        scaler = GradScaler()
+
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
 
@@ -539,14 +545,16 @@ def main():
             for batch in train_loader:
                 x = batch.to(rank)
                 batch_size = x.size(0)
-                x_recon, mu_q, log_var_q, z = model(x)
-                # Pass the model to the loss function to include dummy terms for unused GMM params
-                # Change this line in the training loop:
-                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+                # Use mixed precision for forward pass
+                with autocast():
+                    x_recon, mu_q, log_var_q, z = model(x)
+                    loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+
                 optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
                 scheduler.step()
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
@@ -623,12 +631,18 @@ def main():
             for batch in train_loader:
                 x = batch.to(rank)
                 batch_size = x.size(0)
-                x_recon, mu_q, log_var_q, z = model(x)
-                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+
+                # Use mixed precision for forward pass
+                with autocast():
+                    x_recon, mu_q, log_var_q, z = model(x)
+                    loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+
                 optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                # Scale gradients
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
                 scheduler.step()
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
