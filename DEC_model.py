@@ -564,8 +564,32 @@ class IDEC(nn.Module):
         return p
 
 
+def center_separation_loss(cluster_centers, eps=1e-10):
+    """
+    Computes a loss that encourages cluster centers to be far apart.
+    It calculates the average pairwise Euclidean distance and returns
+    its negative (since we minimize loss, but want to maximize distance).
+    """
+    n = cluster_centers.size(0)
+    if n <= 1:
+        return torch.tensor(0.0, device=cluster_centers.device)
+
+    # Compute pairwise distances between cluster centers
+    centers_expanded = cluster_centers.unsqueeze(0).expand(n, n, -1)
+    centers_transposed = cluster_centers.unsqueeze(1).expand(n, n, -1)
+    distances = torch.sqrt(torch.sum((centers_expanded - centers_transposed) ** 2, dim=2) + eps)
+
+    # Exclude the diagonal (self-distance)
+    mask = 1 - torch.eye(n, device=cluster_centers.device)
+    avg_distance = torch.sum(distances * mask) / (mask.sum() + eps)
+
+    # Loss is negative average distance (we want to maximize the distance)
+    loss = -avg_distance
+    return loss
+
+
 def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
-                         device='cuda', lambda_recon=0.1, lambda_bal=0.3, lambda_entropy=0.1):
+                         device='cuda', lambda_recon=0.05, lambda_bal=0.3, lambda_entropy=0.1,lambda_sep = 0.01,lambda_kl = 1.5):
     """
     Training loop for IDEC with an additional entropy penalty regularizer.
       - Computes the soft assignments q over the entire training set.
@@ -625,9 +649,15 @@ def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
             # Entropy penalty: encourage high entropy in f (i.e. a uniform distribution)
             entropy = -torch.sum(f * torch.log(f + 1e-10))
 
-            # Combine losses: subtract the entropy penalty to encourage higher entropy (more balanced clusters)
-            total_loss = kl_loss + lambda_recon * recon_loss + lambda_bal * balance_loss - lambda_entropy * entropy
+              # Adjust this hyperparameter as needed
+            sep_loss = center_separation_loss(model.cluster_centers)
 
+            # Combine losses: subtract the entropy penalty to encourage higher entropy (more balanced clusters)
+            total_loss = (lambda_kl * kl_loss +
+                          lambda_recon * recon_loss +
+                          lambda_bal * balance_loss -
+                          lambda_entropy * entropy +
+                          lambda_sep * sep_loss)
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
@@ -670,10 +700,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--latent_dim", type=int, default=64)
-    parser.add_argument("--n_clusters", type=int, default=10)
-    parser.add_argument("--epochs_cae", type=int, default=50)
-    parser.add_argument("--epochs_dec", type=int, default=50)
+    parser.add_argument("--latent_dim", type=int, default=1024)
+    parser.add_argument("--n_clusters", type=int, default=1000)
+    parser.add_argument("--epochs_cae", type=int, default=200)
+    parser.add_argument("--epochs_dec", type=int, default=200)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
