@@ -125,8 +125,8 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
     """
     cae_model.to(device)
     optimizer = optim.Adam(cae_model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-
+    criterion_mse = nn.MSELoss()
+    criterion_l1 = nn.L1Loss()
     for epoch in range(1, epochs+1):
         cae_model.train()
         running_loss = 0.0
@@ -134,7 +134,7 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
             batch = batch.to(device)
             optimizer.zero_grad()
             recon, _ = cae_model(batch)
-            loss = criterion(recon, batch)
+            loss = 0.5 * criterion_mse(recon, batch) + 0.5 * criterion_l1(recon, batch)
             loss.backward()
             optimizer.step()
             running_loss += loss.item() * batch.size(0)
