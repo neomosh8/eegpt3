@@ -122,7 +122,7 @@ class VaDE(nn.Module):
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(16, C, kernel_size=3, stride=1, padding=1),
-            nn.Tanh()  # Use nn.Tanh() if data is in [-1, 1]
+            # nn.Tanh()  # Use nn.Tanh() if data is in [-1, 1]
         )
 
         # GMM parameters
