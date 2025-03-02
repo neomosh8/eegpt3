@@ -565,13 +565,13 @@ def main():
 
         pretrain_train_losses = []
         pretrain_val_losses = []
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=args.lr / 1000,
-            total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.1,
-            anneal_strategy='cos'
-        )
+        # scheduler = OneCycleLR(
+        #     optimizer,
+        #     max_lr=args.lr / 1000,
+        #     total_steps=args.pretrain_epochs * len(train_loader),
+        #     pct_start=0.1,
+        #     anneal_strategy='cos'
+        # )
         for epoch in range(args.pretrain_epochs):
             # Set epoch for sampler
             train_sampler.set_epoch(epoch)
@@ -607,7 +607,7 @@ def main():
 
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
+                # scheduler.step()
 
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
@@ -664,13 +664,13 @@ def main():
 
         cluster_train_losses = []
         cluster_val_losses = []
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=args.lr / 1000,
-            total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.1,
-            anneal_strategy='cos'
-        )
+        # scheduler = OneCycleLR(
+        #     optimizer,
+        #     max_lr=args.lr / 1000,
+        #     total_steps=args.pretrain_epochs * len(train_loader),
+        #     pct_start=0.1,
+        #     anneal_strategy='cos'
+        # )
 
         for epoch in range(args.cluster_epochs):
             # Set epoch for sampler
@@ -697,7 +697,7 @@ def main():
 
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step()
+                # scheduler.step()
 
                 total_train_loss += loss.item() * batch_size
                 total_train_samples += batch_size
