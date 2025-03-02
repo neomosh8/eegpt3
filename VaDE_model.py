@@ -26,9 +26,9 @@ def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png
     # Get input shape: x has shape (batch_size, C, H, W)
     C, H, W = x.shape[1], x.shape[2], x.shape[3]
 
-    # Normalize x_recon to [0, 1] for visualization
-    x_recon = (x_recon - x_recon.min()) / (
-                x_recon.max() - x_recon.min() + 1e-8)  # Add small epsilon to avoid division by zero
+    # # Normalize x_recon to [0, 1] for visualization
+    # x_recon = (x_recon - x_recon.min()) / (
+    #             x_recon.max() - x_recon.min() + 1e-8)  # Add small epsilon to avoid division by zero
 
     fig, axes = plt.subplots(2, n, figsize=(n * 2, 4))
     for i in range(n):
