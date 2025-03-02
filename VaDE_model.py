@@ -252,8 +252,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=4e-3)
-    parser.add_argument("--pretrain_epochs", type=int, default=30)
-    parser.add_argument("--cluster_epochs", type=int, default=100)
+    parser.add_argument("--pretrain_epochs", type=int, default=20)
+    parser.add_argument("--cluster_epochs", type=int, default=20)
     args = parser.parse_args()
 
     # 1) Dataset
