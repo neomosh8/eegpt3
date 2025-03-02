@@ -11,6 +11,8 @@ from DEC_model import EEGNpyDataset
 
 import os
 import matplotlib.pyplot as plt
+
+
 def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png'):
     model.eval()
     with torch.no_grad():
@@ -20,15 +22,32 @@ def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png
             break
     x = x.cpu()[:n]
     x_recon = x_recon.cpu()[:n]
-    fig, axes = plt.subplots(2, n, figsize=(n*2, 4))
+
+    # Get input shape: x has shape (batch_size, C, H, W)
+    C, H, W = x.shape[1], x.shape[2], x.shape[3]
+
+    # Normalize x_recon to [0, 1] for visualization
+    x_recon = (x_recon - x_recon.min()) / (
+                x_recon.max() - x_recon.min() + 1e-8)  # Add small epsilon to avoid division by zero
+
+    fig, axes = plt.subplots(2, n, figsize=(n * 2, 4))
     for i in range(n):
-        axes[0, i].imshow(x[i].reshape(28, 28), cmap='gray')  # Adjust shape as needed
-        axes[1, i].imshow(x_recon[i].reshape(28, 28), cmap='gray')
+        if C == 1:
+            # Grayscale: permute to (H, W, C) and squeeze to (H, W)
+            axes[0, i].imshow(x[i].permute(1, 2, 0).squeeze(), cmap='gray')
+            axes[1, i].imshow(x_recon[i].permute(1, 2, 0).squeeze(), cmap='gray')
+        elif C == 3:
+            # RGB: permute to (H, W, 3)
+            axes[0, i].imshow(x[i].permute(1, 2, 0))
+            axes[1, i].imshow(x_recon[i].permute(1, 2, 0))
+        else:
+            # For C > 3 or other cases, plot the first channel as grayscale
+            axes[0, i].imshow(x[i][0], cmap='gray')
+            axes[1, i].imshow(x_recon[i][0], cmap='gray')
         axes[0, i].axis('off')
         axes[1, i].axis('off')
     plt.savefig(out_path)
-    plt.close()
-# Create QA/VaDE directory if it doesn't exist
+    plt.close()# Create QA/VaDE directory if it doesn't exist
 os.makedirs('QA/VaDE', exist_ok=True)
 # Assuming EEGNpyDataset and plot_ae_reconstructions are defined elsewhere
 # from your_module import EEGNpyDataset, plot_ae_reconstructions
@@ -216,10 +235,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--pretrain_epochs", type=int, default=50)
-    parser.add_argument("--cluster_epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--pretrain_epochs", type=int, default=5)
+    parser.add_argument("--cluster_epochs", type=int, default=5)
     args = parser.parse_args()
 
     # 1) Dataset
@@ -273,7 +292,7 @@ if __name__ == "__main__":
     # 4) Initialize GMM parameters
     print("Initializing GMM parameters...")
     initialize_gmm_params(model, train_loader, args.device)
-
+    plot_ae_reconstructions(model, val_loader, device=args.device, n=8, out_path='QA/VaDE/pretrain_ae_recons.png')
     # 5) Training with VaDE loss
     print("Starting VaDE clustering training...")
 
