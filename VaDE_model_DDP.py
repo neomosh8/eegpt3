@@ -559,9 +559,7 @@ def main():
             optimizer,
             max_lr=args.lr / 10,  # Reduce max learning rate
             total_steps=args.pretrain_epochs * len(train_loader),
-            pct_start=0.2,  # Slower warmup
-            div_factor=25,
-            final_div_factor=1000,
+            pct_start=0.1,  # Slower warmup
             anneal_strategy='cos'
         )
         for epoch in range(args.pretrain_epochs):
@@ -648,8 +646,6 @@ def main():
             max_lr=args.lr / 10,  # Reduce max learning rate
             total_steps=args.pretrain_epochs * len(train_loader),
             pct_start=0.2,  # Slower warmup
-            div_factor=25,
-            final_div_factor=1000,
             anneal_strategy='cos'
         )
 
