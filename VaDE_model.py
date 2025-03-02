@@ -77,7 +77,7 @@ def predict_clusters(model, data_loader, device):
 
 class VaDE(nn.Module):
     """
-    Variational Deep Embedding (VaDE) model with convolutional encoder and decoder.
+    Variational Deep Embedding (VaDE) model with a deeper convolutional encoder and decoder.
     """
     def __init__(self, input_shape, latent_dim=10, n_clusters=10):
         """
@@ -92,29 +92,37 @@ class VaDE(nn.Module):
         self.n_clusters = n_clusters
         C, H, W = input_shape
 
-        # Encoder: Conv layers to reduce spatial dimensions, then linear to latent space
+        # Encoder: Deeper with 4 conv layers
         self.encoder = nn.Sequential(
-            nn.Conv2d(C, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(C, 16, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * (H // 4) * (W // 4), 256),
+            nn.Linear(128 * (H // 8) * (W // 8), 256),
             nn.ReLU(),
             nn.Linear(256, 2 * latent_dim)  # Outputs mu and log_var
         )
 
-        # Decoder: Linear to feature map, then transposed conv to reconstruct input
+        # Decoder: Deeper with 4 transposed conv layers
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 256),
             nn.ReLU(),
-            nn.Linear(256, 64 * (H // 4) * (W // 4)),
+            nn.Linear(256, 128 * (H // 8) * (W // 8)),
             nn.ReLU(),
-            nn.Unflatten(1, (64, H // 4, W // 4)),
+            nn.Unflatten(1, (128, H // 8, W // 8)),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, C, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid()
+            nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, C, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()  # Use nn.Tanh() if data is in [-1, 1]
         )
 
         # GMM parameters
@@ -144,20 +152,22 @@ class VaDE(nn.Module):
         z = self.reparameterize(mu_q, log_var_q)
         x_recon = self.decode(z)
         return x_recon, mu_q, log_var_q, z
-
 def vae_loss(x, x_recon, mu_q, log_var_q):
     """
-    Standard VAE loss: reconstruction loss + KL divergence to N(0, I).
+    VAE loss with hybrid reconstruction loss (MSE + L1) + KL divergence to N(0, I).
     """
-    recon_loss = F.mse_loss(x_recon, x, reduction='mean')
+    mse_loss = F.mse_loss(x_recon, x, reduction='mean')
+    l1_loss = F.l1_loss(x_recon, x, reduction='mean')
+    recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
     return recon_loss + kl_div
-
 def vade_loss(x, x_recon, mu_q, log_var_q, model):
     """
-    VaDE loss: reconstruction loss + KL divergence with GMM prior.
+    VaDE loss with hybrid reconstruction loss (MSE + L1) + KL divergence with GMM prior.
     """
-    recon_loss = F.mse_loss(x_recon, x, reduction='mean')
+    mse_loss = F.mse_loss(x_recon, x, reduction='mean')
+    l1_loss = F.l1_loss(x_recon, x, reduction='mean')
+    recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     d = model.latent_dim
 
     # GMM parameters
@@ -197,7 +207,6 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model):
 
     total_kl = expected_kl + kl_categorical
     return recon_loss + total_kl.mean()
-
 def initialize_gmm_params(model, train_loader, device):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
     with torch.no_grad():
