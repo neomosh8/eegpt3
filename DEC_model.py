@@ -459,6 +459,199 @@ def plot_most_frequent_cluster_images(dec_model, dataset, device='cuda',
     plt.close()
     print(f"[QA] Saved images from most frequent cluster to {out_path}")
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+from sklearn.cluster import KMeans
+
+class IDEC(nn.Module):
+    """
+    Improved Deep Embedded Clustering (IDEC) combines clustering with a reconstruction loss.
+    It uses:
+      - An encoder-decoder (autoencoder) architecture
+      - A clustering branch in the latent space with KL divergence loss
+      - A balancing term on the cluster frequencies
+    """
+    def __init__(self, encoder, decoder, n_clusters=10, alpha=1.0, target_beta=0.1):
+        """
+        :param encoder: Pretrained encoder that should have a .latent_dim attribute.
+        :param decoder: Decoder network for reconstruction.
+        :param n_clusters: Number of clusters.
+        :param alpha: Degrees of freedom for the Student's t-distribution.
+        :param target_beta: Mixing factor for target distribution (0 means pure DEC target, >0 mixes with uniform).
+        """
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.n_clusters = n_clusters
+        self.alpha = alpha
+        self.target_beta = target_beta  # for refining the target distribution
+
+        if hasattr(encoder, 'latent_dim'):
+            latent_dim = encoder.latent_dim
+        else:
+            raise ValueError("Encoder must define a .latent_dim attribute.")
+
+        # Initialize cluster centers (n_clusters, latent_dim)
+        self.cluster_centers = nn.Parameter(torch.randn(n_clusters, latent_dim))
+
+    @torch.no_grad()
+    def initialize_centers(self, data_loader, device='cuda'):
+        """
+        Uses KMeans++ (with more initializations) on the latent representations to initialize cluster centers.
+        """
+        self.encoder.to(device)
+        self.encoder.eval()
+
+        latent_list = []
+        for batch in data_loader:
+            batch = batch.to(device)
+            z = self.encoder(batch)
+            latent_list.append(z.cpu().numpy())
+        all_z = np.concatenate(latent_list, axis=0)
+
+        print("[IDEC] Initializing cluster centers with KMeans++...")
+        # Use KMeans++ for robust initialization
+        kmeans = KMeans(n_clusters=self.n_clusters, n_init=20, init='k-means++')
+        kmeans.fit(all_z)
+        centers = kmeans.cluster_centers_
+        self.cluster_centers.data = torch.from_numpy(centers).to(device)
+        return kmeans.labels_
+
+    def forward(self, x):
+        """
+        Forward pass returns:
+          - x_recon: Reconstruction of x from the decoder.
+          - z: Latent representation from the encoder.
+          - q: Soft cluster assignments from the Student's t-distribution.
+        """
+        z = self.encoder(x)
+        q = self._student_t_distribution(z, self.cluster_centers, self.alpha)
+        x_recon = self.decoder(z)
+        return x_recon, z, q
+
+    @staticmethod
+    def _student_t_distribution(z, centers, alpha=1.0, eps=1e-10):
+        """
+        Compute soft assignments using the Student's t-distribution:
+          q_{ij} = (1 + ||z_i - μ_j||²/alpha)^(- (alpha+1)/2) / (normalization)
+        """
+        B, latent_dim = z.size()
+        K, _ = centers.size()
+
+        # Expand dimensions for broadcasting
+        z_expand = z.unsqueeze(1).expand(B, K, latent_dim)
+        centers_expand = centers.unsqueeze(0).expand(B, K, latent_dim)
+        dist_sq = torch.sum((z_expand - centers_expand) ** 2, dim=2)
+        numerator = (1.0 + dist_sq / alpha).pow(- (alpha + 1.0) / 2)
+        denominator = torch.sum(numerator, dim=1, keepdim=True) + eps
+        q = numerator / denominator
+        return q
+
+    @staticmethod
+    def target_distribution(q, eps=1e-10, beta=0.1):
+        """
+        Compute the refined target distribution:
+          1. Compute the standard DEC target: p' = (q^2 / f) normalized over clusters (with f_j = sum_i q_{ij}).
+          2. Mix with a uniform distribution: p = (1-beta)*p' + beta*(1/n_clusters).
+        """
+        weight = q ** 2 / (torch.sum(q, dim=0, keepdim=True) + eps)
+        p_std = weight / torch.sum(weight, dim=1, keepdim=True)
+        uniform = torch.ones_like(p_std) / p_std.size(1)
+        p = (1 - beta) * p_std + beta * uniform
+        return p
+
+
+def train_idec_full_pass(model, train_loader, val_loader=None, epochs=10,
+                         device='cuda', lambda_recon=0.1, lambda_bal=0.1):
+    """
+    Training loop for IDEC:
+      - First computes the soft assignments q over the entire training set.
+      - Then computes the refined target distribution p.
+      - Finally, trains the model by combining:
+           * KL divergence loss (between log q and p)
+           * Reconstruction loss (e.g. MSE between x and its reconstruction)
+           * A balancing loss to encourage uniform cluster frequencies.
+    """
+    model.to(device)
+    optimizer = optim.Adam([
+        {'params': model.encoder.parameters(), 'lr': 1e-4},
+        {'params': model.decoder.parameters(), 'lr': 1e-4},
+        {'params': [model.cluster_centers], 'lr': 1e-3}
+    ])
+    loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
+    train_data_size = len(train_loader.dataset)
+
+    for epoch in range(1, epochs + 1):
+        # Step 1: Compute q for the entire dataset in evaluation mode
+        model.eval()
+        all_q = []
+        with torch.no_grad():
+            for batch in train_loader:
+                batch = batch.to(device)
+                _, _, q = model(batch)
+                all_q.append(q.cpu())
+        all_q = torch.cat(all_q, dim=0)
+
+        # Step 2: Compute refined target distribution p using beta to mix with uniform
+        p = model.target_distribution(all_q, beta=model.target_beta)
+
+        # Step 3: Train in mini-batches
+        model.train()
+        idx_offset = 0
+        running_loss = 0.0
+        for batch in train_loader:
+            b_size = batch.size(0)
+            batch = batch.to(device)
+            p_batch = p[idx_offset: idx_offset + b_size, :].to(device)
+            idx_offset += b_size
+
+            x_recon, z, q_batch = model(batch)
+            log_q = torch.log(q_batch + 1e-10)
+            kl_loss = loss_fn_kl(log_q, p_batch)
+
+            # Reconstruction loss (e.g., MSE loss)
+            recon_loss = F.mse_loss(x_recon, batch)
+
+            # Balancing loss: penalize deviation from uniform cluster frequency
+            f = torch.mean(q_batch, dim=0)
+            uniform = torch.ones_like(f) / f.numel()
+            balance_loss = torch.sum(uniform * (torch.log(uniform + 1e-10) - torch.log(f + 1e-10)))
+
+            total_loss = kl_loss + lambda_recon * recon_loss + lambda_bal * balance_loss
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+            running_loss += total_loss.item() * b_size
+
+        epoch_loss = running_loss / train_data_size
+        print(f"[IDEC] Epoch {epoch}/{epochs}, Total Loss: {epoch_loss:.4f}, "
+              f"KL: {kl_loss.item():.4f}, Recon: {recon_loss.item():.4f}, Balance: {balance_loss.item():.4f}")
+
+        # Optional: Evaluate on validation data (e.g., using silhouette score)
+        if val_loader is not None and epoch % 10 == 0:
+            model.eval()
+            z_vals = []
+            labels = []
+            with torch.no_grad():
+                for vbatch in val_loader:
+                    vbatch = vbatch.to(device)
+                    _, vz, vq = model(vbatch)
+                    cluster_idx = torch.argmax(vq, dim=1)
+                    z_vals.append(vz.cpu().numpy())
+                    labels.extend(cluster_idx.cpu().numpy())
+            z_vals = np.concatenate(z_vals, axis=0)
+            if len(np.unique(labels)) > 1:
+                from sklearn.metrics import silhouette_score
+                sscore = silhouette_score(z_vals, labels)
+                print(f"   [Val] Silhouette Score: {sscore:.4f}")
+            else:
+                print("   [Val] Only one cluster => silhouette not defined.")
+
+    return model
 
 # =========================
 #  6) Example Main Script
@@ -470,9 +663,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--latent_dim", type=int, default=512)
-    parser.add_argument("--n_clusters", type=int, default=1000)
-    parser.add_argument("--epochs_cae", type=int, default=400)
-    parser.add_argument("--epochs_dec", type=int, default=200)
+    parser.add_argument("--n_clusters", type=int, default=200)
+    parser.add_argument("--epochs_cae", type=int, default=20)
+    parser.add_argument("--epochs_dec", type=int, default=20)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -506,9 +699,11 @@ if __name__ == "__main__":
 
     # 4) DEC Training (two-pass each epoch)
     print("[MAIN] Starting DEC training/fine-tuning...")
-    dec_model = train_dec_full_pass(dec_model, train_loader, val_loader=val_loader,
-                                    epochs=args.epochs_dec, device=args.device)
+    # dec_model = train_dec_full_pass(dec_model, train_loader, val_loader=val_loader,
+    #                                 epochs=args.epochs_dec, device=args.device)
 
+    dec_model = train_idec_full_pass(dec_model, train_loader, val_loader=val_loader,
+                                    epochs=args.epochs_dec, device=args.device)
     # 5) Evaluate final cluster distribution on validation
     dec_model.eval()
     all_val_labels = []
