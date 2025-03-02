@@ -110,12 +110,6 @@ class VaDE(nn.Module):
     """
 
     def __init__(self, input_shape, latent_dim=10, n_clusters=10):
-        """
-        Args:
-            input_shape (tuple): Input shape (C, H, W).
-            latent_dim (int): Dimension of the latent space.
-            n_clusters (int): Number of clusters for GMM.
-        """
         super(VaDE, self).__init__()
         self.input_shape = input_shape
         self.latent_dim = latent_dim
@@ -154,10 +148,10 @@ class VaDE(nn.Module):
             nn.ConvTranspose2d(16, C, kernel_size=3, stride=1, padding=1),
         )
 
-        # GMM parameters
-        self.mu_c = nn.Parameter(torch.randn(n_clusters, latent_dim))
-        self.log_var_c = nn.Parameter(torch.zeros(n_clusters))
-        self.log_p_c = nn.Parameter(torch.zeros(n_clusters))
+        # GMM parameters with requires_grad=False
+        self.mu_c = nn.Parameter(torch.randn(n_clusters, latent_dim), requires_grad=False)
+        self.log_var_c = nn.Parameter(torch.zeros(n_clusters), requires_grad=False)
+        self.log_p_c = nn.Parameter(torch.zeros(n_clusters), requires_grad=False)
 
     def encode(self, x):
         """Encode input to latent distribution parameters."""
@@ -176,36 +170,18 @@ class VaDE(nn.Module):
         return self.decoder(z)
 
     def forward(self, x):
-        """Forward pass: encode, sample, decode."""
         mu_q, log_var_q = self.encode(x)
         z = self.reparameterize(mu_q, log_var_q)
         x_recon = self.decode(z)
-
-        # In VAE pretraining, the GMM parameters aren't used
-        # To ensure they get gradients for DDP, we add dummy ops
-        # These won't affect the actual output but will ensure parameters
-        # are registered in the computation graph
-        dummy = 0.0
-        if self.training:
-            dummy = dummy + self.mu_c.sum() * 0.0 + self.log_var_c.sum() * 0.0 + self.log_p_c.sum() * 0.0
-
         return x_recon, mu_q, log_var_q, z
 
 
-def vae_loss(x, x_recon, mu_q, log_var_q, model=None, beta=1.0):
+def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
-
-    # Add dummy terms for unused parameters if model is provided
-    dummy_term = 0.0
-    if model is not None and isinstance(model, DDP):
-        # Add dummy gradients for GMM parameters
-        dummy_term = (model.module.mu_c.sum() + model.module.log_var_c.sum() +
-                      model.module.log_p_c.sum()) * 0.0
-
-    return recon_loss + beta * kl_div + dummy_term
+    return recon_loss + beta * kl_div
 
 
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
@@ -530,9 +506,12 @@ def main():
         # Initialize GMM parameters
         if rank == 0:
             print("Initializing GMM parameters...")
-
         initialize_gmm_params(model, train_loader, rank, rank)
-        dist.barrier()  # Ensure all processes have updated parameters
+        dist.barrier()
+        # Enable gradients for GMM parameters after pretraining
+        model.module.mu_c.requires_grad_(True)
+        model.module.log_var_c.requires_grad_(True)
+        model.module.log_p_c.requires_grad_(True)
 
         # Plot reconstructions (only on rank 0)
         plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/pretrain_ae_recons.png',
