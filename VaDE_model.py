@@ -152,15 +152,16 @@ class VaDE(nn.Module):
         z = self.reparameterize(mu_q, log_var_q)
         x_recon = self.decode(z)
         return x_recon, mu_q, log_var_q, z
+
+
 def vae_loss(x, x_recon, mu_q, log_var_q):
-    """
-    VAE loss with hybrid reconstruction loss (MSE + L1) + KL divergence to N(0, I).
-    """
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
-    return recon_loss + kl_div
+    return recon_loss + kl_div, recon_loss, kl_div
+
+
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
@@ -238,7 +239,7 @@ def evaluate_vae(model, data_loader, device):
             x = batch.to(device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q)
+            loss, ___, ___ = vae_loss(x, x_recon, mu_q, log_var_q)
             total_loss += loss.item() * batch_size
             total_samples += batch_size
     return total_loss / total_samples if total_samples > 0 else 0
@@ -286,7 +287,8 @@ if __name__ == "__main__":
             x = batch.to(args.device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q)
+            loss, recon, kl = vae_loss(x, x_recon, mu_q, log_var_q)
+            print(f"Recon: {recon.item():.4f}, KL: {kl.item():.4f}")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
