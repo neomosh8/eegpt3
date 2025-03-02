@@ -350,14 +350,12 @@ def plot_ae_reconstructions(cae_model, dataloader, device='cuda', n=8, out_path=
         # Recon
         ax_recon = axes[1, i]
 
+        orig_img = originals[i]
+        recon_img = recons[i]
+
         ## for not normalize data
         orig_img = (orig_img - orig_img.min()) / (orig_img.max() - orig_img.min() + 1e-8)
         recon_img = (recon_img - recon_img.min()) / (recon_img.max() - recon_img.min() + 1e-8)
-
-        ## for normalized data
-        # shape: (C, H, W)
-        # orig_img = originals[i]
-        # recon_img = recons[i]
 
         # If C==1, or C==3
         if orig_img.shape[0] == 1:
