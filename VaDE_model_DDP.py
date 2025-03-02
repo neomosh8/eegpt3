@@ -247,16 +247,16 @@ class VaDE(nn.Module):
         return x_recon, mu_q, log_var_q, z
 
 
-# In the vae_loss function:
 def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
 
-    # Clamp log_var_q to prevent numerical instability
-    log_var_q = torch.clamp(log_var_q, min=-20, max=20)
+    # Add epsilon for numerical stability
+    eps = 1e-6
+    var_q = torch.exp(log_var_q) + eps
+    kl_div = -0.5 * torch.mean(1 + log_var_q - mu_q.pow(2) - var_q)
 
-    kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
     return recon_loss + beta * kl_div
 
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
