@@ -246,7 +246,11 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
       3) Train in mini-batches, slicing p for each batch.
     """
     dec_model.to(device)
-    optimizer = optim.Adam(dec_model.parameters(), lr=1e-4)
+
+    optimizer = optim.Adam([
+        {'params': dec_model.encoder.parameters(), 'lr': 0},  # Encoder frozen initially (lr=0)
+        {'params': [dec_model.cluster_centers], 'lr': 1e-4}  # Cluster centers trained with lr=1e-4
+    ])
     loss_fn = nn.KLDivLoss(reduction='batchmean')
 
     train_data_size = len(train_loader.dataset)
@@ -264,6 +268,10 @@ def train_dec_full_pass(dec_model, train_loader, val_loader=None,
 
         # ---- 2) Compute p (target distribution) for entire dataset ----
         p = dec_model.target_distribution(all_q)
+
+        if epoch == 6:
+            optimizer.param_groups[0]['lr'] = 1e-5
+            print("[DEC] Switching to fine-tuning mode with encoder lr=1e-5")
 
         # ---- 3) Train in mini-batches, slicing p for each batch ----
         dec_model.train()
@@ -342,9 +350,14 @@ def plot_ae_reconstructions(cae_model, dataloader, device='cuda', n=8, out_path=
         # Recon
         ax_recon = axes[1, i]
 
+        ## for not normalize data
+        orig_img = (orig_img - orig_img.min()) / (orig_img.max() - orig_img.min() + 1e-8)
+        recon_img = (recon_img - recon_img.min()) / (recon_img.max() - recon_img.min() + 1e-8)
+
+        ## for normalized data
         # shape: (C, H, W)
-        orig_img = originals[i]
-        recon_img = recons[i]
+        # orig_img = originals[i]
+        # recon_img = recons[i]
 
         # If C==1, or C==3
         if orig_img.shape[0] == 1:
@@ -481,7 +494,7 @@ if __name__ == "__main__":
                             n=8, out_path='QA/DEC/ae_recons.png')
 
     # 3) DEC Setup
-    dec_model = DEC(encoder=cae_model.encoder, n_clusters=args.n_clusters, alpha=0.4)
+    dec_model = DEC(encoder=cae_model.encoder, n_clusters=args.n_clusters, alpha=1)
     # Initialize cluster centers
     print("[MAIN] Initializing DEC cluster centers...")
     dec_model.initialize_centers(train_loader, device=args.device)
