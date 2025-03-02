@@ -521,3 +521,9 @@ if __name__ == "__main__":
                                       top_n=8, out_path='QA/DEC/most_freq_cluster.png')
 
     print("[MAIN] Done. QA plots saved in QA/DEC/")
+    # After CAE training is done
+    torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
+
+    # After DEC training is done
+    torch.save(dec_model.state_dict(), "QA/DEC/dec_model.pt")
+
