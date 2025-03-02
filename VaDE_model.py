@@ -253,10 +253,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=6e-4)
     parser.add_argument("--pretrain_epochs", type=int, default=200)
-    parser.add_argument("--cluster_epochs", type=int, default=20)
-    parser.add_argument("--warmup_epochs", type=int, default=50)
-    parser.add_argument("--latent_dim", type=int, default=64)
-    parser.add_argument("--n_clusters", type=int, default=50)
+    parser.add_argument("--cluster_epochs", type=int, default=100)
+    parser.add_argument("--warmup_epochs", type=int, default=100)
+    parser.add_argument("--latent_dim", type=int, default=2048)
+    parser.add_argument("--n_clusters", type=int, default=100)
     args = parser.parse_args()
 
     # 1) Dataset
