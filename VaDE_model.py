@@ -229,7 +229,7 @@ def initialize_gmm_params(model, train_loader, device):
         # Initialize p(c) as uniform
         model.log_p_c.data = torch.zeros(model.n_clusters).to(device)
 
-def evaluate_vae(model, data_loader, device):
+def evaluate_vae(model, data_loader, device,beta):
     model.eval()
     total_loss = 0
     total_samples = 0
@@ -238,7 +238,7 @@ def evaluate_vae(model, data_loader, device):
             x = batch.to(device)
             batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss= vae_loss(x, x_recon, mu_q, log_var_q)
+            loss= vae_loss(x, x_recon, mu_q, log_var_q,beta=beta)
             total_loss += loss.item() * batch_size
             total_samples += batch_size
     return total_loss / total_samples if total_samples > 0 else 0
@@ -279,7 +279,7 @@ if __name__ == "__main__":
     pretrain_val_losses = []
 
     for epoch in range(args.pretrain_epochs):
-        if epoch < 5:  # No KL for first 5 epochs
+        if epoch < 10:  # No KL for first 5 epochs
             beta = 0.0
         else:
             beta = 1.0
@@ -299,7 +299,7 @@ if __name__ == "__main__":
         train_loss = total_train_loss / total_train_samples
         pretrain_train_losses.append(train_loss)
 
-        val_loss = evaluate_vae(model, val_loader, args.device)
+        val_loss = evaluate_vae(model, val_loader, args.device,beta)
         pretrain_val_losses.append(val_loss)
         print(f"Pretraining Epoch {epoch + 1}/{args.pretrain_epochs}, "
               f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
