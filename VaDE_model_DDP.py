@@ -293,18 +293,18 @@ def initialize_gmm_params(model, train_loader, device, rank):
 
         # Run K-means
         kmeans = KMeans(n_clusters=model.module.n_clusters, random_state=42)
-        labels = kmeans.fit_predict(all_mu_q.numpy())
+        labels = kmeans.fit_predict(all_mu_q.cpu().numpy())
         model.module.mu_c.data = torch.from_numpy(kmeans.cluster_centers_).to(device)
 
         # Compute per-cluster variance
         for k in range(model.module.n_clusters):
             cluster_points = all_mu_q[labels == k]
             if len(cluster_points) > 1:
-                var_k = torch.var(cluster_points, dim=0).mean()  # Mean variance across dimensions
+                var_k = torch.var(cluster_points, dim=0).mean().cpu()  # Mean variance across dimensions
                 model.module.log_var_c.data[k] = torch.log(var_k + 1e-6)  # Add epsilon for stability
             else:
                 # Fallback to total variance if cluster has too few points
-                var_total = torch.var(all_mu_q, dim=0).mean()
+                var_total = torch.var(all_mu_q, dim=0).mean().cpu()
                 model.module.log_var_c.data[k] = torch.log(var_total + 1e-6)
 
         # Initialize p(c) as uniform
@@ -387,9 +387,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=6e-4)
-    parser.add_argument("--pretrain_epochs", type=int, default=200)
-    parser.add_argument("--cluster_epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--pretrain_epochs", type=int, default=50)
+    parser.add_argument("--cluster_epochs", type=int, default=50)
     parser.add_argument("--warmup_epochs", type=int, default=100)
     parser.add_argument("--latent_dim", type=int, default=2048)
     parser.add_argument("--n_clusters", type=int, default=100)
