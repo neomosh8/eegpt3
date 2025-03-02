@@ -236,8 +236,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--pretrain_epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--pretrain_epochs", type=int, default=50)
     parser.add_argument("--cluster_epochs", type=int, default=100)
     args = parser.parse_args()
 
