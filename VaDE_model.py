@@ -122,7 +122,7 @@ class VaDE(nn.Module):
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(16, C, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()  # Use nn.Tanh() if data is in [-1, 1]
+            nn.Tanh()  # Use nn.Tanh() if data is in [-1, 1]
         )
 
         # GMM parameters
@@ -252,7 +252,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1) Dataset
-    dataset = EEGNpyDataset(args.data_dir,normalize=True)
+    dataset = EEGNpyDataset(args.data_dir,normalize=False)
     idxs = list(range(len(dataset)))
     train_idx, val_idx = train_test_split(idxs, test_size=0.2, random_state=42)
     train_ds = Subset(dataset, train_idx)
