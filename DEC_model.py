@@ -17,12 +17,17 @@ import matplotlib.pyplot as plt
 # =========================
 #   1) Dataset Definition
 # =========================
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
 class EEGNpyDataset(Dataset):
     """
     Example dataset that reads .npy files (C,H,W) from a directory.
     Adjust for your actual data pipeline.
     """
-    def __init__(self, directory):
+    def __init__(self, directory, normalize=False):
         super().__init__()
         self.directory = directory
         self.files = [f for f in os.listdir(directory) if f.endswith('.npy')]
@@ -31,6 +36,7 @@ class EEGNpyDataset(Dataset):
         self.files.sort()
         sample = np.load(os.path.join(directory, self.files[0]))
         self.image_shape = sample.shape  # e.g., (C, H, W)
+        self.normalize = normalize
 
     def __len__(self):
         return len(self.files)
@@ -38,8 +44,9 @@ class EEGNpyDataset(Dataset):
     def __getitem__(self, idx):
         path = os.path.join(self.directory, self.files[idx])
         arr = np.load(path)
+        if self.normalize:
+            arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
         return torch.from_numpy(arr).float()
-
 
 # =========================
 #    2) CAE Definition

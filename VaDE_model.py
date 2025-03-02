@@ -242,7 +242,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1) Dataset
-    dataset = EEGNpyDataset(args.data_dir)
+    dataset = EEGNpyDataset(args.data_dir,normalize=True)
     idxs = list(range(len(dataset)))
     train_idx, val_idx = train_test_split(idxs, test_size=0.2, random_state=42)
     train_ds = Subset(dataset, train_idx)
