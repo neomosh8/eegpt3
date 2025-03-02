@@ -482,7 +482,7 @@ if __name__ == "__main__":
 
     # 2) CAE Pretraining
     sample_data = dataset[0]
-    input_shape = sample_data.shape  # e.g., (C, H, W)
+    input_shape = sample_data.shape #(C, H, W)
     cae_model = CAE(input_shape, args.latent_dim)
     cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
                              epochs=args.epochs_cae, lr=3e-4, device=args.device)
