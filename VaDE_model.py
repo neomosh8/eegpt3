@@ -228,16 +228,21 @@ def initialize_gmm_params(model, train_loader, device):
 
         # Initialize p(c) as uniform
         model.log_p_c.data = torch.zeros(model.n_clusters).to(device)
+
 def evaluate_vae(model, data_loader, device):
     model.eval()
     total_loss = 0
+    total_samples = 0
     with torch.no_grad():
         for batch in data_loader:
             x = batch.to(device)
+            batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
-            loss = vae_loss(x, x_recon, mu_q, log_var_q)  # Assume vae_loss is defined
-            total_loss += loss.item()
-    return total_loss / len(data_loader)
+            loss = vae_loss(x, x_recon, mu_q, log_var_q)
+            total_loss += loss.item() * batch_size
+            total_samples += batch_size
+    return total_loss / total_samples if total_samples > 0 else 0
+
 if __name__ == "__main__":
     import argparse
 
@@ -265,7 +270,7 @@ if __name__ == "__main__":
     print(input_shape)
 
     # 2) Model
-    model = VaDE(input_shape=input_shape, latent_dim=1024, n_clusters=100).to(args.device)
+    model = VaDE(input_shape=input_shape, latent_dim=16, n_clusters=100).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # 3) Pretraining as VAE
@@ -275,16 +280,19 @@ if __name__ == "__main__":
 
     for epoch in range(args.pretrain_epochs):
         model.train()
-        train_loss = 0
+        total_train_loss = 0
+        total_train_samples = 0
         for batch in train_loader:
             x = batch.to(args.device)
+            batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
             loss = vae_loss(x, x_recon, mu_q, log_var_q)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-        train_loss /= len(train_loader)
+            total_train_loss += loss.item() * batch_size
+            total_train_samples += batch_size
+        train_loss = total_train_loss / total_train_samples
         pretrain_train_losses.append(train_loss)
 
         val_loss = evaluate_vae(model, val_loader, args.device)
@@ -310,17 +318,16 @@ if __name__ == "__main__":
     def evaluate_vade(model, data_loader, device):
         model.eval()
         total_loss = 0
+        total_samples = 0
         with torch.no_grad():
             for batch in data_loader:
                 x = batch.to(device)
+                batch_size = x.size(0)
                 x_recon, mu_q, log_var_q, z = model(x)
-                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)  # Assume vade_loss is defined
-                recon_loss = 0.5 * F.mse_loss(x_recon, x, reduction='mean') + 0.5 * F.l1_loss(x_recon, x,
-                                                                                              reduction='mean')
-                kl_term = loss - recon_loss
-                print(f"Recon Loss: {recon_loss.item():.4f}, KL Term: {kl_term.item():.4f}")
-                total_loss += loss.item()
-        return total_loss / len(data_loader)
+                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+        return total_loss / total_samples if total_samples > 0 else 0
 
 
     cluster_train_losses = []
@@ -328,19 +335,19 @@ if __name__ == "__main__":
 
     for epoch in range(args.cluster_epochs):
         model.train()
-        train_loss = 0
+        total_train_loss = 0
+        total_train_samples = 0
         for batch in train_loader:
             x = batch.to(args.device)
+            batch_size = x.size(0)
             x_recon, mu_q, log_var_q, z = model(x)
             loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
-            recon_loss = 0.5 * F.mse_loss(x_recon, x, reduction='mean') + 0.5 * F.l1_loss(x_recon, x, reduction='mean')
-            kl_term = loss - recon_loss
-            print(f"Recon Loss: {recon_loss.item():.4f}, KL Term: {kl_term.item():.4f}")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-        train_loss /= len(train_loader)
+            total_train_loss += loss.item() * batch_size
+            total_train_samples += batch_size
+        train_loss = total_train_loss / total_train_samples
         cluster_train_losses.append(train_loss)
 
         val_loss = evaluate_vade(model, val_loader, args.device)
