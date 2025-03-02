@@ -216,7 +216,9 @@ class VaDE(nn.Module):
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1)
+            nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
+            nn.Tanh()
+
         )
         # GMM parameters
         self.mu_c = nn.Parameter(torch.randn(n_clusters, latent_dim))
