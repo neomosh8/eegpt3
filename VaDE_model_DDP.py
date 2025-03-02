@@ -11,9 +11,55 @@ import matplotlib.pyplot as plt
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.utils.data import Dataset
 
-from DEC_model import EEGNpyDataset
 
+
+class EEGNpyDataset(Dataset):
+    """
+    Memory-optimized dataset that preloads all .npy files into memory
+    and only transfers to GPU during __getitem__ calls.
+    """
+
+    def __init__(self, directory, normalize=False):
+        super().__init__()
+        self.directory = directory
+        self.normalize = normalize
+
+        # Find all .npy files
+        self.files = [f for f in os.listdir(directory) if f.endswith('.npy')]
+        if not self.files:
+            raise ValueError(f"No .npy files found in directory: {directory}")
+        self.files.sort()
+
+        # Preload all data into memory
+        print(f"Preloading {len(self.files)} files into memory...")
+        self.data = []
+
+        for i, file in enumerate(self.files):
+            if i % 1000 == 0:
+                print(f"Loading file {i}/{len(self.files)}...")
+
+            path = os.path.join(directory, file)
+            arr = np.load(path)
+
+            if self.normalize:
+                arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
+
+            # Convert to torch tensor but keep in CPU memory
+            self.data.append(torch.from_numpy(arr).float())
+
+        print(f"Finished loading {len(self.data)} samples into memory")
+
+        # Store the shape for reference
+        self.image_shape = self.data[0].shape
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        # No disk I/O here - just return the preloaded tensor
+        return self.data[idx]
 
 def setup(rank, world_size):
     """Initialize the distributed environment."""
