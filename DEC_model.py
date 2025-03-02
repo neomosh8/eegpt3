@@ -147,7 +147,7 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
                 for vbatch in val_loader:
                     vbatch = vbatch.to(device)
                     vrecon, _ = cae_model(vbatch)
-                    vloss = criterion(vrecon, vbatch)
+                    vloss = 0.5 * criterion_mse(recon, batch) + 0.5 * criterion_l1(recon, batch)
                     val_loss_accum += vloss.item() * vbatch.size(0)
             val_loss = val_loss_accum / len(val_loader.dataset)
             print(f"[CAE] Epoch {epoch}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
