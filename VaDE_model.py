@@ -114,6 +114,7 @@ class VaDE(nn.Module):
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid()
         )
 
         # GMM parameters
@@ -253,6 +254,7 @@ if __name__ == "__main__":
 
     sample_data = dataset[0]
     input_shape = sample_data.shape  # (C, H, W)
+    print(input_shape)
 
     # 2) Model
     model = VaDE(input_shape=input_shape, latent_dim=1024, n_clusters=100).to(args.device)
