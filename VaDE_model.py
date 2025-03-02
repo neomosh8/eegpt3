@@ -161,52 +161,42 @@ def vae_loss(x, x_recon, mu_q, log_var_q):
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     kl_div = -0.5 * (1 + log_var_q - mu_q.pow(2) - log_var_q.exp()).sum(1).mean()
     return recon_loss + kl_div
-def vade_loss(x, x_recon, mu_q, log_var_q, model):
-    """
-    VaDE loss with hybrid reconstruction loss (MSE + L1) + KL divergence with GMM prior.
-    """
+def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
     d = model.latent_dim
 
-    # GMM parameters
-    var_c = model.log_var_c.exp()           # (K,)
-    log_var_c = model.log_var_c            # (K,)
-    mu_c = model.mu_c                      # (K, latent_dim)
-    log_p_c = F.log_softmax(model.log_p_c, dim=0)  # (K,)
+    var_c = model.log_var_c.exp()
+    log_var_c = model.log_var_c
+    mu_c = model.mu_c
+    log_p_c = F.log_softmax(model.log_p_c, dim=0)
 
-    # Compute q(c|x)
-    diff = mu_q.unsqueeze(1) - mu_c        # (batch_size, K, latent_dim)
+    diff = mu_q.unsqueeze(1) - mu_c
     log_likelihood = (
         -0.5 * d * math.log(2 * math.pi)
         - 0.5 * d * log_var_c
         - 0.5 / var_c * diff.pow(2).sum(2)
-    )                                      # (batch_size, K)
+    )
     log_q_c_x_unnorm = log_p_c + log_likelihood
     log_q_c_x = F.log_softmax(log_q_c_x_unnorm, dim=1)
-    q_c_x = log_q_c_x.exp()                # (batch_size, K)
+    q_c_x = log_q_c_x.exp()
 
-    # Compute KL(q(z|x) || p(z|c)) for each cluster
-    sum_var_q = log_var_q.exp().sum(1)     # (batch_size,)
-    log_det_q = log_var_q.sum(1)           # (batch_size,)
-    diff_sq = diff.pow(2).sum(2)           # (batch_size, K)
-    inv_var_c = 1 / var_c                  # (K,)
+    sum_var_q = log_var_q.exp().sum(1)
+    log_det_q = log_var_q.sum(1)
+    diff_sq = diff.pow(2).sum(2)
+    inv_var_c = 1 / var_c
     kl_per_cluster = 0.5 * (
         inv_var_c.unsqueeze(0) * sum_var_q.unsqueeze(1) +
         inv_var_c.unsqueeze(0) * diff_sq +
         d * log_var_c.unsqueeze(0) - d -
         log_det_q.unsqueeze(1)
-    )                                      # (batch_size, K)
+    )
 
-    # Expected KL over clusters
-    expected_kl = (q_c_x * kl_per_cluster).sum(1)  # (batch_size,)
-
-    # KL(q(c|x) || p(c))
-    kl_categorical = (q_c_x * (log_q_c_x - log_p_c)).sum(1)  # (batch_size,)
-
+    expected_kl = (q_c_x * kl_per_cluster).sum(1)
+    kl_categorical = (q_c_x * (log_q_c_x - log_p_c)).sum(1)
     total_kl = expected_kl + kl_categorical
-    return recon_loss + total_kl.mean()
+    return recon_loss + beta * total_kl.mean()
 def initialize_gmm_params(model, train_loader, device):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
     with torch.no_grad():
@@ -216,18 +206,27 @@ def initialize_gmm_params(model, train_loader, device):
             mu_q, _ = model.encode(x)
             all_mu_q.append(mu_q.cpu())
         all_mu_q = torch.cat(all_mu_q, dim=0)
+        mu_mean = all_mu_q.mean()
+        mu_std = all_mu_q.std()
+        print(f"Latent mu_q mean: {mu_mean.item():.4f}, std: {mu_std.item():.4f}")
 
         # Run K-means
         kmeans = KMeans(n_clusters=model.n_clusters, random_state=42)
-        kmeans.fit(all_mu_q.numpy())
+        labels = kmeans.fit_predict(all_mu_q.numpy())
         model.mu_c.data = torch.from_numpy(kmeans.cluster_centers_).to(device)
 
-        # Compute total variance in latent space
-        mean_mu = all_mu_q.mean(0)
-        var_total = ((all_mu_q - mean_mu)**2).mean()
-        model.log_var_c.data = torch.log(var_total) * torch.ones(model.n_clusters).to(device)
+        # Compute per-cluster variance
+        for k in range(model.n_clusters):
+            cluster_points = all_mu_q[labels == k]
+            if len(cluster_points) > 1:
+                var_k = torch.var(cluster_points, dim=0).mean()  # Mean variance across dimensions
+                model.log_var_c.data[k] = torch.log(var_k + 1e-6)  # Add epsilon for stability
+            else:
+                # Fallback to total variance if cluster has too few points
+                var_total = torch.var(all_mu_q, dim=0).mean()
+                model.log_var_c.data[k] = torch.log(var_total + 1e-6)
 
-        # Initialize p(c) as uniform (log_p_c = 0)
+        # Initialize p(c) as uniform
         model.log_p_c.data = torch.zeros(model.n_clusters).to(device)
 def evaluate_vae(model, data_loader, device):
     model.eval()
@@ -316,6 +315,10 @@ if __name__ == "__main__":
                 x = batch.to(device)
                 x_recon, mu_q, log_var_q, z = model(x)
                 loss = vade_loss(x, x_recon, mu_q, log_var_q, model)  # Assume vade_loss is defined
+                recon_loss = 0.5 * F.mse_loss(x_recon, x, reduction='mean') + 0.5 * F.l1_loss(x_recon, x,
+                                                                                              reduction='mean')
+                kl_term = loss - recon_loss
+                print(f"Recon Loss: {recon_loss.item():.4f}, KL Term: {kl_term.item():.4f}")
                 total_loss += loss.item()
         return total_loss / len(data_loader)
 
@@ -330,6 +333,9 @@ if __name__ == "__main__":
             x = batch.to(args.device)
             x_recon, mu_q, log_var_q, z = model(x)
             loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+            recon_loss = 0.5 * F.mse_loss(x_recon, x, reduction='mean') + 0.5 * F.l1_loss(x_recon, x, reduction='mean')
+            kl_term = loss - recon_loss
+            print(f"Recon Loss: {recon_loss.item():.4f}, KL Term: {kl_term.item():.4f}")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
