@@ -217,7 +217,7 @@ class VaDE(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
+
 
         )
         # GMM parameters
@@ -492,7 +492,7 @@ def main():
     parser.add_argument("--pretrain_epochs", type=int, default=200)
     parser.add_argument("--cluster_epochs", type=int, default=1000)
     parser.add_argument("--warmup_epochs", type=int, default=75)
-    parser.add_argument("--latent_dim", type=int, default=1024)
+    parser.add_argument("--latent_dim", type=int, default=256)
     parser.add_argument("--n_clusters", type=int, default=50)
     args = parser.parse_args()
 
