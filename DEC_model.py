@@ -768,7 +768,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         for vbatch in val_loader:
             vb = vbatch.to(args.device)
-            x_recon, z, vq = idec_model(vbatch)
+            x_recon, z, vq = idec_model(vb)
             labels = torch.argmax(vq, dim=1).cpu().numpy()
             all_val_labels.extend(labels)
     all_val_labels = np.array(all_val_labels)
