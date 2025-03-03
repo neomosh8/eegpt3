@@ -177,7 +177,7 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
                 for vbatch in val_loader:
                     vbatch = vbatch.to(device)
                     vrecon, _ = cae_model(vbatch)
-                    vloss = 0.5 * criterion_mse(recon, batch) + 0.5 * criterion_l1(recon, batch)
+                    vloss = 0.5 * criterion_mse(vrecon, vbatch) + 0.5 * criterion_l1(vrecon, vbatch)
                     val_loss_accum += vloss.item() * vbatch.size(0)
             val_loss = val_loss_accum / len(val_loader.dataset)
             print(f"[CAE] Epoch {epoch}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
@@ -443,7 +443,7 @@ def plot_most_frequent_cluster_images(dec_model, dataset, device='cuda',
         idx_counter = 0
         for batch in loader:
             batch = batch.to(device)
-            _, _, q = dec_model(batch)
+            x_recon, z, q = idec_model(batch)
             lbls = torch.argmax(q, dim=1).cpu().numpy()
             for l in lbls:
                 idx_to_cluster.append(l)
@@ -760,15 +760,15 @@ if __name__ == "__main__":
     # dec_model = train_dec_full_pass(dec_model, train_loader, val_loader=val_loader,
     #                                 epochs=args.epochs_dec, device=args.device)
 
-    dec_model = train_idec_full_pass(idec_model, train_loader, val_loader=val_loader,
+    idec_model = train_idec_full_pass(idec_model, train_loader, val_loader=val_loader,
                                     epochs=args.epochs_dec, device=args.device)
     # 5) Evaluate final cluster distribution on validation
-    dec_model.eval()
+    idec_model.eval()
     all_val_labels = []
     with torch.no_grad():
         for vbatch in val_loader:
             vb = vbatch.to(args.device)
-            _, _, vq = idec_model(vb)
+            x_recon, z, vq = idec_model(vbatch)
             labels = torch.argmax(vq, dim=1).cpu().numpy()
             all_val_labels.extend(labels)
     all_val_labels = np.array(all_val_labels)
@@ -777,11 +777,11 @@ if __name__ == "__main__":
     plot_cluster_distribution(all_val_labels, out_path='QA/DEC/cluster_hist.png')
 
     # Plot images from the most frequent cluster
-    plot_most_frequent_cluster_images(dec_model, val_ds, device=args.device,
+    plot_most_frequent_cluster_images(idec_model, val_ds, device=args.device,
                                       top_n=8, out_path='QA/DEC/most_freq_cluster.png')
 
     print("[MAIN] Done. QA plots saved in QA/DEC/")
 
     # After DEC training is done
-    torch.save(dec_model.state_dict(), "QA/DEC/dec_model.pt")
+    torch.save(idec_model.state_dict(), "QA/DEC/dec_model.pt")
 
