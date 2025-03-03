@@ -521,7 +521,7 @@ def save_checkpoint(model, optimizer, epoch, filename, rank=0):
         }, filename)
 
 
-def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
+def train_vae(model, train_loader, optimizer, device, epoch, args):  # removed scaler
     model.train()
     total_train_loss = 0
     total_train_samples = 0
@@ -536,15 +536,15 @@ def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
         optimizer.zero_grad()
 
         try:
-            with autocast():
-                x_recon, mu_q, log_var_q, z = model(x)
+            # Remove autocast context manager
+            x_recon, mu_q, log_var_q, z = model(x)
 
-                # Check for NaNs early
-                if torch.isnan(x_recon).any():
-                    print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
-                    continue
+            # Check for NaNs early
+            if torch.isnan(x_recon).any():
+                print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
+                continue
 
-                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+            loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Loss is NaN/Inf on batch {batch_idx}, skipping")
@@ -554,9 +554,10 @@ def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
                       f"log_var_q: [{log_var_q.min().item()}, {log_var_q.max().item()}]")
                 continue
 
-            scaler.scale(loss).backward()
+            # Replace scaler.scale().backward() with normal backward
+            loss.backward()
 
-            # More aggressive gradient clipping
+            # Keep gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
             # Check for NaN gradients
@@ -570,8 +571,8 @@ def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
                 print(f"NaN/Inf gradient detected on batch {batch_idx}, skipping update")
                 continue
 
-            scaler.step(optimizer)
-            scaler.update()
+            # Replace scaler.step() and scaler.update() with normal step
+            optimizer.step()
 
             total_train_loss += loss.item() * batch_size
             total_train_samples += batch_size
@@ -582,7 +583,8 @@ def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
 
     return total_train_loss, total_train_samples
 
-def train_vade(model, train_loader, optimizer, scaler, device, epoch, args):
+
+def train_vade(model, train_loader, optimizer, device, epoch, args):  # removed scaler
     model.train()
     total_train_loss = 0
     total_train_samples = 0
@@ -594,27 +596,24 @@ def train_vade(model, train_loader, optimizer, scaler, device, epoch, args):
         optimizer.zero_grad()
 
         try:
-            with autocast():
-                x_recon, mu_q, log_var_q, z = model(x)
+            # Remove autocast
+            x_recon, mu_q, log_var_q, z = model(x)
 
-                # Check for NaNs early
-                if torch.isnan(x_recon).any():
-                    print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
-                    continue
+            # Check for NaNs early
+            if torch.isnan(x_recon).any():
+                print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
+                continue
 
-                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+            loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Loss is NaN/Inf on batch {batch_idx}, skipping")
-                print(f"Debug values: x: [{x.min().item()}, {x.max().item()}], "
-                      f"x_recon: [{x_recon.min().item()}, {x_recon.max().item()}], "
-                      f"mu_q: [{mu_q.min().item()}, {mu_q.max().item()}], "
-                      f"log_var_q: [{log_var_q.min().item()}, {log_var_q.max().item()}]")
                 continue
 
-            scaler.scale(loss).backward()
+            # Normal backward instead of scaled
+            loss.backward()
 
-            # More aggressive gradient clipping
+            # Keep gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
             # Check for NaN gradients
@@ -628,8 +627,8 @@ def train_vade(model, train_loader, optimizer, scaler, device, epoch, args):
                 print(f"NaN/Inf gradient detected on batch {batch_idx}, skipping update")
                 continue
 
-            scaler.step(optimizer)
-            scaler.update()
+            # Normal step instead of scaled
+            optimizer.step()
 
             total_train_loss += loss.item() * batch_size
             total_train_samples += batch_size
@@ -639,7 +638,6 @@ def train_vade(model, train_loader, optimizer, scaler, device, epoch, args):
             continue
 
     return total_train_loss, total_train_samples
-
 
 def main():
     # Get rank and world size from environment (set by torchrun)
@@ -716,9 +714,6 @@ def main():
         if rank == 0:
             print(f"Input shape: {input_shape}")
 
-        # Use stable gradient scaler
-        scaler = GradScaler()
-
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
         model.apply(weights_init)
@@ -751,12 +746,10 @@ def main():
             # Set epoch for sampler
             train_sampler.set_epoch(epoch)
 
-            # Use the train_vae function
             total_train_loss, total_train_samples = train_vae(
                 model=model,
                 train_loader=train_loader,
                 optimizer=optimizer,
-                scaler=scaler,
                 device=rank,
                 epoch=epoch,
                 args=args
@@ -837,7 +830,6 @@ def main():
                 model=model,
                 train_loader=train_loader,
                 optimizer=optimizer,
-                scaler=scaler,
                 device=rank,
                 epoch=epoch,
                 args=args
