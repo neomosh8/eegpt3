@@ -523,8 +523,8 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--pretrain_epochs", type=int, default=20)
     parser.add_argument("--cluster_epochs", type=int, default=120)
-    parser.add_argument("--warmup_epochs", type=int, default=75)
-    parser.add_argument("--latent_dim", type=int, default=256)
+    parser.add_argument("--warmup_epochs", type=int, default=10)
+    parser.add_argument("--latent_dim", type=int, default=128)
     parser.add_argument("--n_clusters", type=int, default=50)
     args = parser.parse_args()
 
@@ -688,7 +688,7 @@ def main():
         dist.barrier()  # Ensure all processes have updated parameters
 
         # Plot reconstructions (only on rank 0)
-        plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/pretrain_ae_recons.png',
+        plot_ae_reconstructions(model, val_loader, device=rank, n=2, out_path='QA/VaDE/pretrain_ae_recons.png',
                                 rank=rank)
 
         # Begin VaDE clustering training
@@ -788,7 +788,7 @@ def main():
             plt.close()
 
         # Plot final reconstructions (only on rank 0)
-        plot_ae_reconstructions(model, val_loader, device=rank, n=8, out_path='QA/VaDE/final_ae_recons.png', rank=rank)
+        plot_ae_reconstructions(model, val_loader, device=rank, n=2, out_path='QA/VaDE/final_ae_recons.png', rank=rank)
 
         if rank == 0:
             print("Training completed successfully!")
