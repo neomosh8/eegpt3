@@ -130,7 +130,7 @@ class CAE(nn.Module):
 #  3) CAE Training
 # =========================
 def pretrain_cae(cae_model, train_loader, val_loader=None,
-                 epochs=10, lr=1e-3, device='cuda'):
+                 epochs=10, lr=1e-3, device='cuda',max_lr=1e-3):
     """
     Train the CAE for reconstruction.
     Optionally validate on val_loader to monitor overfitting.
@@ -139,6 +139,23 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
     optimizer = optim.Adam(cae_model.parameters(), lr=lr)
     criterion_mse = nn.MSELoss()
     criterion_l1 = nn.L1Loss()
+
+    # OneCycle parameters
+    total_steps = epochs * len(train_loader)
+    pct_start = 0.3  # Use 30% of steps for increasing LR
+    div_factor = 10  # initial_lr = max_lr/div_factor
+    final_div_factor = 100  # final_lr = initial_lr/final_div_factor
+
+    # Step-wise LR scheduler
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lr,
+        total_steps=total_steps,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
+    )
+
     for epoch in range(1, epochs+1):
         cae_model.train()
         running_loss = 0.0
@@ -149,6 +166,7 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
             loss = 0.5 * criterion_mse(recon, batch) + 0.5 * criterion_l1(recon, batch)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             running_loss += loss.item() * batch.size(0)
         train_loss = running_loss / len(train_loader.dataset)
 
