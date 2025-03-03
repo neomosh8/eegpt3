@@ -717,10 +717,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--latent_dim", type=int, default=2048)
     parser.add_argument("--n_clusters", type=int, default=100)
-    parser.add_argument("--epochs_cae", type=int, default=300)
+    parser.add_argument("--epochs_cae", type=int, default=10)
     parser.add_argument("--epochs_dec", type=int, default=200)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -746,6 +746,8 @@ if __name__ == "__main__":
     # ---- QA: Check reconstructions from validation set ----
     plot_ae_reconstructions(cae_model, val_loader, device=args.device,
                             n=8, out_path='QA/DEC/ae_recons.png')
+    # After CAE training is done
+    torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
 
     # 3) DEC Setup
     idec_model = IDEC(encoder=cae_model.encoder, decoder=cae_model.decoder,
@@ -779,8 +781,6 @@ if __name__ == "__main__":
                                       top_n=8, out_path='QA/DEC/most_freq_cluster.png')
 
     print("[MAIN] Done. QA plots saved in QA/DEC/")
-    # After CAE training is done
-    torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
 
     # After DEC training is done
     torch.save(dec_model.state_dict(), "QA/DEC/dec_model.pt")
