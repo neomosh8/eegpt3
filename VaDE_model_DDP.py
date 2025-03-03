@@ -659,7 +659,7 @@ def main():
     parser.add_argument("--pretrain_epochs", type=int, default=20)
     parser.add_argument("--cluster_epochs", type=int, default=120)
     parser.add_argument("--warmup_epochs", type=int, default=10)
-    parser.add_argument("--latent_dim", type=int, default=128)
+    parser.add_argument("--latent_dim", type=int, default=2048)
     parser.add_argument("--n_clusters", type=int, default=50)
     args = parser.parse_args()
 
