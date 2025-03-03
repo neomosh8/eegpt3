@@ -353,7 +353,7 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     )
 
     # Clip extremely large values to prevent numerical overflow
-    # kl_per_cluster = torch.clamp(kl_per_cluster, max=1e6)
+    kl_per_cluster = torch.clamp(kl_per_cluster, max=1e6)
 
     expected_kl = (q_c_x * kl_per_cluster).sum(1)
     kl_categorical = (q_c_x * (log_q_c_x - log_p_c)).sum(1)
