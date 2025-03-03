@@ -66,10 +66,11 @@ class ConvEncoder(nn.Module):
         C, H, W = input_shape
         # Define the conv layers
         self.conv_net = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1), nn.ReLU(),
+            nn.Conv2d(C, 16, kernel_size=3, stride=1, padding=1), nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), nn.ReLU()
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),nn.BatchNorm2d(64),nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),nn.BatchNorm2d(128),nn.ReLU(),
         )
         # Determine shape after convs
         with torch.no_grad():
@@ -96,7 +97,8 @@ class ConvDecoder(nn.Module):
         self.fc = nn.Linear(latent_dim, out_channels * out_h * out_w)
 
         self.deconv_net = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),nn.BatchNorm2d(64), nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(16, 3, kernel_size=3, stride=1, padding=1), nn.Tanh()
@@ -136,7 +138,7 @@ def pretrain_cae(cae_model, train_loader, val_loader=None,
     Optionally validate on val_loader to monitor overfitting.
     """
     cae_model.to(device)
-    optimizer = optim.Adam(cae_model.parameters(), lr=lr)
+    optimizer = optim.Adam(cae_model.parameters(), lr=lr,weight_decay=1e-5)
     criterion_mse = nn.MSELoss()
     criterion_l1 = nn.L1Loss()
 
@@ -1069,4 +1071,6 @@ if __name__ == "__main__":
 
     # After DEC training is done
     torch.save(idec_model.state_dict(), "QA/DEC/dec_model.pt")
-
+    # ---- QA: Check reconstructions from validation set ----
+    plot_ae_reconstructions(idec_model, val_loader, device=args.device,
+                            n=8, out_path='QA/DEC/ae_recons_final_IDEC.png')
