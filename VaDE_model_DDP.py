@@ -487,7 +487,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=5e-6)
     parser.add_argument("--pretrain_epochs", type=int, default=200)
     parser.add_argument("--cluster_epochs", type=int, default=1000)
     parser.add_argument("--warmup_epochs", type=int, default=100)
