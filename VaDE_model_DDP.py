@@ -217,6 +217,7 @@ class VaDE(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
 
         )
         # GMM parameters
