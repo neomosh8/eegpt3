@@ -85,7 +85,19 @@ def cleanup():
         dist.destroy_process_group()
 
 
-def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png', rank=0):
+def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png', rank=0, inverse_norm=None):
+    """
+    Plot autoencoder reconstructions.
+
+    Args:
+        model: The trained model.
+        data_loader: DataLoader providing input samples.
+        device: Device to run inference on.
+        n: Number of samples to plot.
+        out_path: File path to save the plot.
+        rank: Process rank (only rank 0 performs plotting).
+        inverse_norm: Tuple (global_mean, global_std) to invert standardization for display.
+    """
     # Only perform plotting on rank 0
     if rank != 0:
         return
@@ -96,28 +108,39 @@ def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png
             x = batch.to(device)
             x_recon, _, _, _ = model(x)
             break
+
+    # Get first n samples and move to CPU
     x = x.cpu()[:n]
     x_recon = x_recon.cpu()[:n]
 
-    # Get input shape: x has shape (batch_size, C, H, W)
-    C, H, W = x.shape[1], x.shape[2], x.shape[3]
+    # Optionally inverse the standardization if global stats are provided
+    if inverse_norm is not None:
+        global_mean, global_std = inverse_norm
+        x = x * global_std + global_mean
+        x_recon = x_recon * global_std + global_mean
+
+    # Normalize both for display (per batch normalization for visualization)
+    x_disp = (x - x.min()) / (x.max() - x.min() + 1e-8)
+    x_recon_disp = (x_recon - x_recon.min()) / (x_recon.max() - x_recon.min() + 1e-8)
+
+    # Determine image shape (assumes (batch_size, C, H, W))
+    C, H, W = x_disp.shape[1], x_disp.shape[2], x_disp.shape[3]
 
     fig, axes = plt.subplots(2, n, figsize=(n * 2, 4))
     for i in range(n):
         if C == 1:
-            # Grayscale: permute to (H, W, C) and squeeze to (H, W)
-            axes[0, i].imshow(x[i].permute(1, 2, 0).squeeze(), cmap='gray')
-            axes[1, i].imshow(x_recon[i].permute(1, 2, 0).squeeze(), cmap='gray')
+            axes[0, i].imshow(x_disp[i].permute(1, 2, 0).squeeze(), cmap='gray')
+            axes[1, i].imshow(x_recon_disp[i].permute(1, 2, 0).squeeze(), cmap='gray')
         elif C == 3:
-            # RGB: permute to (H, W, 3)
-            axes[0, i].imshow(x[i].permute(1, 2, 0))
-            axes[1, i].imshow(x_recon[i].permute(1, 2, 0))
+            axes[0, i].imshow(x_disp[i].permute(1, 2, 0))
+            axes[1, i].imshow(x_recon_disp[i].permute(1, 2, 0))
         else:
-            # For C > 3 or other cases, plot the first channel as grayscale
-            axes[0, i].imshow(x[i][0], cmap='gray')
-            axes[1, i].imshow(x_recon[i][0], cmap='gray')
+            # For multi-channel data where channels > 3, display the first channel as grayscale
+            axes[0, i].imshow(x_disp[i][0], cmap='gray')
+            axes[1, i].imshow(x_recon_disp[i][0], cmap='gray')
         axes[0, i].axis('off')
         axes[1, i].axis('off')
+
     plt.savefig(out_path)
     plt.close()
 
@@ -223,7 +246,7 @@ class VaDE(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
+            nn.Tanh()
 
         )
         # GMM parameters
