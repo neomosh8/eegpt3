@@ -91,7 +91,6 @@ def plot_ae_reconstructions(model, data_loader, device, n=8, out_path='recon.png
             break
     x = x.cpu()[:n]
     x_recon = x_recon.cpu()[:n]
-    x_recon = (x_recon - x_recon.min()) / (x_recon.max() - x_recon.min() + 1e-8)
 
     # Get input shape: x has shape (batch_size, C, H, W)
     C, H, W = x.shape[1], x.shape[2], x.shape[3]
@@ -492,7 +491,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--pretrain_epochs", type=int, default=200)
-    parser.add_argument("--cluster_epochs", type=int, default=1000)
+    parser.add_argument("--cluster_epochs", type=int, default=120)
     parser.add_argument("--warmup_epochs", type=int, default=75)
     parser.add_argument("--latent_dim", type=int, default=256)
     parser.add_argument("--n_clusters", type=int, default=50)
