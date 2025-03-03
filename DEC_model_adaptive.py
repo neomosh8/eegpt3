@@ -765,7 +765,7 @@ def train_idec_full_pass_adaptive(model, train_loader, val_loader=None, epochs=1
 
     # For early stopping
     best_loss = float('inf')
-    patience = 15
+    patience = 50
     patience_counter = 0
 
     for epoch in range(1, epochs + 1):
@@ -921,6 +921,292 @@ def train_idec_full_pass_adaptive(model, train_loader, val_loader=None, epochs=1
     return model
 
 
+def train_idec_uniform_clusters(model, train_loader, val_loader=None, epochs=20,
+                                device='cuda', initial_lambdas=None):
+    """
+    Training loop for IDEC with a specific focus on:
+    1. Achieving uniform distribution of cluster assignments
+    2. Creating well-separated clusters
+    3. Maintaining good reconstruction quality
+
+    This version fixes the negative/positive loss discrepancy and provides
+    better metrics for monitoring cluster quality.
+    """
+    model.to(device)
+
+    # Initialize lambdas with defaults if not provided
+    if initial_lambdas is None:
+        lambdas = {
+            'lambda_kl': 1.5,
+            'lambda_recon': 0.05,
+            'lambda_bal': 0.3,
+            'lambda_entropy': 0.1,
+            'lambda_sep': 0.01
+        }
+    else:
+        lambdas = initial_lambdas.copy()
+
+    optimizer = optim.Adam([
+        {'params': model.encoder.parameters(), 'lr': 1e-4},
+        {'params': model.decoder.parameters(), 'lr': 1e-4},
+        {'params': [model.cluster_centers], 'lr': 1e-3}
+    ])
+
+    loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
+    train_data_size = len(train_loader.dataset)
+
+    # Track uniformity and separation metrics
+    uniformity_history = []
+    separation_history = []
+    silhouette_history = []
+
+    # For adaptive mixing factor based on uniformity
+    model.target_beta = 0.3
+
+    for epoch in range(1, epochs + 1):
+        # Step 1: Compute q for the entire dataset in evaluation mode
+        model.eval()
+        all_q = []
+        all_z = []
+        with torch.no_grad():
+            for batch in train_loader:
+                batch = batch.to(device)
+                _, z, q = model(batch)
+                all_q.append(q.cpu())
+                all_z.append(z.cpu())
+        all_q = torch.cat(all_q, dim=0)  # (N, n_clusters)
+        all_z = torch.cat(all_z, dim=0)  # (N, latent_dim)
+
+        # Compute cluster assignments
+        cluster_assignments = torch.argmax(all_q, dim=1).numpy()
+
+        # Compute uniformity metric (how evenly distributed are the clusters)
+        cluster_counts = np.bincount(cluster_assignments, minlength=model.n_clusters)
+        cluster_freqs = cluster_counts / len(cluster_assignments)
+        uniformity = -np.sum(cluster_freqs * np.log(cluster_freqs + 1e-10))  # Entropy of distribution
+        uniformity_ratio = uniformity / np.log(model.n_clusters)  # Normalized to [0,1]
+        uniformity_history.append(uniformity_ratio)
+
+        # Compute average separation between clusters (simple metric)
+        centers = model.cluster_centers.detach().cpu().numpy()
+        center_dists = []
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                center_dists.append(dist)
+        avg_separation = np.mean(center_dists) if center_dists else 0
+        separation_history.append(avg_separation)
+
+        # Step 2: Compute refined target distribution p with adaptive beta
+        # Increase beta if uniformity is low to encourage more balanced clusters
+        if epoch > 1 and uniformity_ratio < 0.7:
+            model.target_beta = min(0.6, model.target_beta + 0.05)
+            print(f"[IDEC] Adjusting target_beta to {model.target_beta:.2f} to improve uniformity")
+        elif epoch > 1 and uniformity_ratio > 0.85:
+            model.target_beta = max(0.1, model.target_beta - 0.05)
+            print(f"[IDEC] Reducing target_beta to {model.target_beta:.2f} (uniformity is good)")
+
+        p = model.target_distribution(all_q, beta=model.target_beta)
+
+        # Step 3: Train in mini-batches
+        model.train()
+        idx_offset = 0
+        epoch_losses = {
+            'recon': 0.0,
+            'kl': 0.0,
+            'balance': 0.0,
+            'entropy': 0.0,
+            'sep': 0.0,
+            'total_with_entropy': 0.0,  # Including negative entropy term
+            'total_positive': 0.0  # Excluding negative entropy term
+        }
+
+        for batch in train_loader:
+            b_size = batch.size(0)
+            batch = batch.to(device)
+            p_batch = p[idx_offset: idx_offset + b_size, :].to(device)
+            idx_offset += b_size
+
+            x_recon, z, q_batch = model(batch)
+            log_q = torch.log(q_batch + 1e-10)
+
+            # Individual loss components
+            kl_loss = loss_fn_kl(log_q, p_batch)
+            recon_loss = F.mse_loss(x_recon, batch)
+
+            # Balancing loss
+            f = torch.mean(q_batch, dim=0)  # Average cluster assignment frequency
+            uniform = torch.ones_like(f) / f.numel()
+            balance_loss = torch.sum(uniform * (torch.log(uniform + 1e-10) - torch.log(f + 1e-10)))
+
+            # Entropy penalty (to maximize entropy of assignments)
+            entropy = -torch.sum(f * torch.log(f + 1e-10))
+
+            # Separation loss (to encourage well-separated clusters)
+            sep_loss = center_separation_loss(model.cluster_centers)
+
+            # IMPORTANT: Two separate loss calculations for reporting vs optimization
+            # Loss for optimization (including negative entropy term)
+            total_loss = (lambdas['lambda_kl'] * kl_loss +
+                          lambdas['lambda_recon'] * recon_loss +
+                          lambdas['lambda_bal'] * balance_loss -
+                          lambdas['lambda_entropy'] * entropy +
+                          lambdas['lambda_sep'] * sep_loss)
+
+            # Positive-only loss for reporting (excluding negative entropy term)
+            positive_loss = (lambdas['lambda_kl'] * kl_loss +
+                             lambdas['lambda_recon'] * recon_loss +
+                             lambdas['lambda_bal'] * balance_loss +
+                             lambdas['lambda_sep'] * sep_loss)
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            # Accumulate losses
+            epoch_losses['kl'] += kl_loss.item() * b_size
+            epoch_losses['recon'] += recon_loss.item() * b_size
+            epoch_losses['balance'] += balance_loss.item() * b_size
+            epoch_losses['entropy'] += entropy.item() * b_size
+            epoch_losses['sep'] += sep_loss.item() * b_size
+            epoch_losses['total_with_entropy'] += total_loss.item() * b_size
+            epoch_losses['total_positive'] += positive_loss.item() * b_size
+
+        # Calculate average losses
+        for k in epoch_losses:
+            epoch_losses[k] /= train_data_size
+
+        # Adapt hyperparameters based on uniformity and separation goals
+        if epoch > 1:
+            # If uniformity is low, increase balance and entropy lambdas
+            if uniformity_ratio < 0.6:
+                lambdas['lambda_bal'] = min(1.0, lambdas['lambda_bal'] * 1.2)
+                lambdas['lambda_entropy'] = min(0.3, lambdas['lambda_entropy'] * 1.2)
+                print(f"[IDEC] Increasing balance and entropy lambdas to improve uniformity")
+
+            # If separation is low, increase separation lambda
+            if avg_separation < 0.5 and separation_history[-2] >= avg_separation:
+                lambdas['lambda_sep'] = min(0.05, lambdas['lambda_sep'] * 1.3)
+                print(f"[IDEC] Increasing separation lambda to improve cluster separation")
+
+            # If KL loss is very small, slightly reduce its importance
+            if epoch_losses['kl'] < 0.01 and lambdas['lambda_kl'] > 0.5:
+                lambdas['lambda_kl'] = max(0.5, lambdas['lambda_kl'] * 0.9)
+                print(f"[IDEC] Reducing KL lambda to balance with other objectives")
+
+            # If reconstruction is degrading, increase its importance
+            if epoch > 2 and epoch_losses['recon'] > 1.05 * epoch_losses['recon']:
+                lambdas['lambda_recon'] = min(0.2, lambdas['lambda_recon'] * 1.2)
+                print(f"[IDEC] Increasing reconstruction lambda to maintain quality")
+
+        # Print consistent training metrics
+        print(f"[IDEC] Epoch {epoch}/{epochs}, "
+              f"Positive Loss: {epoch_losses['total_positive']:.4f}, "
+              f"Optimization Loss: {epoch_losses['total_with_entropy']:.4f}, "
+              f"Uniformity: {uniformity_ratio:.4f}, "
+              f"Avg Separation: {avg_separation:.4f}")
+        print(f"      KL: {epoch_losses['kl']:.4f}, Recon: {epoch_losses['recon']:.4f}, "
+              f"Balance: {epoch_losses['balance']:.4f}, Entropy: {epoch_losses['entropy']:.4f}")
+
+        # Evaluate on validation set if provided
+        if val_loader is not None:
+            model.eval()
+            val_recon_loss = 0.0
+            val_z = []
+            val_labels = []
+
+            with torch.no_grad():
+                for vbatch in val_loader:
+                    vbatch = vbatch.to(device)
+                    vx_recon, vz, vq = model(vbatch)
+
+                    # Compute validation reconstruction loss
+                    vrecon_loss = F.mse_loss(vx_recon, vbatch)
+                    val_recon_loss += vrecon_loss.item() * vbatch.size(0)
+
+                    # Get cluster assignments
+                    cluster_idx = torch.argmax(vq, dim=1).cpu().numpy()
+                    val_z.append(vz.cpu().numpy())
+                    val_labels.extend(cluster_idx)
+
+            val_recon_loss /= len(val_loader.dataset)
+            val_z = np.concatenate(val_z, axis=0)
+            val_labels = np.array(val_labels)
+
+            # Compute silhouette score if we have multiple clusters
+            unique_labels = np.unique(val_labels)
+            silhouette = None
+            if len(unique_labels) > 1:
+                try:
+                    from sklearn.metrics import silhouette_score
+                    silhouette = silhouette_score(val_z, val_labels)
+                    silhouette_history.append(silhouette)
+                    print(f"   [Val] Recon Loss: {val_recon_loss:.4f}, Silhouette: {silhouette:.4f}")
+                except Exception as e:
+                    print(f"   [Val] Recon Loss: {val_recon_loss:.4f}, Silhouette error: {e}")
+            else:
+                print(f"   [Val] Recon Loss: {val_recon_loss:.4f}, Only one cluster detected")
+
+            # Compute and report validation uniformity
+            val_counts = np.bincount(val_labels, minlength=model.n_clusters)
+            val_freqs = val_counts / len(val_labels)
+            val_uniformity = -np.sum(val_freqs * np.log(val_freqs + 1e-10))
+            val_uniformity_ratio = val_uniformity / np.log(model.n_clusters)
+            print(f"   [Val] Uniformity: {val_uniformity_ratio:.4f}")
+
+            # Generate visual report on cluster distribution every 5 epochs
+            if epoch % 5 == 0 or epoch == epochs:
+                # Create directory if needed
+                os.makedirs("QA/DEC", exist_ok=True)
+
+                # Plot cluster distribution
+                plt.figure(figsize=(10, 6))
+                non_zero_indices = np.where(val_counts > 0)[0]
+                plt.bar(non_zero_indices, val_counts[non_zero_indices])
+                plt.xlabel('Cluster ID')
+                plt.ylabel('Number of samples')
+                plt.title(f'Cluster Distribution (Epoch {epoch}) - Uniformity: {val_uniformity_ratio:.4f}')
+                plt.savefig(f"QA/DEC/cluster_dist_epoch_{epoch}.png")
+                plt.close()
+
+                # If we have a 2D latent space, visualize the clusters
+                if model.encoder.latent_dim == 2:
+                    plt.figure(figsize=(10, 8))
+                    plt.scatter(val_z[:, 0], val_z[:, 1], c=val_labels, cmap='tab20', alpha=0.6)
+                    plt.colorbar(label='Cluster ID')
+                    plt.title(f'2D Latent Space Visualization (Epoch {epoch})')
+                    plt.savefig(f"QA/DEC/latent_vis_epoch_{epoch}.png")
+                    plt.close()
+
+    # Save final model
+    torch.save(model.state_dict(), "QA/DEC/idec_final_model.pt")
+
+    # Plot training progress
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 3, 1)
+    plt.plot(uniformity_history)
+    plt.xlabel('Epoch')
+    plt.ylabel('Uniformity Ratio')
+    plt.title('Cluster Uniformity')
+
+    plt.subplot(1, 3, 2)
+    plt.plot(separation_history)
+    plt.xlabel('Epoch')
+    plt.ylabel('Average Separation')
+    plt.title('Cluster Separation')
+
+    if silhouette_history:
+        plt.subplot(1, 3, 3)
+        plt.plot(silhouette_history)
+        plt.xlabel('Epoch')
+        plt.ylabel('Silhouette Score')
+        plt.title('Clustering Quality')
+
+    plt.tight_layout()
+    plt.savefig("QA/DEC/training_progress.png")
+    plt.close()
+
+    return model
 def adapt_hyperparameters(lambdas, loss_history, epoch):
     """
     Adapt hyperparameters based on loss trends
@@ -1044,7 +1330,7 @@ if __name__ == "__main__":
         'lambda_sep': 0.01
     }
 
-    idec_model = train_idec_full_pass_adaptive(
+    idec_model = train_idec_uniform_clusters(
         idec_model,
         train_loader,
         val_loader=val_loader,
