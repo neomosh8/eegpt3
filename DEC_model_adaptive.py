@@ -366,7 +366,11 @@ def plot_ae_reconstructions(cae_model, dataloader, device='cuda', n=8, out_path=
     batch = next(iter(dataloader))  # get a single batch
     batch = batch.to(device)
     with torch.no_grad():
-        recons, _ = cae_model(batch)
+        output = cae_model(batch)
+        if isinstance(output, tuple) and len(output) >= 1:
+            recons = output[0]
+        else:
+            recons = output
 
     # Convert to CPU for plotting
     originals = batch.cpu().numpy()
@@ -761,7 +765,7 @@ def train_idec_full_pass_adaptive(model, train_loader, val_loader=None, epochs=1
 
     # For early stopping
     best_loss = float('inf')
-    patience = 5
+    patience = 15
     patience_counter = 0
 
     for epoch in range(1, epochs + 1):
@@ -1047,7 +1051,7 @@ if __name__ == "__main__":
         epochs=args.epochs_dec,
         device=args.device,
         initial_lambdas=initial_lambdas,
-        adaptation_frequency=1  # Adapt every epoch
+        adaptation_frequency=3  # Adapt every epoch
     )
     # 5) Evaluate final cluster distribution on validation
     idec_model.eval()
