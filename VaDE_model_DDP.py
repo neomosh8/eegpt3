@@ -20,7 +20,9 @@ from torch.cuda.amp import GradScaler, autocast
 class EEGNpyDataset(Dataset):
     """
     Memory-optimized dataset that preloads all .npy files into memory
-    and only transfers to GPU during __getitem__ calls.
+    and transfers data to GPU during __getitem__ calls. If normalization is enabled,
+    it computes the global mean and std over the entire dataset and normalizes
+    each sample accordingly.
     """
 
     def __init__(self, directory, normalize=False):
@@ -37,31 +39,36 @@ class EEGNpyDataset(Dataset):
         # Preload all data into memory
         print(f"Preloading {len(self.files)} files into memory...")
         self.data = []
-
         for i, file in enumerate(self.files):
             if i % 1000 == 0:
                 print(f"Loading file {i}/{len(self.files)}...")
-
             path = os.path.join(directory, file)
             arr = np.load(path)
-
-            if self.normalize:
-                arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
-
-            # Convert to torch tensor but keep in CPU memory
+            # Convert to torch tensor (kept on CPU)
             self.data.append(torch.from_numpy(arr).float())
 
         print(f"Finished loading {len(self.data)} samples into memory")
-
-        # Store the shape for reference
         self.image_shape = self.data[0].shape
+
+        if self.normalize:
+            # Stack all samples to compute global statistics
+            all_data = torch.stack(self.data, dim=0)
+            self.global_mean = all_data.mean()
+            self.global_std = all_data.std()
+            print(f"Global mean: {self.global_mean.item():.4f}, Global std: {self.global_std.item():.4f}")
+
+            # Normalize each sample using the global mean and std
+            epsilon = 1e-8  # To prevent division by zero
+            self.data = [(sample - self.global_mean) / (self.global_std + epsilon)
+                         for sample in self.data]
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # No disk I/O here - just return the preloaded tensor
+        # Return the preloaded (and possibly normalized) tensor
         return self.data[idx]
+
 
 def setup(rank, world_size):
     """Initialize the distributed environment."""
@@ -216,7 +223,7 @@ class VaDE(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
-
+            nn.Sigmoid()
 
         )
         # GMM parameters
@@ -490,7 +497,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--pretrain_epochs", type=int, default=200)
+    parser.add_argument("--pretrain_epochs", type=int, default=100)
     parser.add_argument("--cluster_epochs", type=int, default=120)
     parser.add_argument("--warmup_epochs", type=int, default=75)
     parser.add_argument("--latent_dim", type=int, default=256)
