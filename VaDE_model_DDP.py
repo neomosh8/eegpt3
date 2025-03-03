@@ -196,97 +196,119 @@ def weights_init(m):
 
 class VaDE(nn.Module):
     """
-    Variational Deep Embedding (VaDE) model with a deeper convolutional encoder and decoder.
+    A standard CNN autoencoder for data standardized to mean=0, std=1.
+    (No final activation is needed; output can be unbounded.)
     """
 
-    def __init__(self, input_shape, latent_dim=10, n_clusters=10):
-        """
-        Args:
-            input_shape (tuple): Input shape (C, H, W).
-            latent_dim (int): Dimension of the latent space.
-            n_clusters (int): Number of clusters for GMM.
-        """
-        super(VaDE, self).__init__()
-        self.input_shape = input_shape
-        self.latent_dim = latent_dim
-        self.n_clusters = n_clusters
-        C, H, W = input_shape
+    def __init__(self, in_channels, height, width, latent_dim=32):
+        super().__init__()
 
+        # Ensure H//8 and W//8 are not zero if you're doing 3 strided convs
+        if height // 8 < 1 or width // 8 < 1:
+            raise ValueError(
+                f"Input image too small for 3 strided convs. "
+                f"Got (H, W)=({height}, {width}). "
+                f"After /8 we get ({height // 8}, {width // 8})."
+            )
+
+        self.in_channels = in_channels
+        self.height = height
+        self.width = width
+        self.latent_dim = latent_dim
+
+        # -----------------
+        #   ENCODER
+        # -----------------
+        # Downsample by factor of 2 three times => total factor of 8
         self.encoder = nn.Sequential(
-            nn.Conv2d(C, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
-            nn.ReLU(),
+            nn.ReLU(True),
+
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
-            nn.ReLU(),
+            nn.ReLU(True),
+
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
-            nn.ReLU(),
+            nn.ReLU(True),
+
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(256 * (H // 8) * (W // 8), 512),
-            nn.ReLU(),
-            nn.Linear(512, 2 * latent_dim)  # Outputs mu and log_var
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256 * (H // 8) * (W // 8)),
-            nn.ReLU(),
-            nn.Unflatten(1, (256, H // 8, W // 8)),
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, C, kernel_size=3, stride=1, padding=1),
-            nn.Tanh()
+            nn.ReLU(True),
 
+            nn.Flatten(),
         )
-        # GMM parameters
-        self.mu_c = nn.Parameter(torch.randn(n_clusters, latent_dim))
-        self.log_var_c = nn.Parameter(torch.zeros(n_clusters))
-        self.log_p_c = nn.Parameter(torch.zeros(n_clusters))
+        # Flattened feature map size
+        conv_out_dim = 256 * (height // 8) * (width // 8)
+
+        self.linear_enc = nn.Sequential(
+            nn.Linear(conv_out_dim, 512),
+            nn.ReLU(True),
+            nn.Linear(512, 2 * latent_dim),  # outputs [mu, log_var]
+        )
+
+        # -----------------
+        #   DECODER
+        # -----------------
+        self.linear_dec = nn.Sequential(
+            nn.Linear(latent_dim, 512),
+            nn.ReLU(True),
+            nn.Linear(512, conv_out_dim),
+            nn.ReLU(True),
+        )
+
+        # "Unflatten" so we can apply ConvTranspose2d
+        self.decoder = nn.Sequential(
+            nn.Unflatten(1, (256, height // 8, width // 8)),
+
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+
+            # Final output: no activation for standardized data
+            nn.ConvTranspose2d(32, in_channels, kernel_size=3,
+                               stride=1, padding=1),
+            # If your data is [-1, 1], you'd do: nn.Tanh()
+            # If your data is [0, 1], you'd do: nn.Sigmoid()
+        )
 
     def encode(self, x):
-        """Encode input to latent distribution parameters."""
+        """Encodes input x into latent parameters (mu, log_var)."""
         h = self.encoder(x)
-        mu_q, log_var_q = h.chunk(2, dim=1)
-        return mu_q, log_var_q
+        h = self.linear_enc(h)
+        mu, log_var = torch.chunk(h, 2, dim=1)
+        return mu, log_var
 
-    def reparameterize(self, mu_q, log_var_q):
-        """Reparameterization trick to sample z from q(z|x)."""
-        std = torch.exp(0.5 * log_var_q)
+    def reparameterize(self, mu, log_var):
+        """Samples z from the distribution N(mu, exp(log_var))."""
+        std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
-        return mu_q + eps * std
+        return mu + eps * std
 
     def decode(self, z):
-        """Decode latent z back to input space."""
-        return self.decoder(z)
+        """Decodes latent vector z into reconstruction."""
+        h = self.linear_dec(z)
+        x_recon = self.decoder(h)
+        return x_recon
 
     def forward(self, x):
-        """Forward pass: encode, sample, decode."""
-        mu_q, log_var_q = self.encode(x)
-        # log_var_q = torch.clamp(log_var_q, min=-10, max=10)
-        z = self.reparameterize(mu_q, log_var_q)
+        """Forward pass: x -> (mu, log_var, z) -> x_recon."""
+        mu, log_var = self.encode(x)
+        z = self.reparameterize(mu, log_var)
         x_recon = self.decode(z)
-
-        # Create dummy ops for GMM parameters to ensure gradient flow
-        # These are multiplied by 0.0 to not affect the actual output
-        if self.training:
-            # Single source of dummy ops - only here, not in loss function
-            dummy_term = self.mu_c.sum() * 0.0 + self.log_var_c.sum() * 0.0 + self.log_p_c.sum() * 0.0
-            # Add to first output only to avoid duplicate gradient paths
-            x_recon = x_recon + dummy_term
-
-        return x_recon, mu_q, log_var_q, z
-
+        return x_recon, mu, log_var
 
 def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
