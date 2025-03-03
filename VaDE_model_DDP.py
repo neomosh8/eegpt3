@@ -279,7 +279,9 @@ class VaDE(nn.Module):
         h = self.decoder_fc(z)
         h = self.unflatten(h)
         x_recon = self.decoder_conv(h)
-        # Optionally, add a final activation (e.g., nn.Tanh()) if you rescale your data.
+        # Add bounded activation since data is normalized with mean 0, std ~0.96
+        # Tanh outputs values in [-1, 1] which matches your normalized data range well
+        x_recon = torch.tanh(x_recon)
         return x_recon
 
     def forward(self, x):
@@ -290,32 +292,46 @@ class VaDE(nn.Module):
 
 
 def vae_loss(x, x_recon, mu_q, log_var_q, beta=1.0):
+    # Clip reconstruction to prevent extreme values
+    x_recon = torch.clamp(x_recon, min=-10.0, max=10.0)
+
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
     recon_loss = 0.5 * mse_loss + 0.5 * l1_loss
 
-    # Add epsilon for numerical stability
-    eps = 1e-6
+    # More robust KL divergence calculation
+    eps = 1e-8
+    log_var_q = torch.clamp(log_var_q, min=-20.0, max=20.0)  # Prevent extreme values
+    mu_q = torch.clamp(mu_q, min=-20.0, max=20.0)  # Prevent extreme values
+
     var_q = torch.exp(log_var_q) + eps
     kl_div = -0.5 * torch.mean(1 + log_var_q - mu_q.pow(2) - var_q)
+    kl_div = torch.clamp(kl_div, max=100.0)  # Prevent extreme values
 
     return recon_loss + beta * kl_div
 
 
 def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
+    # Clip reconstructions
+    x_recon = torch.clamp(x_recon, min=-10.0, max=10.0)
+
     # For DDP, access parameters through model.module
     if isinstance(model, DDP):
         d = model.module.latent_dim
         var_c = torch.exp(model.module.log_var_c) + 1e-6  # Add epsilon for stability
-        log_var_c = model.module.log_var_c
+        log_var_c = torch.clamp(model.module.log_var_c, min=-20.0, max=20.0)
         mu_c = model.module.mu_c
         log_p_c = F.log_softmax(model.module.log_p_c, dim=0)
     else:
         d = model.latent_dim
         var_c = torch.exp(model.log_var_c) + 1e-6  # Add epsilon for stability
-        log_var_c = model.log_var_c
+        log_var_c = torch.clamp(model.log_var_c, min=-20.0, max=20.0)
         mu_c = model.mu_c
         log_p_c = F.log_softmax(model.log_p_c, dim=0)
+
+    # Clamp inputs for stability
+    mu_q = torch.clamp(mu_q, min=-20.0, max=20.0)
+    log_var_q = torch.clamp(log_var_q, min=-20.0, max=20.0)
 
     mse_loss = F.mse_loss(x_recon, x, reduction='mean')
     l1_loss = F.l1_loss(x_recon, x, reduction='mean')
@@ -369,7 +385,6 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
         return recon_loss  # Fallback to just reconstruction loss
 
     return loss
-
 def initialize_gmm_params(model, train_loader, device, rank):
     """Initialize GMM parameters using K-means on latent means after pretraining."""
     # Only collect latent representations on current device
@@ -506,6 +521,126 @@ def save_checkpoint(model, optimizer, epoch, filename, rank=0):
         }, filename)
 
 
+def train_vae(model, train_loader, optimizer, scaler, device, epoch, args):
+    model.train()
+    total_train_loss = 0
+    total_train_samples = 0
+
+    # Use more gradual KL annealing - start with small beta and increase slowly
+    beta = min(0.1, epoch / (args.pretrain_epochs * 0.75) * 0.1)
+
+    for batch_idx, batch in enumerate(train_loader):
+        x = batch.to(device)
+        batch_size = x.size(0)
+
+        optimizer.zero_grad()
+
+        try:
+            with autocast():
+                x_recon, mu_q, log_var_q, z = model(x)
+
+                # Check for NaNs early
+                if torch.isnan(x_recon).any():
+                    print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
+                    continue
+
+                loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Loss is NaN/Inf on batch {batch_idx}, skipping")
+                print(f"Debug values: x: [{x.min().item()}, {x.max().item()}], "
+                      f"x_recon: [{x_recon.min().item()}, {x_recon.max().item()}], "
+                      f"mu_q: [{mu_q.min().item()}, {mu_q.max().item()}], "
+                      f"log_var_q: [{log_var_q.min().item()}, {log_var_q.max().item()}]")
+                continue
+
+            scaler.scale(loss).backward()
+
+            # More aggressive gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+
+            # Check for NaN gradients
+            has_nan_grad = False
+            for param in model.parameters():
+                if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                    has_nan_grad = True
+                    break
+
+            if has_nan_grad:
+                print(f"NaN/Inf gradient detected on batch {batch_idx}, skipping update")
+                continue
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_train_loss += loss.item() * batch_size
+            total_train_samples += batch_size
+
+        except Exception as e:
+            print(f"Exception in training: {e}")
+            continue
+
+    return total_train_loss, total_train_samples
+
+def train_vade(model, train_loader, optimizer, scaler, device, epoch, args):
+    model.train()
+    total_train_loss = 0
+    total_train_samples = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        x = batch.to(device)
+        batch_size = x.size(0)
+
+        optimizer.zero_grad()
+
+        try:
+            with autocast():
+                x_recon, mu_q, log_var_q, z = model(x)
+
+                # Check for NaNs early
+                if torch.isnan(x_recon).any():
+                    print(f"NaN detected in x_recon on batch {batch_idx}, skipping")
+                    continue
+
+                loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Loss is NaN/Inf on batch {batch_idx}, skipping")
+                print(f"Debug values: x: [{x.min().item()}, {x.max().item()}], "
+                      f"x_recon: [{x_recon.min().item()}, {x_recon.max().item()}], "
+                      f"mu_q: [{mu_q.min().item()}, {mu_q.max().item()}], "
+                      f"log_var_q: [{log_var_q.min().item()}, {log_var_q.max().item()}]")
+                continue
+
+            scaler.scale(loss).backward()
+
+            # More aggressive gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+
+            # Check for NaN gradients
+            has_nan_grad = False
+            for param in model.parameters():
+                if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                    has_nan_grad = True
+                    break
+
+            if has_nan_grad:
+                print(f"NaN/Inf gradient detected on batch {batch_idx}, skipping update")
+                continue
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_train_loss += loss.item() * batch_size
+            total_train_samples += batch_size
+
+        except Exception as e:
+            print(f"Exception in training: {e}")
+            continue
+
+    return total_train_loss, total_train_samples
+
+
 def main():
     # Get rank and world size from environment (set by torchrun)
     rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -520,7 +655,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)  # Reduced learning rate
     parser.add_argument("--pretrain_epochs", type=int, default=20)
     parser.add_argument("--cluster_epochs", type=int, default=120)
     parser.add_argument("--warmup_epochs", type=int, default=10)
@@ -581,16 +716,29 @@ def main():
         if rank == 0:
             print(f"Input shape: {input_shape}")
 
+        # Use stable gradient scaler
         scaler = GradScaler()
 
         # Create model
         model = VaDE(input_shape=input_shape, latent_dim=args.latent_dim, n_clusters=args.n_clusters).to(rank)
         model.apply(weights_init)
 
-        # Wrap model in DDP with find_unused_parameters=True
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-        model._set_static_graph()
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,weight_decay=1e-5)
+        # Initialize GMM means with smaller values for stability
+        with torch.no_grad():
+            model.mu_c.data = torch.randn_like(model.mu_c.data) * 0.1
+
+        # Wrap model in DDP with find_unused_parameters=False for better performance
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+        if hasattr(model, "_set_static_graph"):
+            model._set_static_graph()  # Optional optimization
+
+        # Use Adam optimizer with smaller learning rate and increased epsilon
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5, eps=1e-8)
+
+        # Add LR scheduler for adaptive learning rate
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5, verbose=(rank == 0)
+        )
 
         # Begin VAE pretraining
         if rank == 0:
@@ -598,52 +746,21 @@ def main():
 
         pretrain_train_losses = []
         pretrain_val_losses = []
-        # scheduler = OneCycleLR(
-        #     optimizer,
-        #     max_lr=args.lr / 1000,
-        #     total_steps=args.pretrain_epochs * len(train_loader),
-        #     pct_start=0.1,
-        #     anneal_strategy='cos'
-        # )
+
         for epoch in range(args.pretrain_epochs):
             # Set epoch for sampler
             train_sampler.set_epoch(epoch)
 
-            model.train()
-            beta = 0.0 if epoch < args.warmup_epochs else (epoch - args.warmup_epochs + 1) / (
-                        args.pretrain_epochs - args.warmup_epochs)
-
-            total_train_loss = 0
-            total_train_samples = 0
-            for batch in train_loader:
-                x = batch.to(rank)
-                batch_size = x.size(0)
-                # Use mixed precision for forward pass
-                with autocast():
-                    x_recon, mu_q, log_var_q, z = model(x)
-                    loss = vae_loss(x, x_recon, mu_q, log_var_q, beta=beta)
-
-                    if torch.isnan(loss):
-                        print("Loss is NaN! Debugging values:")
-                        print("x:", x.min().item(), x.max().item())
-                        print("x_recon:", x_recon.min().item(), x_recon.max().item())
-                        print("mu_q:", mu_q.min().item(), mu_q.max().item())
-                        print("log_var_q:", log_var_q.min().item(), log_var_q.max().item())
-                        # Possibly break or skip the update
-                        continue
-
-                optimizer.zero_grad()
-                scaler.scale(loss).backward()
-
-                # Clip before stepping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                scaler.step(optimizer)
-                scaler.update()
-                # scheduler.step()
-
-                total_train_loss += loss.item() * batch_size
-                total_train_samples += batch_size
+            # Use the train_vae function
+            total_train_loss, total_train_samples = train_vae(
+                model=model,
+                train_loader=train_loader,
+                optimizer=optimizer,
+                scaler=scaler,
+                device=rank,
+                epoch=epoch,
+                args=args
+            )
 
             # Aggregate losses across all processes
             train_loss_tensor = torch.tensor([total_train_loss], device=rank)
@@ -654,17 +771,25 @@ def main():
 
             train_loss = train_loss_tensor.item() / train_samples_tensor.item() if train_samples_tensor.item() > 0 else 0
 
+            # Use annealing for KL divergence weight
+            beta = 0.0 if epoch < args.warmup_epochs else min(0.1, (epoch - args.warmup_epochs + 1) /
+                                                              (args.pretrain_epochs - args.warmup_epochs) * 0.1)
+
             # Evaluate on validation set
             val_loss = evaluate_vae(model, val_loader, rank, beta)
+
+            # Update learning rate based on validation loss
+            if rank == 0:
+                scheduler.step(val_loss)
 
             if rank == 0:
                 pretrain_train_losses.append(train_loss)
                 pretrain_val_losses.append(val_loss)
                 print(f"Pretraining Epoch {epoch + 1}/{args.pretrain_epochs}, "
-                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Beta: {beta:.4f}")
 
                 # Save checkpoint periodically
-                if (epoch + 1) % 50 == 0 or epoch + 1 == args.pretrain_epochs:
+                if (epoch + 1) % 10 == 0 or epoch + 1 == args.pretrain_epochs:
                     save_checkpoint(model, optimizer, epoch, f'QA/VaDE/pretrain_checkpoint_epoch_{epoch + 1}.pt', rank)
 
         # Plot pretraining losses (only on rank 0)
@@ -697,43 +822,26 @@ def main():
 
         cluster_train_losses = []
         cluster_val_losses = []
-        # scheduler = OneCycleLR(
-        #     optimizer,
-        #     max_lr=args.lr / 1000,
-        #     total_steps=args.pretrain_epochs * len(train_loader),
-        #     pct_start=0.1,
-        #     anneal_strategy='cos'
-        # )
+
+        # Reset scheduler for clustering phase
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5, verbose=(rank == 0)
+        )
 
         for epoch in range(args.cluster_epochs):
             # Set epoch for sampler
             train_sampler.set_epoch(epoch + args.pretrain_epochs)
 
-            model.train()
-            total_train_loss = 0
-            total_train_samples = 0
-            for batch in train_loader:
-                x = batch.to(rank)
-                batch_size = x.size(0)
-
-                # Use mixed precision for forward pass
-                with autocast():
-                    x_recon, mu_q, log_var_q, z = model(x)
-                    loss = vade_loss(x, x_recon, mu_q, log_var_q, model)
-
-                optimizer.zero_grad()
-                # Scale gradients
-                scaler.scale(loss).backward()
-
-                # Clip before stepping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                scaler.step(optimizer)
-                scaler.update()
-                # scheduler.step()
-
-                total_train_loss += loss.item() * batch_size
-                total_train_samples += batch_size
+            # Use the train_vade function
+            total_train_loss, total_train_samples = train_vade(
+                model=model,
+                train_loader=train_loader,
+                optimizer=optimizer,
+                scaler=scaler,
+                device=rank,
+                epoch=epoch,
+                args=args
+            )
 
             # Aggregate losses across all processes
             train_loss_tensor = torch.tensor([total_train_loss], device=rank)
@@ -747,14 +855,19 @@ def main():
             # Evaluate on validation set
             val_loss = evaluate_vade(model, val_loader, rank)
 
+            # Update learning rate based on validation loss
+            if rank == 0:
+                scheduler.step(val_loss)
+
             if rank == 0:
                 cluster_train_losses.append(train_loss)
                 cluster_val_losses.append(val_loss)
+                current_lr = optimizer.param_groups[0]['lr']
                 print(f"Clustering Epoch {epoch + 1}/{args.cluster_epochs}, "
-                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+                      f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.6f}")
 
                 # Save checkpoint periodically
-                if (epoch + 1) % 20 == 0 or epoch + 1 == args.cluster_epochs:
+                if (epoch + 1) % 10 == 0 or epoch + 1 == args.cluster_epochs:
                     save_checkpoint(model, optimizer, epoch, f'QA/VaDE/cluster_checkpoint_epoch_{epoch + 1}.pt', rank)
 
         # Save final model (only on rank 0)
@@ -800,7 +913,6 @@ def main():
     finally:
         # Clean up
         cleanup()
-
 
 if __name__ == "__main__":
     main()
