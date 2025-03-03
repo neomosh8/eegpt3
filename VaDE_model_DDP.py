@@ -244,6 +244,7 @@ class VaDE(nn.Module):
     def forward(self, x):
         """Forward pass: encode, sample, decode."""
         mu_q, log_var_q = self.encode(x)
+        log_var_q = torch.clamp(log_var_q, min=-10, max=10)
         z = self.reparameterize(mu_q, log_var_q)
         x_recon = self.decode(z)
 
@@ -301,6 +302,7 @@ def vade_loss(x, x_recon, mu_q, log_var_q, model, beta=0.01):
     )
 
     # More stable softmax computation
+    log_likelihood = torch.clamp(log_likelihood, min=-100, max=100)
     log_q_c_x = F.log_softmax(log_p_c + log_likelihood, dim=1)
     q_c_x = torch.exp(log_q_c_x)
 
