@@ -702,7 +702,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--latent_dim", type=int, default=1024)
     parser.add_argument("--n_clusters", type=int, default=100)
-    parser.add_argument("--epochs_cae", type=int, default=200)
+    parser.add_argument("--epochs_cae", type=int, default=300)
     parser.add_argument("--epochs_dec", type=int, default=200)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -731,7 +731,7 @@ if __name__ == "__main__":
 
     # 3) DEC Setup
     idec_model = IDEC(encoder=cae_model.encoder, decoder=cae_model.decoder,
-                      n_clusters=10, alpha=1.0, target_beta=0.1)    # Initialize cluster centers
+                      n_clusters=args.n_clusters, alpha=1.0, target_beta=0.1)    # Initialize cluster centers
     print("[MAIN] Initializing DEC cluster centers...")
     idec_model.initialize_centers(train_loader, device=args.device)
 
