@@ -1154,8 +1154,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--latent_dim", type=int, default=2048)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--latent_dim", type=int, default=512)
     parser.add_argument("--n_clusters", type=int, default=500)
     parser.add_argument("--epochs_cae", type=int, default=200)
     parser.add_argument("--epochs_dec", type=int, default=30)
@@ -1176,24 +1176,24 @@ if __name__ == "__main__":
     # # 2) CAE Pretraining
     sample_data = dataset[0]
     input_shape = sample_data.shape #(C, H, W)
-    # cae_model = CAE(input_shape, args.latent_dim)
-    # cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
-    #                          epochs=args.epochs_cae, lr=3e-4, device=args.device)
-    #
-    # # ---- QA: Check reconstructions from validation set ----
-    # plot_ae_reconstructions(cae_model, val_loader, device=args.device,
-    #                         n=8, out_path='QA/DEC/ae_recons.png')
-    # # After CAE training is done
-    # torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
-
-    # Create CAE instance and load pretrained weights
     cae_model = CAE(input_shape, args.latent_dim)
-    cae_model.load_state_dict(torch.load("QA/DEC/cae_model.pt"))
-    cae_model.to(args.device)
+    cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
+                             epochs=args.epochs_cae, lr=3e-4, device=args.device)
 
-    # Extract encoder and decoder
-    encoder = cae_model.encoder
-    decoder = cae_model.decoder
+    # ---- QA: Check reconstructions from validation set ----
+    plot_ae_reconstructions(cae_model, val_loader, device=args.device,
+                            n=8, out_path='QA/DEC/ae_recons.png')
+    # After CAE training is done
+    torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
+
+    # # Create CAE instance and load pretrained weights
+    # cae_model = CAE(input_shape, args.latent_dim)
+    # cae_model.load_state_dict(torch.load("QA/DEC/cae_model.pt"))
+    # cae_model.to(args.device)
+    #
+    # # Extract encoder and decoder
+    # encoder = cae_model.encoder
+    # decoder = cae_model.decoder
 
     # 3) DEC Setup
     idec_model = IDEC(encoder=cae_model.encoder, decoder=cae_model.decoder,
