@@ -964,9 +964,9 @@ if __name__ == "__main__":
     initial_lambdas = {
         'lambda_kl': 1.5,
         'lambda_recon': 0.05,
-        'lambda_bal': 0.3,
-        'lambda_entropy': 0.1,
-        'lambda_sep': 0.01
+        'lambda_bal': 0.1,
+        'lambda_entropy': 0.001,
+        'lambda_sep': 0.001
     }
 
     idec_model = train_idec_uniform_clusters(
