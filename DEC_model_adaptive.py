@@ -1029,9 +1029,9 @@ def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, de
 
     # 2) Setup your optimizer, etc.
     optimizer = torch.optim.Adam([
-        {'params': model.encoder.parameters(), 'lr': 1e-4},
-        {'params': model.decoder.parameters(), 'lr': 1e-4},
-        {'params': [model.cluster_centers], 'lr': 1e-3}
+        {'params': model.encoder.parameters(), 'lr': 4e-5},
+        {'params': model.decoder.parameters(), 'lr': 3e-5},
+        {'params': [model.cluster_centers], 'lr': 1e-4}
     ])
     loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
     train_data_size = len(train_loader.dataset)
@@ -1158,7 +1158,7 @@ if __name__ == "__main__":
     parser.add_argument("--latent_dim", type=int, default=2048)
     parser.add_argument("--n_clusters", type=int, default=100)
     parser.add_argument("--epochs_cae", type=int, default=200)
-    parser.add_argument("--epochs_dec", type=int, default=100)
+    parser.add_argument("--epochs_dec", type=int, default=30)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
