@@ -268,8 +268,13 @@ if __name__ == "__main__":
     cae_model = VQCAE().to(args.device)
     optimizer = torch.optim.Adam(cae_model.parameters(), lr=1e-3)
     for epoch in range(args.epochs_cae):
-        print(f"Epoch {epoch + 1}/{args.epochs_cae}")
-        for batch in tqdm(train_loader, desc="Training batches"):
+        cae_model.train()  # Make sure the model is in training mode
+        running_loss = 0.0
+        num_samples = 0
+
+        # Training loop with tqdm
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs_cae}", leave=False)
+        for batch in pbar:
             batch = batch.to(args.device)
             optimizer.zero_grad()
             recon, z_e, z_q = cae_model(batch)
@@ -279,6 +284,32 @@ if __name__ == "__main__":
             total_loss = reconstruction_loss + vq_loss + 0.25 * commitment_loss
             total_loss.backward()
             optimizer.step()
+
+            running_loss += total_loss.item() * batch.size(0)
+            num_samples += batch.size(0)
+            # Update the tqdm bar with the current loss
+            pbar.set_postfix(loss=total_loss.item())
+
+        avg_train_loss = running_loss / num_samples
+        print(f"Epoch {epoch + 1}/{args.epochs_cae} - Train Loss: {avg_train_loss:.4f}")
+
+        # Run validation and compute average validation loss
+        cae_model.eval()
+        val_loss = 0.0
+        val_samples = 0
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc="Validation", leave=False):
+                batch = batch.to(args.device)
+                recon, z_e, z_q = cae_model(batch)
+                reconstruction_loss = 0.5 * F.mse_loss(recon, batch) + 0.5 * F.l1_loss(recon, batch)
+                vq_loss = ((z_e.detach() - z_q) ** 2).mean()
+                commitment_loss = ((z_e - z_q.detach()) ** 2).mean()
+                total_loss = reconstruction_loss + vq_loss + 0.25 * commitment_loss
+                val_loss += total_loss.item() * batch.size(0)
+                val_samples += batch.size(0)
+
+        avg_val_loss = val_loss / val_samples
+        print(f"Epoch {epoch + 1}/{args.epochs_cae} - Val Loss: {avg_val_loss:.4f}")
     # ---- QA: Check reconstructions from validation set ----
     plot_ae_reconstructions(cae_model, val_loader, device=args.device,
                             n=8, out_path='QA/DEC/ae_recons.png')
