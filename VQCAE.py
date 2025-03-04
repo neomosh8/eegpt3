@@ -129,7 +129,7 @@ class CAE(nn.Module):
 
 
 class VQCAE(nn.Module):
-    def __init__(self, input_shape=(3, 136, 512), codebook_size=512, beta=0.25):
+    def __init__(self, input_shape=(3, 136, 512), codebook_size=128, beta=0.25):
         super().__init__()
         # Encoder
         self.conv_net = nn.Sequential(
