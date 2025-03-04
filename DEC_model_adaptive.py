@@ -902,6 +902,139 @@ def adapt_hyperparameters(lambdas, loss_history, epoch):
 
     return new_lambdas
 
+def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, device='cuda'):
+    # 1) Initialize your lambda dictionary and beta
+    from copy import deepcopy
+    scheduler = SimpleAdaptiveScheduler(
+        lambda_kl=1.5,
+        lambda_recon=0.05,
+        lambda_bal=0.3,
+        lambda_entropy=0.1,
+        lambda_sep=0.01,
+        max_beta=0.3
+    )
+    lambdas = deepcopy(scheduler.lambdas)  # or just refer to scheduler.lambdas
+    target_beta = 0.1
+
+    # 2) Setup your optimizer, etc.
+    optimizer = torch.optim.Adam([
+        {'params': model.encoder.parameters(), 'lr': 1e-4},
+        {'params': model.decoder.parameters(), 'lr': 1e-4},
+        {'params': [model.cluster_centers], 'lr': 1e-3}
+    ])
+    loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
+    train_data_size = len(train_loader.dataset)
+
+    for epoch in range(1, epochs + 1):
+        # 2a) Compute q over entire dataset
+        model.eval()
+        all_q = []
+        with torch.no_grad():
+            for batch in train_loader:
+                batch = batch.to(device)
+                _, z, q = model(batch)
+                all_q.append(q.cpu())
+        all_q = torch.cat(all_q, dim=0)
+
+        # 2b) Compute uniformity, cluster assignments, etc.
+        cluster_assignments = torch.argmax(all_q, dim=1).numpy()
+        cluster_counts = np.bincount(cluster_assignments, minlength=model.n_clusters)
+        freqs = cluster_counts / len(cluster_assignments)
+        uniformity = -np.sum(freqs * np.log(freqs + 1e-10))
+        uniformity_ratio = uniformity / np.log(model.n_clusters)  # normalized
+
+        # 2c) Compute refined target distribution p
+        p = model.target_distribution(all_q, beta=target_beta)
+
+        # 3) Train in mini-batches
+        model.train()
+        idx_offset = 0
+
+        epoch_losses = {
+            'kl': 0.0,
+            'recon': 0.0,
+            'balance': 0.0,
+            'entropy': 0.0,
+            'sep': 0.0,
+            'total_with_entropy': 0.0
+        }
+
+        for batch in train_loader:
+            b_size = batch.size(0)
+            batch = batch.to(device)
+            p_batch = p[idx_offset: idx_offset + b_size, :].to(device)
+            idx_offset += b_size
+
+            x_recon, z, q_batch = model(batch)
+            log_q = torch.log(q_batch + 1e-10)
+
+            kl_loss = loss_fn_kl(log_q, p_batch)
+            recon_loss = F.mse_loss(x_recon, batch)
+
+            # Balanced uniform
+            f = torch.mean(q_batch, dim=0)
+            uniform = torch.ones_like(f) / f.numel()
+            balance_loss = torch.sum(uniform * (torch.log(uniform + 1e-10) - torch.log(f + 1e-10)))
+
+            # Negative Entropy
+            entropy = -torch.sum(f * torch.log(f + 1e-10))
+
+            # Separation
+            sep_loss = center_separation_loss(model.cluster_centers)
+
+            # Weighted sum
+            total_loss = (lambdas['lambda_kl']  * kl_loss   +
+                          lambdas['lambda_recon'] * recon_loss +
+                          lambdas['lambda_bal']  * balance_loss -
+                          lambdas['lambda_entropy'] * entropy +
+                          lambdas['lambda_sep']  * sep_loss)
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            # Accumulate
+            epoch_losses['kl'] += kl_loss.item() * b_size
+            epoch_losses['recon'] += recon_loss.item() * b_size
+            epoch_losses['balance'] += balance_loss.item() * b_size
+            epoch_losses['entropy'] += entropy.item() * b_size
+            epoch_losses['sep'] += sep_loss.item() * b_size
+            epoch_losses['total_with_entropy'] += total_loss.item() * b_size
+
+        # Average over dataset
+        for k in epoch_losses:
+            epoch_losses[k] /= train_data_size
+
+        # 4) Print or log
+        print(f"Epoch {epoch}/{epochs}, KL: {epoch_losses['kl']:.4f}, Recon: {epoch_losses['recon']:.4f}, "
+              f"Bal: {epoch_losses['balance']:.4f}, Ent: {epoch_losses['entropy']:.4f}, "
+              f"Sep: {epoch_losses['sep']:.4f}, Uniformity: {uniformity_ratio:.4f}, "
+              f"Beta: {target_beta:.2f}")
+
+        # 5) After epoch, pass metrics to your adaptive scheduler
+        updated_lambdas, updated_beta = scheduler.update(
+            epoch=epoch,
+            losses={
+                'kl': epoch_losses['kl'],
+                'recon': epoch_losses['recon'],
+                'balance': epoch_losses['balance'],
+                'entropy': epoch_losses['entropy'],
+                'sep': epoch_losses['sep']
+            },
+            uniformity_ratio=uniformity_ratio,
+            target_beta=target_beta
+        )
+
+        # Update local lambdas + beta
+        lambdas = updated_lambdas
+        target_beta = updated_beta
+
+        # Optionally do validation checks here
+
+    # End of training
+    return model
+
+
 # =========================
 #  6) Example Main Script
 # =========================
@@ -961,22 +1094,28 @@ if __name__ == "__main__":
     print("[MAIN] Starting DEC training/fine-tuning...")
 
     # Initial lambda values
-    initial_lambdas = {
-        'lambda_kl': 1.5,
-        'lambda_recon': 0.05,
-        'lambda_bal': 0.1,
-        'lambda_entropy': 0.001,
-        'lambda_sep': 0.001
-    }
+    # initial_lambdas = {
+    #     'lambda_kl': 1.5,
+    #     'lambda_recon': 0.05,
+    #     'lambda_bal': 0.1,
+    #     'lambda_entropy': 0.001,
+    #     'lambda_sep': 0.001
+    # }
 
-    idec_model = train_idec_uniform_clusters(
-        idec_model,
-        train_loader,
-        val_loader=val_loader,
-        epochs=args.epochs_dec,
-        device=args.device,
-        initial_lambdas=initial_lambdas,
-    )
+    # idec_model = train_idec_uniform_clusters(
+    #     idec_model,
+    #     train_loader,
+    #     val_loader=val_loader,
+    #     epochs=args.epochs_dec,
+    #     device=args.device,
+    #     initial_lambdas=initial_lambdas,
+    # )
+
+    idec_model = train_idec_with_simpler_adapt(idec_model,
+                                               train_loader,
+                                               val_loader,
+                                               epochs=args.epochs_dec,
+                                               device=args.device)
     # 5) Evaluate final cluster distribution on validation
     idec_model.eval()
     all_val_labels = []
