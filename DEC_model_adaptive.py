@@ -1019,7 +1019,7 @@ def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, de
     scheduler = SimpleAdaptiveScheduler(
         lambda_kl=1.5,
         lambda_recon=0.05,
-        lambda_bal=0.03,
+        lambda_bal=0.001,
         lambda_entropy=0.001,
         lambda_sep=0.01,
         max_beta=0.1
@@ -1031,7 +1031,7 @@ def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, de
     optimizer = torch.optim.Adam([
         {'params': model.encoder.parameters(), 'lr': 4e-5},
         {'params': model.decoder.parameters(), 'lr': 3e-5},
-        {'params': [model.cluster_centers], 'lr': 1e-4}
+        {'params': [model.cluster_centers], 'lr': 1e-6}
     ])
     loss_fn_kl = nn.KLDivLoss(reduction='batchmean')
     train_data_size = len(train_loader.dataset)
@@ -1156,7 +1156,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--latent_dim", type=int, default=2048)
-    parser.add_argument("--n_clusters", type=int, default=100)
+    parser.add_argument("--n_clusters", type=int, default=500)
     parser.add_argument("--epochs_cae", type=int, default=200)
     parser.add_argument("--epochs_dec", type=int, default=30)
     parser.add_argument("--device", type=str, default="cuda")
