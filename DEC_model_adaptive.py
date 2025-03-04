@@ -901,6 +901,117 @@ def adapt_hyperparameters(lambdas, loss_history, epoch):
             new_lambdas['lambda_sep'] = min(0.05, lambdas['lambda_sep'] * 1.2)
 
     return new_lambdas
+class SimpleAdaptiveScheduler:
+    """
+    A helper class for *lightly* adapting IDEC hyperparameters and target_beta
+    based on training metrics each epoch.
+
+    You can customize the 'update' logic to match your needs.
+    """
+    def __init__(self,
+                 lambda_kl=1.5,
+                 lambda_recon=0.05,
+                 lambda_bal=0.3,
+                 lambda_entropy=0.1,
+                 lambda_sep=0.01,
+                 min_kl=0.5,
+                 max_kl=2.0,
+                 max_beta=0.3):
+        """
+        :param lambda_kl: initial KL-divergence weight
+        :param lambda_recon: initial reconstruction weight
+        :param lambda_bal: initial balance weight
+        :param lambda_entropy: initial negative entropy weight
+        :param lambda_sep: initial separation weight
+        :param min_kl, max_kl: clamp range for lambda_kl
+        :param max_beta: clamp for target_beta (to prevent it from going too high)
+        """
+        self.lambdas = {
+            'lambda_kl': lambda_kl,
+            'lambda_recon': lambda_recon,
+            'lambda_bal': lambda_bal,
+            'lambda_entropy': lambda_entropy,
+            'lambda_sep': lambda_sep
+        }
+        self.min_kl = min_kl
+        self.max_kl = max_kl
+        self.max_beta = max_beta
+
+    def update(self, epoch, losses, uniformity_ratio, target_beta):
+        """
+        :param epoch: current epoch number
+        :param losses: dict of average losses for the epoch, e.g. {
+            'kl': 0.01,
+            'recon': 0.15,
+            'balance': 0.02,
+            'entropy': 4.2,
+            'sep': 0.003
+        }
+        :param uniformity_ratio: measure of cluster distribution uniformity in [0..1]
+        :param target_beta: current beta for mixing the DEC target with uniform
+        :return: (updated_lambdas, updated_target_beta)
+        """
+
+        kl_loss = losses['kl']
+        recon_loss = losses['recon']
+        bal_loss = losses['balance']
+        ent = losses['entropy']
+        sep = losses['sep']
+
+        # ----------------------------
+        # Example adaptation rules
+        # ----------------------------
+
+        # 1) If KL is extremely low, reduce KL weight (so it doesn't saturate to 0).
+        #    If KL is large, increase it (up to a limit).
+        if kl_loss < 0.05:
+            self.lambdas['lambda_kl'] *= 0.9
+        elif kl_loss > 0.5:
+            self.lambdas['lambda_kl'] *= 1.1
+
+        # Clamp KL
+        self.lambdas['lambda_kl'] = max(self.min_kl,
+                                        min(self.lambdas['lambda_kl'], self.max_kl))
+
+        # 2) If reconstruction loss is creeping up, try to give it slightly more weight
+        #    (so you don't lose reconstruction quality).
+        if recon_loss > 0.2:  # threshold depends on your data scale
+            self.lambdas['lambda_recon'] = min(0.2, self.lambdas['lambda_recon'] * 1.2)
+        elif recon_loss < 0.1 and self.lambdas['lambda_recon'] > 0.01:
+            # If recon is super good, you can lighten its weight
+            self.lambdas['lambda_recon'] *= 0.9
+            self.lambdas['lambda_recon'] = max(0.01, self.lambdas['lambda_recon'])
+
+        # 3) If uniformity is too low (e.g. < 0.6) => push for more balance
+        if uniformity_ratio < 0.6:
+            self.lambdas['lambda_bal'] = min(1.0, self.lambdas['lambda_bal'] * 1.2)
+            # optionally also raise negative entropy
+            self.lambdas['lambda_entropy'] = min(0.5, self.lambdas['lambda_entropy'] * 1.2)
+
+            # If it's still collapsing, you might also lower kl
+            # or do other changes
+        elif uniformity_ratio > 0.9:
+            # If distribution is *too* uniform, reduce balancing
+            self.lambdas['lambda_bal'] *= 0.8
+            self.lambdas['lambda_bal'] = max(0.01, self.lambdas['lambda_bal'])
+
+            # Possibly also reduce negative entropy
+            self.lambdas['lambda_entropy'] *= 0.8
+            self.lambdas['lambda_entropy'] = max(0.0, self.lambdas['lambda_entropy'])
+
+        # 4) Adjust target_beta based on uniformity
+        #    If distribution is too skewed, raise beta (makes p more uniform)
+        #    If distribution is already too uniform, lower beta
+        if uniformity_ratio < 0.5:
+            target_beta = min(self.max_beta, target_beta + 0.05)
+        elif uniformity_ratio > 0.85:
+            # Let it approach 0.0 if the network is already uniform enough
+            target_beta = max(0.0, target_beta - 0.05)
+
+        # 5) If separation is not improving, or if we want to push it more,
+        #    you can tweak lambda_sep here. (Example omitted for brevity.)
+
+        return self.lambdas, target_beta
 
 def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, device='cuda'):
     # 1) Initialize your lambda dictionary and beta
