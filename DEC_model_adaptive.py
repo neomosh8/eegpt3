@@ -929,18 +929,27 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    # 2) CAE Pretraining
+    # # 2) CAE Pretraining
     sample_data = dataset[0]
     input_shape = sample_data.shape #(C, H, W)
-    cae_model = CAE(input_shape, args.latent_dim)
-    cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
-                             epochs=args.epochs_cae, lr=3e-4, device=args.device)
+    # cae_model = CAE(input_shape, args.latent_dim)
+    # cae_model = pretrain_cae(cae_model, train_loader, val_loader=val_loader,
+    #                          epochs=args.epochs_cae, lr=3e-4, device=args.device)
+    #
+    # # ---- QA: Check reconstructions from validation set ----
+    # plot_ae_reconstructions(cae_model, val_loader, device=args.device,
+    #                         n=8, out_path='QA/DEC/ae_recons.png')
+    # # After CAE training is done
+    # torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
 
-    # ---- QA: Check reconstructions from validation set ----
-    plot_ae_reconstructions(cae_model, val_loader, device=args.device,
-                            n=8, out_path='QA/DEC/ae_recons.png')
-    # After CAE training is done
-    torch.save(cae_model.state_dict(), "QA/DEC/cae_model.pt")
+    # Create CAE instance and load pretrained weights
+    cae_model = CAE(input_shape, args.latent_dim)
+    cae_model.load_state_dict(torch.load("QA/DEC/cae_model.pt"))
+    cae_model.to(args.device)
+
+    # Extract encoder and decoder
+    encoder = cae_model.encoder
+    decoder = cae_model.decoder
 
     # 3) DEC Setup
     idec_model = IDEC(encoder=cae_model.encoder, decoder=cae_model.decoder,
@@ -950,11 +959,6 @@ if __name__ == "__main__":
 
     # 4) DEC Training (two-pass each epoch)
     print("[MAIN] Starting DEC training/fine-tuning...")
-    # dec_model = train_dec_full_pass(dec_model, train_loader, val_loader=val_loader,
-    #                                 epochs=args.epochs_dec, device=args.device)
-
-    # idec_model = train_idec_full_pass(idec_model, train_loader, val_loader=val_loader,
-    #                                 epochs=args.epochs_dec, device=args.device)
 
     # Initial lambda values
     initial_lambdas = {
