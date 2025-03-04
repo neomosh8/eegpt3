@@ -41,17 +41,15 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("ema_w", self.embedding.weight.clone())
 
     def forward(self, z):
-        with torch.no_grad():
-            flat_z = z.view(-1, self.embedding_dim)
-            dist = torch.cdist(flat_z, self.embedding.weight, p=2)
-            idxs = dist.argmin(dim=1)
-            encodings = F.one_hot(idxs, self.codebook_size).type(z.dtype)
-            idxs = idxs.view(*z.shape[:-1])
-        z_q = self.embedding(idxs)
-        z_q = z_q.view_as(z)
+        z = z.reshape(-1, self.embedding_dim)
+        dist = torch.cdist(z, self.embedding.weight, p=2)
+        idxs = dist.argmin(dim=1)
+        encodings = F.one_hot(idxs, self.codebook_size).type(z.dtype)
+        idxs = idxs.view(-1)  # or shape for later use
+        z_q = self.embedding(idxs).view(-1, self.embedding_dim)
         diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
         if self.training:
-            self._update_ema(flat_z, encodings)
+            self._update_ema(z, encodings)
         z_q = z + (z_q - z).detach()
         return z_q, idxs, diff
 
@@ -97,13 +95,16 @@ class VQCAE(nn.Module):
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
         self.decoder = Decoder(in_channels, hidden_channels)
         self.commitment_beta = commitment_beta
+
     def forward(self, x):
         z_e = self.encoder(x)
-        z_q, idxs, vq_loss = self.vq(z_e.permute(0,2,3,1))
-        z_q = z_q.permute(0,3,1,2)
+        z_e = z_e.permute(0, 2, 3, 1).contiguous()
+        z_q, idxs, vq_loss = self.vq(z_e)
+        z_q = z_q.permute(0, 3, 1, 2)
         x_rec = self.decoder(z_q)
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
+
 
 def plot_reconstructions(model, data_loader, device, save_path="recon.png", n=8):
     model.eval()
