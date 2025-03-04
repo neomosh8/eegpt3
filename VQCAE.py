@@ -246,7 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--latent_dim", type=int, default=256)
     parser.add_argument("--n_clusters", type=int, default=500)
-    parser.add_argument("--epochs_cae", type=int, default=10)
+    parser.add_argument("--epochs_cae", type=int, default=100)
     parser.add_argument("--epochs_dec", type=int, default=30)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
