@@ -1022,7 +1022,7 @@ def train_idec_with_simpler_adapt(model, train_loader, val_loader, epochs=50, de
         lambda_bal=0.03,
         lambda_entropy=0.001,
         lambda_sep=0.01,
-        max_beta=0.3
+        max_beta=0.1
     )
     lambdas = deepcopy(scheduler.lambdas)  # or just refer to scheduler.lambdas
     target_beta = 0.01
