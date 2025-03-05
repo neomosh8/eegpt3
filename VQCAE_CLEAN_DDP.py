@@ -80,62 +80,61 @@ class VectorQuantizerEMA(nn.Module):
         self.decay = decay
         self.eps = eps
 
-        # Initialize embedding on the default device (will move to GPU later)
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
         nn.init.uniform_(self.embedding.weight, -1.0 / codebook_size, 1.0 / codebook_size)
 
-        # Register buffers (these will be moved to the same device as model)
         self.register_buffer("cluster_size", torch.zeros(codebook_size))
-        self.register_buffer("ema_w", self.embedding.weight.clone())
+        self.register_buffer("ema_w", self.embedding.weight.data.clone())
 
     def forward(self, z):
-        # Ensure input is on the correct device
         device = z.device
 
-        flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
+        flat_z = z.reshape(-1, self.embedding_dim)
 
-        # Ensure all tensors are on the same device
-        dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
-        idxs = dist.argmin(dim=1)
+        # Calculate distances between inputs and embeddings
+        dist = torch.sum(flat_z.pow(2), dim=1, keepdim=True) + \
+               torch.sum(self.embedding.weight.pow(2), dim=1) - \
+               2 * torch.matmul(flat_z, self.embedding.weight.t())
 
-        # Create one_hot encodings on the same device as inputs
-        encodings = F.one_hot(idxs, self.codebook_size).to(flat_z.dtype).to(device)
+        # Get nearest embedding indices
+        encoding_indices = torch.argmin(dist, dim=1)
+
+        # Create one-hot encodings on the same device
+        encodings = torch.zeros(encoding_indices.shape[0], self.codebook_size, device=device)
+        encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
+
+        # Quantize
+        quantized = torch.matmul(encodings, self.embedding.weight)
+        quantized = quantized.view_as(z)
 
         if self.training:
-            self._update_ema(flat_z, encodings)
+            # EMA update - critical part for device consistency
+            # Use inplace operations where possible to avoid device issues
 
-        z_q = self.embedding(idxs).reshape(z.shape)
+            # Update cluster size
+            cluster_size_new = encodings.sum(0)
+            self.cluster_size.data.mul_(self.decay).add_(cluster_size_new, alpha=1 - self.decay)
 
-        # Compute loss (everything stays on GPU)
-        diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
+            # Update EMA weights
+            flat_z_t = flat_z.t()
+            embed_sums = torch.matmul(flat_z_t, encodings)
+            self.ema_w.data.mul_(self.decay).add_(embed_sums.t(), alpha=1 - self.decay)
+
+            # Normalize embeddings
+            n = self.cluster_size.sum()
+            cluster_size = ((self.cluster_size + self.eps) / (n + self.codebook_size * self.eps) * n)
+            embed_normalized = self.ema_w / cluster_size.unsqueeze(1)
+            self.embedding.weight.data.copy_(embed_normalized)
 
         # Straight-through estimator
-        z_q = z + (z_q - z).detach()
+        quantized_st = z + (quantized - z).detach()
 
-        return z_q, idxs.reshape(z.shape[:-1]), diff
+        # Compute loss
+        e_latent_loss = torch.mean((quantized.detach() - z).pow(2))
+        q_latent_loss = torch.mean((quantized - z.detach()).pow(2))
+        vq_loss = e_latent_loss + q_latent_loss
 
-    def _update_ema(self, flat_z, encodings):
-        device = flat_z.device
-
-        # Ensure all operations happen on the same device
-        cluster_size = encodings.sum(dim=0).to(device)
-
-        # Update cluster size EMA
-        self.cluster_size.data.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
-
-        # Update embedding EMA
-        dw = torch.matmul(flat_z.t(), encodings).to(device)
-        self.ema_w.data.mul_(self.decay).add_(dw.t(), alpha=1 - self.decay)
-
-        # Normalize embeddings
-        n = self.cluster_size.sum()
-
-        # Handle empty clusters
-        cluster_size = ((self.cluster_size + self.eps) / (n + self.codebook_size * self.eps)) * n
-
-        # Update embedding weights - stay on same device
-        embed_normalized = self.ema_w / cluster_size.unsqueeze(1)
-        self.embedding.weight.data.copy_(embed_normalized)
+        return quantized_st, encoding_indices.view(z.shape[:-1]), vq_loss
 
 
 class Encoder(nn.Module):
