@@ -64,7 +64,7 @@ class EEGNpyDataset(Dataset):
         return torch.from_numpy(x).float()
 
 class VectorQuantizerEMA(nn.Module):
-    def __init__(self, codebook_size, embedding_dim, decay=0.3, eps=1e-5):
+    def __init__(self, codebook_size, embedding_dim, decay=0.9, eps=1e-5):
         super().__init__()
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
