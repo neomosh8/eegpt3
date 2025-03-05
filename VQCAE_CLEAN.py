@@ -64,7 +64,7 @@ class EEGNpyDataset(Dataset):
         return torch.from_numpy(x).float()
 
 class VectorQuantizerEMA(nn.Module):
-    def __init__(self, codebook_size, embedding_dim, decay=0.9, eps=1e-5):
+    def __init__(self, codebook_size, embedding_dim, decay=0.8, eps=1e-5):
         super().__init__()
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
@@ -122,7 +122,7 @@ class Decoder(nn.Module):
         return self.net(x)
 
 class VQCAE(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.25):
+    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.8, commitment_beta=0.25):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
