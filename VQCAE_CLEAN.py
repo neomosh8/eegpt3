@@ -199,7 +199,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
-    ds = EEGNpyDataset(args.data_dir, normalize=True)
+    ds = EEGNpyDataset(args.data_dir, normalize=False)
     train_size = int(0.8 * len(ds))
     val_size = len(ds) - train_size
     train_ds, val_ds = random_split(ds, [train_size, val_size])
