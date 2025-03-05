@@ -242,11 +242,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=500)
     # Base learning rate used during warmup
-    parser.add_argument("--lr", type=float, default=4e-6, help="Base learning rate")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
     # Maximum learning rate after warmup
-    parser.add_argument("--max_lr", type=float, default=4e-4, help="Peak learning rate")
+    parser.add_argument("--max_lr", type=float, default=4e-3, help="Peak learning rate")
     # Minimum (final) learning rate after decay
-    parser.add_argument("--min_lr", type=float, default=4e-6, help="Final learning rate")
+    parser.add_argument("--min_lr", type=float, default=1e-4, help="Final learning rate")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
