@@ -288,7 +288,7 @@ def main():
             _, loss = model(batch)
             loss.backward()
             optimizer.step()
-            # scheduler.step()  # Update LR every batch
+            scheduler.step()  # Update LR every batch
             total_loss += loss.item() * batch.size(0)
             count += batch.size(0)
             # Optionally, display current learning rate in the progress bar
