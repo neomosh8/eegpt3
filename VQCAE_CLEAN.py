@@ -246,7 +246,7 @@ def main():
     # Maximum learning rate after warmup
     parser.add_argument("--max_lr", type=float, default=4e-4, help="Peak learning rate")
     # Minimum (final) learning rate after decay
-    parser.add_argument("--min_lr", type=float, default=4e-2, help="Final learning rate")
+    parser.add_argument("--min_lr", type=float, default=4e-3, help="Final learning rate")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -260,7 +260,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=128).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=512).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Compute total steps and warmup steps (using 10% of total steps for warmup)
