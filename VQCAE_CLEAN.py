@@ -240,7 +240,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--epochs", type=int, default=2000)
     # Base learning rate used during warmup
     parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
     # Maximum learning rate after warmup
