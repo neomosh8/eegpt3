@@ -205,7 +205,7 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default="cuda")
