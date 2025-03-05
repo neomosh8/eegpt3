@@ -223,21 +223,27 @@ def cleanup_ddp():
 # Visualization functions modified for DDP
 # -------------------------
 def plot_reconstructions(model, data_loader, device, save_path="output/reconstructions.png", n=8, rank=0):
-    if rank != 0:  # Only generate plots on rank 0
+    # Early return for non-rank 0 processes
+    if rank != 0:
         return
 
     model.eval()
-    batch = next(iter(data_loader)).to(device)
+    # Get a single batch
+    for batch in data_loader:
+        batch = batch.to(device)
+        break
+
     with torch.no_grad():
-        # Handle DDP model by using model.module if needed
         if isinstance(model, DDP):
             recons, _ = model.module(batch)
         else:
             recons, _ = model(batch)
 
+    # Move to CPU for visualization
     batch = batch.cpu().numpy()
     recons = recons.cpu().numpy()
     n = min(n, batch.shape[0])
+
     fig, axs = plt.subplots(2, n, figsize=(2 * n, 4))
     for i in range(n):
         orig = batch[i]
@@ -264,25 +270,41 @@ def plot_latent_code_distribution(model, data_loader, device, save_path="output/
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            # Handle DDP model
             if isinstance(model, DDP):
                 idxs = model.module.encode_indices(batch)
             else:
                 idxs = model.encode_indices(batch)
+            # Move to CPU immediately
             all_idxs.append(idxs.view(-1).cpu())
 
-    all_idxs = torch.cat(all_idxs, dim=0)
+    # Concatenate local indices on CPU
+    all_idxs = torch.cat(all_idxs, dim=0) if all_idxs else torch.tensor([], dtype=torch.long)
 
-    # Gather indices from all processes
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        gathered_idxs = [torch.zeros_like(all_idxs) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_idxs, all_idxs)
-        all_idxs = torch.cat(gathered_idxs, dim=0)
-
+    # Get codebook size
     codebook_size = model.module.vq.codebook_size if isinstance(model, DDP) else model.vq.codebook_size
+
+    # Count on CPU
     counts = torch.bincount(all_idxs, minlength=codebook_size).float()
 
-    # Only plot on rank 0
+    # Barrier for synchronization
+    if dist.is_initialized():
+        dist.barrier()
+
+    # For multi-GPU setup
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        counts_device = counts.to(device)
+
+        if rank == 0:
+            # Only rank 0 receives data
+            gathered_counts = [torch.zeros_like(counts_device) for _ in range(dist.get_world_size())]
+            dist.gather(counts_device, gathered_counts, dst=0)
+            counts = torch.sum(torch.stack(gathered_counts), dim=0).cpu()
+        else:
+            # Other ranks just send their data
+            dist.gather(counts_device, [], dst=0)
+            return None  # Early return for non-rank 0
+
+    # Only rank 0 plots
     if rank == 0:
         plt.figure(figsize=(10, 4))
         plt.bar(np.arange(len(counts)), counts.numpy())
@@ -294,17 +316,17 @@ def plot_latent_code_distribution(model, data_loader, device, save_path="output/
         plt.close()
         print(f"Latent code distribution plot saved to {save_path}")
 
-    return counts
+    return counts if rank == 0 else None
 
 
 def evaluate_quality_metrics(model, data_loader, device, rank=0):
     model.eval()
     total_mse = 0.0
     total_samples = 0
+
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            # Handle DDP model
             if isinstance(model, DDP):
                 x_rec, _ = model.module(batch)
             else:
@@ -313,17 +335,24 @@ def evaluate_quality_metrics(model, data_loader, device, rank=0):
             total_mse += mse
             total_samples += batch.size(0)
 
-    # Aggregate metrics across processes - use torch tensor on the correct device
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        metrics = torch.tensor([total_mse, total_samples], dtype=torch.float64, device=device)
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        total_mse, total_samples = metrics[0].item(), metrics[1].item()
+    # Create tensor for reduction
+    metrics = torch.tensor([total_mse, total_samples], dtype=torch.float64, device=device)
 
-    avg_mse = total_mse / total_samples
+    # Synchronize
+    if dist.is_initialized():
+        dist.barrier()
+
+    # Aggregate metrics
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+
+    total_mse, total_samples = metrics[0].item(), metrics[1].item()
+    avg_mse = total_mse / (total_samples + 1e-10)
+
     if rank == 0:
         print(f"Average Reconstruction MSE: {avg_mse:.4f}")
-    return avg_mse
 
+    return avg_mse
 
 def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebook_usage.png", rank=0):
     model.eval()
@@ -336,25 +365,46 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
                 idxs = model.module.encode_indices(batch)
             else:
                 idxs = model.encode_indices(batch)
+            # Move to CPU immediately to avoid GPU memory issues
             all_idxs.append(idxs.view(-1).cpu())
 
-    all_idxs = torch.cat(all_idxs, dim=0)
+    # Concatenate local indices on CPU
+    all_idxs = torch.cat(all_idxs, dim=0) if all_idxs else torch.tensor([], dtype=torch.long)
 
-    # Gather indices from all processes
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        gathered_idxs = [torch.zeros_like(all_idxs) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_idxs, all_idxs)
-        all_idxs = torch.cat(gathered_idxs, dim=0)
-
+    # Get codebook size
     codebook_size = model.module.vq.codebook_size if isinstance(model, DDP) else model.vq.codebook_size
-    counts = torch.bincount(all_idxs, minlength=codebook_size).float()
-    total = counts.sum().item()
-    probs = counts / total
-    entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
-    perplexity = np.exp(entropy)
 
-    # Only plot on rank 0
+    # Count on CPU
+    counts = torch.bincount(all_idxs, minlength=codebook_size).float()
+
+    # Make sure all processes have reached this point
+    if dist.is_initialized():
+        dist.barrier()
+
+    # For multi-GPU setup, rank 0 gathers all counts
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        # Create tensor for gathering on correct device
+        counts_device = counts.to(device)
+
+        if rank == 0:
+            # Only rank 0 receives the gathered counts
+            gathered_counts = [torch.zeros_like(counts_device) for _ in range(dist.get_world_size())]
+            dist.gather(counts_device, gathered_counts, dst=0)
+            # Sum all gathered counts on rank 0
+            counts = torch.sum(torch.stack(gathered_counts), dim=0).cpu()
+        else:
+            # Other ranks just send their data
+            dist.gather(counts_device, [], dst=0)
+            # Non-rank-0 processes can return early
+            return None, None
+
+    # Only rank 0 calculates metrics and creates plot
     if rank == 0:
+        total = counts.sum().item()
+        probs = counts / (total + 1e-10)  # Avoid division by zero
+        entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
+        perplexity = np.exp(entropy)
+
         plt.figure(figsize=(8, 4))
         plt.bar(np.arange(codebook_size), counts.numpy())
         plt.xlabel("Codebook Index")
@@ -366,8 +416,9 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
         print(f"Codebook usage histogram saved to {save_path}")
         print(f"Codebook usage perplexity: {perplexity:.2f}")
 
-    return perplexity, counts
+        return perplexity, counts
 
+    return None, None
 
 # -------------------------
 # Main Training Loop with DDP and torch.compile
