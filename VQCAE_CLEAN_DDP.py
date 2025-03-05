@@ -642,6 +642,9 @@ def main():
         plt.close()
         print("Loss plot saved to", f"{args.output_dir}/loss.png")
 
+        # Print training time
+        print(f"Total training time: {training_time / 3600:.2f} hours")
+
         # Save final model
         final_checkpoint = {
             "epoch": args.epochs,
@@ -653,22 +656,111 @@ def main():
         }
         torch.save(final_checkpoint, f"{args.output_dir}/vqcae_final.pt")
 
-        # Print training time
-        print(f"Total training time: {training_time / 3600:.2f} hours")
+        # Sync point before evaluations
+        print("Starting evaluations...")
 
-        # Generate evaluation plots
-        plot_reconstructions(model, val_loader, device=device,
-                             save_path=f"{args.output_dir}/reconstructions.png", rank=rank)
+    # Make sure all processes reach this point
+    if dist.is_initialized():
+        dist.barrier()
 
-        evaluate_quality_metrics(model, val_loader, device=device, rank=rank)
+    # Simple evaluations that won't hang
+    if rank == 0:
+        # Get unwrapped model for single-GPU evaluation
+        eval_model = model.module.to(device) if isinstance(model, DDP) else model
 
-        evaluate_codebook_usage(model, val_loader, device=device,
-                                save_path=f"{args.output_dir}/codebook_usage.png", rank=rank)
+        # Do reconstructions
+        eval_model.eval()
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                recons, _ = eval_model(batch)
 
-        plot_latent_code_distribution(model, val_loader, device=device,
-                                      save_path=f"{args.output_dir}/latent_code_distribution.png", rank=rank)
+                # Save reconstructions
+                plt.figure(figsize=(10, 4))
+                n = min(8, batch.size(0))
+                for i in range(n):
+                    # Original
+                    plt.subplot(2, n, i + 1)
+                    orig = batch[i].cpu().numpy()
+                    if orig.shape[0] == 1:
+                        plt.imshow(orig[0], cmap='gray')
+                    else:
+                        plt.imshow(np.transpose(orig, (1, 2, 0)))
+                    plt.axis('off')
 
-    # Make sure all processes reach cleanup together
+                    # Reconstruction
+                    plt.subplot(2, n, i + n + 1)
+                    rec = recons[i].cpu().numpy()
+                    if rec.shape[0] == 1:
+                        plt.imshow(rec[0], cmap='gray')
+                    else:
+                        plt.imshow(np.transpose(rec, (1, 2, 0)))
+                    plt.axis('off')
+
+                plt.tight_layout()
+                plt.savefig(f"{args.output_dir}/reconstructions.png")
+                plt.close()
+                print("Reconstruction plot saved to", f"{args.output_dir}/reconstructions.png")
+                break
+
+        # Calculate MSE
+        total_mse = 0.0
+        total_samples = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                recons, _ = eval_model(batch)
+                mse = F.mse_loss(recons, batch, reduction='sum').item()
+                total_mse += mse
+                total_samples += batch.size(0)
+
+        avg_mse = total_mse / total_samples
+        print(f"Average Reconstruction MSE: {avg_mse:.4f}")
+
+        # Calculate codebook usage
+        print("Evaluating codebook usage...")
+        all_idxs = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                idxs = eval_model.encode_indices(batch)
+                all_idxs.append(idxs.view(-1).cpu())
+
+        all_idxs = torch.cat(all_idxs, dim=0)
+        counts = torch.bincount(all_idxs, minlength=eval_model.vq.codebook_size).float()
+
+        # Plot distribution
+        plt.figure(figsize=(10, 4))
+        plt.bar(np.arange(len(counts)), counts.numpy())
+        plt.xlabel("Codebook Index")
+        plt.ylabel("Count")
+        plt.title("Distribution of Latent Codes")
+        plt.tight_layout()
+        plt.savefig(f"{args.output_dir}/latent_code_distribution.png")
+        plt.close()
+        print("Latent code distribution plot saved to", f"{args.output_dir}/latent_code_distribution.png")
+
+        # Calculate perplexity
+        total = counts.sum().item()
+        probs = counts / total
+        entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
+        perplexity = np.exp(entropy)
+        print(f"Codebook usage perplexity: {perplexity:.2f}")
+
+        # Plot codebook usage
+        plt.figure(figsize=(8, 4))
+        plt.bar(np.arange(eval_model.vq.codebook_size), counts.numpy())
+        plt.xlabel("Codebook Index")
+        plt.ylabel("Count")
+        plt.title(f"Codebook Usage (Perplexity: {perplexity:.2f})")
+        plt.tight_layout()
+        plt.savefig(f"{args.output_dir}/codebook_usage.png")
+        plt.close()
+        print("Codebook usage histogram saved to", f"{args.output_dir}/codebook_usage.png")
+
+        print("Evaluation complete!")
+
+    # Final barrier before cleanup
     if dist.is_initialized():
         dist.barrier()
 
@@ -677,7 +769,5 @@ def main():
 
     if rank == 0:
         print("Training complete. Model and evaluation plots saved in", args.output_dir)
-
-
 if __name__ == "__main__":
     main()
