@@ -260,7 +260,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=1024, codebook_size=1024).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=256, codebook_size=128).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Compute total steps and warmup steps (using 10% of total steps for warmup)
