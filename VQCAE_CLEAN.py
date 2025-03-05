@@ -12,6 +12,39 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
+# -------------------------
+# Custom LR Scheduler
+# -------------------------
+class CustomLRScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    A custom learning rate scheduler that:
+      - Linearly increases the LR from base_lr to max_lr for a warmup phase.
+      - Then exponentially decays from max_lr to min_lr over the remaining steps.
+    """
+    def __init__(self, optimizer, total_steps, warmup_steps, base_lr, max_lr, min_lr, last_epoch=-1):
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+        self.base_lr = base_lr
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        step = self.last_epoch + 1  # current step count (1-indexed)
+        if step < self.warmup_steps:
+            # Linear warmup from base_lr to max_lr.
+            lr = self.base_lr + (self.max_lr - self.base_lr) * (step / self.warmup_steps)
+        else:
+            # Exponential decay from max_lr to min_lr.
+            decay_steps = self.total_steps - self.warmup_steps
+            progress = (step - self.warmup_steps) / decay_steps  # in [0, 1]
+            # Compute decay factor so that at progress=0, lr = max_lr and at progress=1, lr = min_lr.
+            lr = self.max_lr * ((self.min_lr / self.max_lr) ** progress)
+        return [lr for _ in self.optimizer.param_groups]
+
+# -------------------------
+# Dataset and Model Definitions (as provided)
+# -------------------------
 class EEGNpyDataset(Dataset):
     def __init__(self, directory, normalize=False):
         self.files = [f for f in os.listdir(directory) if f.endswith('.npy')]
@@ -43,10 +76,9 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("ema_w", self.embedding.weight.clone())
 
     def forward(self, z):
-        # z: (B, H, W, C)
         flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
         dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
-        idxs = dist.argmin(dim=1)  # (B*H*W,)
+        idxs = dist.argmin(dim=1)
         encodings = F.one_hot(idxs, self.codebook_size).type(flat_z.dtype)
         if self.training:
             self._update_ema(flat_z, encodings)
@@ -98,11 +130,10 @@ class VQCAE(nn.Module):
         self.commitment_beta = commitment_beta
 
     def forward(self, x):
-        # x: (B, C, H, W)
-        z_e = self.encoder(x)  # (B, hidden_channels, H', W')
-        z_e = z_e.permute(0, 2, 3, 1).contiguous()  # (B, H', W', C)
+        z_e = self.encoder(x)
+        z_e = z_e.permute(0, 2, 3, 1).contiguous()
         z_q, idxs, vq_loss = self.vq(z_e)
-        z_q = z_q.permute(0, 3, 1, 2).contiguous()  # (B, C, H', W')
+        z_q = z_q.permute(0, 3, 1, 2).contiguous()
         x_rec = self.decoder(z_q)
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
@@ -111,7 +142,7 @@ class VQCAE(nn.Module):
         z_e = self.encoder(x)
         z_e = z_e.permute(0, 2, 3, 1).contiguous()
         _, idxs, _ = self.vq(z_e)
-        return idxs  # (B, H', W')
+        return idxs
 
 def plot_reconstructions(model, data_loader, device, save_path="output/reconstructions.png", n=8):
     model.eval()
@@ -146,7 +177,7 @@ def plot_latent_code_distribution(model, data_loader, device, save_path="output/
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            idxs = model.encode_indices(batch)  # (B, H', W')
+            idxs = model.encode_indices(batch)
             all_idxs.append(idxs.view(-1).cpu())
     all_idxs = torch.cat(all_idxs, dim=0)
     counts = torch.bincount(all_idxs, minlength=model.vq.codebook_size).float()
@@ -202,12 +233,20 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
     print(f"Codebook usage perplexity: {perplexity:.2f}")
     return perplexity, counts
 
+# -------------------------
+# Main Training Loop with Scheduler Integration
+# -------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=4e-4)
+    # Base learning rate used during warmup
+    parser.add_argument("--lr", type=float, default=4e-4, help="Base learning rate")
+    # Maximum learning rate after warmup
+    parser.add_argument("--max_lr", type=float, default=1e-3, help="Peak learning rate")
+    # Minimum (final) learning rate after decay
+    parser.add_argument("--min_lr", type=float, default=1e-5, help="Final learning rate")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -224,6 +263,20 @@ def main():
     model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=128).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
+    # Compute total steps and warmup steps (using 10% of total steps for warmup)
+    total_steps = args.epochs * len(train_loader)
+    warmup_steps = int(0.1 * total_steps)
+    scheduler = CustomLRScheduler(optimizer,
+                                  total_steps=total_steps,
+                                  warmup_steps=warmup_steps,
+                                  base_lr=args.lr,
+                                  max_lr=args.max_lr,
+                                  min_lr=args.min_lr)
+
+    # Lists to record loss history for plotting.
+    train_losses = []
+    val_losses = []
+
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0
@@ -235,11 +288,16 @@ def main():
             _, loss = model(batch)
             loss.backward()
             optimizer.step()
+            scheduler.step()  # Update LR every batch
             total_loss += loss.item() * batch.size(0)
             count += batch.size(0)
-            pbar.set_postfix({"loss": loss.item()})
+            # Optionally, display current learning rate in the progress bar
+            current_lr = scheduler.get_last_lr()[0]
+            pbar.set_postfix({"loss": loss.item(), "lr": current_lr})
         avg_train_loss = total_loss / count
+        train_losses.append(avg_train_loss)
 
+        # Validation loop
         model.eval()
         val_loss = 0
         val_count = 0
@@ -250,14 +308,37 @@ def main():
                 val_loss += loss.item() * batch.size(0)
                 val_count += batch.size(0)
         avg_val_loss = val_loss / val_count
+        val_losses.append(avg_val_loss)
+
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
+    # Plot train and validation loss over epochs.
     os.makedirs("output", exist_ok=True)
+    plt.figure(figsize=(10, 6))
+    epochs_range = range(1, args.epochs+1)
+    plt.plot(epochs_range, train_losses, label='Train Loss')
+    plt.plot(epochs_range, val_losses, label='Validation Loss')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Train and Validation Loss Over Epochs")
+    plt.legend()
+    plt.savefig("output/loss.png")
+    plt.close()
+    print("Loss plot saved to output/loss.png")
+
     plot_reconstructions(model, val_loader, device=args.device, save_path="output/reconstructions.png")
     evaluate_quality_metrics(model, val_loader, device=args.device)
     evaluate_codebook_usage(model, val_loader, device=args.device, save_path="output/codebook_usage.png")
     plot_latent_code_distribution(model, val_loader, device=args.device, save_path="output/latent_code_distribution.png")
-    torch.save(model.state_dict(), "output/vqcae.pt")
+    checkpoint = {
+        "epoch": epoch + 1,  # the next epoch to run
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+    }
+    torch.save(checkpoint, "output/vqcae_checkpoint.pt")
     print("Training complete. Model and evaluation plots saved in 'output/'.")
 
 if __name__ == "__main__":
