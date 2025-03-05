@@ -79,30 +79,61 @@ class VectorQuantizerEMA(nn.Module):
         self.embedding_dim = embedding_dim
         self.decay = decay
         self.eps = eps
+
+        # Initialize embedding on the default device (will move to GPU later)
         self.embedding = nn.Embedding(codebook_size, embedding_dim)
         nn.init.uniform_(self.embedding.weight, -1.0 / codebook_size, 1.0 / codebook_size)
+
+        # Register buffers (these will be moved to the same device as model)
         self.register_buffer("cluster_size", torch.zeros(codebook_size))
         self.register_buffer("ema_w", self.embedding.weight.clone())
 
     def forward(self, z):
+        # Ensure input is on the correct device
+        device = z.device
+
         flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
+
+        # Ensure all tensors are on the same device
         dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
         idxs = dist.argmin(dim=1)
-        encodings = F.one_hot(idxs, self.codebook_size).type(flat_z.dtype)
+
+        # Create one_hot encodings on the same device as inputs
+        encodings = F.one_hot(idxs, self.codebook_size).to(flat_z.dtype).to(device)
+
         if self.training:
             self._update_ema(flat_z, encodings)
+
         z_q = self.embedding(idxs).reshape(z.shape)
+
+        # Compute loss (everything stays on GPU)
         diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
-        z_q = z + (z_q - z).detach()  # Straight-through estimator
+
+        # Straight-through estimator
+        z_q = z + (z_q - z).detach()
+
         return z_q, idxs.reshape(z.shape[:-1]), diff
 
     def _update_ema(self, flat_z, encodings):
-        cluster_size = encodings.sum(dim=0)
+        device = flat_z.device
+
+        # Ensure all operations happen on the same device
+        cluster_size = encodings.sum(dim=0).to(device)
+
+        # Update cluster size EMA
         self.cluster_size.data.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
-        dw = flat_z.t() @ encodings
+
+        # Update embedding EMA
+        dw = torch.matmul(flat_z.t(), encodings).to(device)
         self.ema_w.data.mul_(self.decay).add_(dw.t(), alpha=1 - self.decay)
+
+        # Normalize embeddings
         n = self.cluster_size.sum()
+
+        # Handle empty clusters
         cluster_size = ((self.cluster_size + self.eps) / (n + self.codebook_size * self.eps)) * n
+
+        # Update embedding weights - stay on same device
         embed_normalized = self.ema_w / cluster_size.unsqueeze(1)
         self.embedding.weight.data.copy_(embed_normalized)
 
@@ -149,6 +180,7 @@ class VQCAE(nn.Module):
         z_q, idxs, vq_loss = self.vq(z_e)
         z_q = z_q.permute(0, 3, 1, 2).contiguous()
         x_rec = self.decoder(z_q)
+        # Keep everything on the same device
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
 
@@ -248,8 +280,8 @@ def plot_latent_code_distribution(model, data_loader, device, save_path="output/
         dist.all_gather(gathered_idxs, all_idxs)
         all_idxs = torch.cat(gathered_idxs, dim=0)
 
-    counts = torch.bincount(all_idxs, minlength=model.module.vq.codebook_size if isinstance(model,
-                                                                                            DDP) else model.vq.codebook_size).float()
+    codebook_size = model.module.vq.codebook_size if isinstance(model, DDP) else model.vq.codebook_size
+    counts = torch.bincount(all_idxs, minlength=codebook_size).float()
 
     # Only plot on rank 0
     if rank == 0:
@@ -282,7 +314,7 @@ def evaluate_quality_metrics(model, data_loader, device, rank=0):
             total_mse += mse
             total_samples += batch.size(0)
 
-    # Aggregate metrics across processes
+    # Aggregate metrics across processes - use torch tensor on the correct device
     if dist.is_initialized() and dist.get_world_size() > 1:
         metrics = torch.tensor([total_mse, total_samples], dtype=torch.float64, device=device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
@@ -415,10 +447,18 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    # Create model
+    # Create model and explicitly move to device BEFORE wrapping with DDP
     model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
 
-    # Wrap model with DDP
+    # Verify all model parameters are on the correct device
+    for param in model.parameters():
+        assert param.device == device, f"Parameter on wrong device: {param.device} vs {device}"
+
+    # Check buffer devices
+    for buffer_name, buffer in model.named_buffers():
+        assert buffer.device == device, f"Buffer {buffer_name} on wrong device: {buffer.device} vs {device}"
+
+    # Wrap model with DDP after ensuring it's correctly on device
     model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     # Apply torch.compile if requested and available
@@ -442,6 +482,10 @@ def main():
     # Lists to record loss history for plotting
     train_losses = []
     val_losses = []
+
+    # Wait for all processes to reach this point before starting training
+    if dist.is_initialized():
+        dist.barrier()
 
     # Training loop
     start_time = time.time()
@@ -470,7 +514,9 @@ def main():
             optimizer.step()
             scheduler.step()  # Update LR every batch
 
-            total_loss += loss.item() * batch.size(0)
+            # Keep all metrics on the correct device to avoid CPU/GPU transfers
+            batch_loss = loss.item() * batch.size(0)
+            total_loss += batch_loss
             count += batch.size(0)
 
             # Display progress only on rank 0
@@ -478,7 +524,7 @@ def main():
                 current_lr = scheduler.get_last_lr()[0]
                 pbar.set_postfix({"loss": loss.item(), "lr": current_lr})
 
-        # Aggregate losses across processes
+        # Aggregate losses across processes - use tensors on the correct device
         if dist.is_initialized() and world_size > 1:
             metrics = torch.tensor([total_loss, count], dtype=torch.float64, device=device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
@@ -507,6 +553,10 @@ def main():
 
         avg_val_loss = val_loss / val_count
         val_losses.append(avg_val_loss)
+
+        # Wait for all processes to finish epoch evaluation
+        if dist.is_initialized():
+            dist.barrier()
 
         # Print status on rank 0
         if rank == 0:
@@ -567,6 +617,10 @@ def main():
 
         plot_latent_code_distribution(model, val_loader, device=device,
                                       save_path=f"{args.output_dir}/latent_code_distribution.png", rank=rank)
+
+    # Make sure all processes reach cleanup together
+    if dist.is_initialized():
+        dist.barrier()
 
     # Clean up DDP resources
     cleanup_ddp()
