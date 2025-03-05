@@ -717,18 +717,23 @@ def main():
         avg_mse = total_mse / total_samples
         print(f"Average Reconstruction MSE: {avg_mse:.4f}")
 
-        # Calculate codebook usage
-        print("Evaluating codebook usage...")
-        all_idxs = []
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(device)
-                idxs = eval_model.encode_indices(batch)
-                all_idxs.append(idxs.view(-1).cpu())
+        if rank == 0:
+            # Correctly unwrap the model
+            eval_model = model.module if isinstance(model, DDP) else model
 
-        all_idxs = torch.cat(all_idxs, dim=0)
-        counts = torch.bincount(all_idxs, minlength=eval_model.vq.codebook_size).float()
+            # Calculate codebook usage
+            print("Evaluating codebook usage...")
+            all_idxs = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    # Now we're using the properly unwrapped model
+                    idxs = eval_model.encode_indices(batch)
+                    all_idxs.append(idxs.view(-1).cpu())
 
+            all_idxs = torch.cat(all_idxs, dim=0)
+            counts = torch.bincount(all_idxs, minlength=eval_model.vq.codebook_size).float()
+            
         # Plot distribution
         plt.figure(figsize=(10, 4))
         plt.bar(np.arange(len(counts)), counts.numpy())
