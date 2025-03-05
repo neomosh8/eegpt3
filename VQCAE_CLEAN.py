@@ -45,19 +45,17 @@ class VectorQuantizerEMA(nn.Module):
     def forward(self, z):
         # z: (B, H, W, C)
         flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
-        # Compute L2 distance between z and embedding vectors
+        # Compute L2 distances between latent vectors and embeddings
         dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
         idxs = dist.argmin(dim=1)  # (B*H*W,)
         encodings = F.one_hot(idxs, self.codebook_size).type(flat_z.dtype)
-
         if self.training:
             self._update_ema(flat_z, encodings)
-        # Get quantized latent vectors and reshape back to (B, H, W, C)
+        # Retrieve quantized latent vectors and reshape back to (B, H, W, C)
         z_q = self.embedding(idxs).reshape(z.shape)
         diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
-        # Straight-through estimator
+        # Straight-through estimator: pass gradients from decoder to encoder
         z_q = z + (z_q - z).detach()
-        # Return indices reshaped to (B, H, W)
         return z_q, idxs.reshape(z.shape[:-1]), diff
 
     def _update_ema(self, flat_z, encodings):
@@ -106,16 +104,23 @@ class VQCAE(nn.Module):
     def forward(self, x):
         # x: (B, C, H, W)
         z_e = self.encoder(x)  # (B, hidden_channels, H', W')
-        # Permute to (B, H', W', C) for the vector quantizer
+        # Permute to (B, H', W', C) for vector quantization
         z_e = z_e.permute(0, 2, 3, 1).contiguous()
         z_q, idxs, vq_loss = self.vq(z_e)
-        # Permute quantized latents back to (B, C, H', W')
+        # Permute back to (B, C, H', W')
         z_q = z_q.permute(0, 3, 1, 2).contiguous()
         x_rec = self.decoder(z_q)
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
 
-def plot_reconstructions(model, data_loader, device, save_path="recon.png", n=8):
+    def encode_indices(self, x):
+        # This helper method returns the codebook indices for a given input
+        z_e = self.encoder(x)
+        z_e = z_e.permute(0, 2, 3, 1).contiguous()
+        _, idxs, _ = self.vq(z_e)
+        return idxs  # shape: (B, H', W')
+
+def plot_reconstructions(model, data_loader, device, save_path="output/reconstructions.png", n=8):
     model.eval()
     batch = next(iter(data_loader)).to(device)
     with torch.no_grad():
@@ -140,6 +145,50 @@ def plot_reconstructions(model, data_loader, device, save_path="recon.png", n=8)
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+    print(f"Reconstruction plot saved to {save_path}")
+
+def evaluate_quality_metrics(model, data_loader, device):
+    model.eval()
+    total_mse = 0.0
+    total_samples = 0
+    with torch.no_grad():
+        for batch in data_loader:
+            batch = batch.to(device)
+            x_rec, _ = model(batch)
+            mse = F.mse_loss(x_rec, batch, reduction='sum').item()
+            total_mse += mse
+            total_samples += batch.size(0)
+    avg_mse = total_mse / total_samples
+    print(f"Average Reconstruction MSE: {avg_mse:.4f}")
+    return avg_mse
+
+def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebook_usage.png"):
+    model.eval()
+    all_idxs = []
+    with torch.no_grad():
+        for batch in data_loader:
+            batch = batch.to(device)
+            idxs = model.encode_indices(batch)  # shape: (B, H', W')
+            all_idxs.append(idxs.view(-1).cpu())
+    all_idxs = torch.cat(all_idxs, dim=0)
+    # Compute histogram of code indices
+    counts = torch.bincount(all_idxs, minlength=model.vq.codebook_size).float()
+    total = counts.sum().item()
+    probs = counts / total
+    entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
+    perplexity = np.exp(entropy)
+    # Plot histogram
+    plt.figure(figsize=(8, 4))
+    plt.bar(np.arange(model.vq.codebook_size), counts.numpy())
+    plt.xlabel("Codebook Index")
+    plt.ylabel("Count")
+    plt.title(f"Codebook Usage (Perplexity: {perplexity:.2f})")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Codebook usage histogram saved to {save_path}")
+    print(f"Codebook usage perplexity: {perplexity:.2f}")
+    return perplexity, counts
 
 def main():
     parser = argparse.ArgumentParser()
@@ -192,8 +241,11 @@ def main():
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
     os.makedirs("output", exist_ok=True)
-    plot_reconstructions(model, val_loader, device=args.device, save_path="output/recon.png")
+    plot_reconstructions(model, val_loader, device=args.device, save_path="output/reconstructions.png")
+    evaluate_quality_metrics(model, val_loader, device=args.device)
+    evaluate_codebook_usage(model, val_loader, device=args.device, save_path="output/codebook_usage.png")
     torch.save(model.state_dict(), "output/vqcae.pt")
+    print("Training complete. Model and evaluation plots saved in 'output/'.")
 
 if __name__ == "__main__":
     main()
