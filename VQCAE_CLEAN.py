@@ -20,8 +20,10 @@ class EEGNpyDataset(Dataset):
         self.files.sort()
         self.dir = directory
         self.normalize = normalize
+
     def __len__(self):
         return len(self.files)
+
     def __getitem__(self, idx):
         x = np.load(os.path.join(self.dir, self.files[idx]))
         if self.normalize:
@@ -35,23 +37,28 @@ class VectorQuantizerEMA(nn.Module):
         self.embedding_dim = embedding_dim
         self.decay = decay
         self.eps = eps
-        self.embedding = nn.Embedding(self.codebook_size, self.embedding_dim)
-        nn.init.uniform_(self.embedding.weight, -1.0/self.codebook_size, 1.0/self.codebook_size)
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+        nn.init.uniform_(self.embedding.weight, -1.0/codebook_size, 1.0/codebook_size)
         self.register_buffer("cluster_size", torch.zeros(codebook_size))
         self.register_buffer("ema_w", self.embedding.weight.clone())
 
     def forward(self, z):
-        z = z.reshape(-1, self.embedding_dim)
-        dist = torch.cdist(z, self.embedding.weight, p=2)
-        idxs = dist.argmin(dim=1)
-        encodings = F.one_hot(idxs, self.codebook_size).type(z.dtype)
-        idxs = idxs.view(-1)  # or shape for later use
-        z_q = self.embedding(idxs).view(-1, self.embedding_dim)
-        diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
+        # z: (B, H, W, C)
+        flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
+        # Compute L2 distance between z and embedding vectors
+        dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
+        idxs = dist.argmin(dim=1)  # (B*H*W,)
+        encodings = F.one_hot(idxs, self.codebook_size).type(flat_z.dtype)
+
         if self.training:
-            self._update_ema(z, encodings)
+            self._update_ema(flat_z, encodings)
+        # Get quantized latent vectors and reshape back to (B, H, W, C)
+        z_q = self.embedding(idxs).reshape(z.shape)
+        diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
+        # Straight-through estimator
         z_q = z + (z_q - z).detach()
-        return z_q, idxs, diff
+        # Return indices reshaped to (B, H, W)
+        return z_q, idxs.reshape(z.shape[:-1]), diff
 
     def _update_ema(self, flat_z, encodings):
         cluster_size = encodings.sum(dim=0)
@@ -97,14 +104,16 @@ class VQCAE(nn.Module):
         self.commitment_beta = commitment_beta
 
     def forward(self, x):
-        z_e = self.encoder(x)
+        # x: (B, C, H, W)
+        z_e = self.encoder(x)  # (B, hidden_channels, H', W')
+        # Permute to (B, H', W', C) for the vector quantizer
         z_e = z_e.permute(0, 2, 3, 1).contiguous()
         z_q, idxs, vq_loss = self.vq(z_e)
-        z_q = z_q.permute(0, 3, 1, 2)
+        # Permute quantized latents back to (B, C, H', W')
+        z_q = z_q.permute(0, 3, 1, 2).contiguous()
         x_rec = self.decoder(z_q)
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
-
 
 def plot_reconstructions(model, data_loader, device, save_path="recon.png", n=8):
     model.eval()
@@ -124,8 +133,8 @@ def plot_reconstructions(model, data_loader, device, save_path="recon.png", n=8)
             axs[0, i].imshow(orig[0], cmap='gray')
             axs[1, i].imshow(rec[0], cmap='gray')
         else:
-            axs[0, i].imshow(np.transpose(orig, (1,2,0)))
-            axs[1, i].imshow(np.transpose(rec, (1,2,0)))
+            axs[0, i].imshow(np.transpose(orig, (1, 2, 0)))
+            axs[1, i].imshow(np.transpose(rec, (1, 2, 0)))
         axs[0, i].axis('off')
         axs[1, i].axis('off')
     plt.tight_layout()
