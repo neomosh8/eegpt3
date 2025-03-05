@@ -122,7 +122,7 @@ class Decoder(nn.Module):
         return self.net(x)
 
 class VQCAE(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.25):
+    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.0):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
@@ -260,7 +260,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=256, codebook_size=512).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=64, codebook_size=64).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Compute total steps and warmup steps (using 10% of total steps for warmup)
