@@ -246,7 +246,7 @@ def main():
     # Maximum learning rate after warmup
     parser.add_argument("--max_lr", type=float, default=4e-4, help="Peak learning rate")
     # Minimum (final) learning rate after decay
-    parser.add_argument("--min_lr", type=float, default=4e-6, help="Final learning rate")
+    parser.add_argument("--min_lr", type=float, default=4e-2, help="Final learning rate")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
