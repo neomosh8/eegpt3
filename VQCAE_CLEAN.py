@@ -45,17 +45,14 @@ class VectorQuantizerEMA(nn.Module):
     def forward(self, z):
         # z: (B, H, W, C)
         flat_z = z.reshape(-1, self.embedding_dim)  # (B*H*W, C)
-        # Compute L2 distances between latent vectors and embeddings
         dist = torch.cdist(flat_z, self.embedding.weight, p=2)  # (B*H*W, codebook_size)
         idxs = dist.argmin(dim=1)  # (B*H*W,)
         encodings = F.one_hot(idxs, self.codebook_size).type(flat_z.dtype)
         if self.training:
             self._update_ema(flat_z, encodings)
-        # Retrieve quantized latent vectors and reshape back to (B, H, W, C)
         z_q = self.embedding(idxs).reshape(z.shape)
         diff = (z_q.detach() - z).pow(2).mean() + (z_q - z.detach()).pow(2).mean()
-        # Straight-through estimator: pass gradients from decoder to encoder
-        z_q = z + (z_q - z).detach()
+        z_q = z + (z_q - z).detach()  # Straight-through estimator
         return z_q, idxs.reshape(z.shape[:-1]), diff
 
     def _update_ema(self, flat_z, encodings):
@@ -88,7 +85,6 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(32, 16, 3, 2, 1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(16, out_channels, 3, 1, 1),
-            # nn.Tanh()
         )
     def forward(self, x):
         return self.net(x)
@@ -104,21 +100,18 @@ class VQCAE(nn.Module):
     def forward(self, x):
         # x: (B, C, H, W)
         z_e = self.encoder(x)  # (B, hidden_channels, H', W')
-        # Permute to (B, H', W', C) for vector quantization
-        z_e = z_e.permute(0, 2, 3, 1).contiguous()
+        z_e = z_e.permute(0, 2, 3, 1).contiguous()  # (B, H', W', C)
         z_q, idxs, vq_loss = self.vq(z_e)
-        # Permute back to (B, C, H', W')
-        z_q = z_q.permute(0, 3, 1, 2).contiguous()
+        z_q = z_q.permute(0, 3, 1, 2).contiguous()  # (B, C, H', W')
         x_rec = self.decoder(z_q)
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
 
     def encode_indices(self, x):
-        # This helper method returns the codebook indices for a given input
         z_e = self.encoder(x)
         z_e = z_e.permute(0, 2, 3, 1).contiguous()
         _, idxs, _ = self.vq(z_e)
-        return idxs  # shape: (B, H', W')
+        return idxs  # (B, H', W')
 
 def plot_reconstructions(model, data_loader, device, save_path="output/reconstructions.png", n=8):
     model.eval()
@@ -147,6 +140,27 @@ def plot_reconstructions(model, data_loader, device, save_path="output/reconstru
     plt.close()
     print(f"Reconstruction plot saved to {save_path}")
 
+def plot_latent_code_distribution(model, data_loader, device, save_path="output/latent_code_distribution.png"):
+    model.eval()
+    all_idxs = []
+    with torch.no_grad():
+        for batch in data_loader:
+            batch = batch.to(device)
+            idxs = model.encode_indices(batch)  # (B, H', W')
+            all_idxs.append(idxs.view(-1).cpu())
+    all_idxs = torch.cat(all_idxs, dim=0)
+    counts = torch.bincount(all_idxs, minlength=model.vq.codebook_size).float()
+    plt.figure(figsize=(10, 4))
+    plt.bar(np.arange(model.vq.codebook_size), counts.numpy())
+    plt.xlabel("Codebook Index")
+    plt.ylabel("Count")
+    plt.title("Distribution of Latent Codes")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Latent code distribution plot saved to {save_path}")
+    return counts
+
 def evaluate_quality_metrics(model, data_loader, device):
     model.eval()
     total_mse = 0.0
@@ -168,16 +182,14 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            idxs = model.encode_indices(batch)  # shape: (B, H', W')
+            idxs = model.encode_indices(batch)
             all_idxs.append(idxs.view(-1).cpu())
     all_idxs = torch.cat(all_idxs, dim=0)
-    # Compute histogram of code indices
     counts = torch.bincount(all_idxs, minlength=model.vq.codebook_size).float()
     total = counts.sum().item()
     probs = counts / total
     entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
     perplexity = np.exp(entropy)
-    # Plot histogram
     plt.figure(figsize=(8, 4))
     plt.bar(np.arange(model.vq.codebook_size), counts.numpy())
     plt.xlabel("Codebook Index")
@@ -244,6 +256,7 @@ def main():
     plot_reconstructions(model, val_loader, device=args.device, save_path="output/reconstructions.png")
     evaluate_quality_metrics(model, val_loader, device=args.device)
     evaluate_codebook_usage(model, val_loader, device=args.device, save_path="output/codebook_usage.png")
+    plot_latent_code_distribution(model, val_loader, device=args.device, save_path="output/latent_code_distribution.png")
     torch.save(model.state_dict(), "output/vqcae.pt")
     print("Training complete. Model and evaluation plots saved in 'output/'.")
 
