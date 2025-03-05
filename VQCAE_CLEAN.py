@@ -122,7 +122,7 @@ class Decoder(nn.Module):
         return self.net(x)
 
 class VQCAE(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.8, commitment_beta=0.45):
+    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.8, commitment_beta=0.05):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
