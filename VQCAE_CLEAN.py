@@ -294,6 +294,7 @@ def main():
             # Optionally, display current learning rate in the progress bar
             current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({"loss": loss.item(), "lr": current_lr})
+            print(f"lr: {current_lr}")
         avg_train_loss = total_loss / count
         train_losses.append(avg_train_loss)
 
