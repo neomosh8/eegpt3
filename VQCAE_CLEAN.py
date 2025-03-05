@@ -88,7 +88,7 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(32, 16, 3, 2, 1, output_padding=1), nn.ReLU(),
             nn.ConvTranspose2d(16, out_channels, 3, 1, 1),
-            nn.Tanh()
+            # nn.Tanh()
         )
     def forward(self, x):
         return self.net(x)
