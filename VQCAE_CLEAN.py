@@ -122,7 +122,7 @@ class Decoder(nn.Module):
         return self.net(x)
 
 class VQCAE(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.29, commitment_beta=0.25):
+    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.25):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
@@ -239,7 +239,7 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=500)
     # Base learning rate used during warmup
     parser.add_argument("--lr", type=float, default=4e-6, help="Base learning rate")
