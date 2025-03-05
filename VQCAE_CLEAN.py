@@ -205,7 +205,7 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=4e-4)
     parser.add_argument("--device", type=str, default="cuda")
@@ -221,7 +221,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=128, codebook_size=128).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=128).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(args.epochs):
