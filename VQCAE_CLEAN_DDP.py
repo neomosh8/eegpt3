@@ -664,18 +664,27 @@ def main():
         dist.barrier()
 
     # Simple evaluations that won't hang
+    # Replace your evaluation code with this simplified version
     if rank == 0:
-        # Get unwrapped model for single-GPU evaluation
-        eval_model = model.module.to(device) if isinstance(model, DDP) else model
+        print("Starting evaluations...")
 
-        # Do reconstructions
+        # Create a fresh model for evaluation (not DDP, not compiled)
+        eval_model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
+
+        # Extract state dict from trained model
+        state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+
+        # Load weights into evaluation model
+        eval_model.load_state_dict(state_dict)
         eval_model.eval()
+
+        # Reconstruction visualization
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
                 recons, _ = eval_model(batch)
 
-                # Save reconstructions
+                # Create visualization
                 plt.figure(figsize=(10, 4))
                 n = min(8, batch.size(0))
                 for i in range(n):
@@ -717,42 +726,24 @@ def main():
         avg_mse = total_mse / total_samples
         print(f"Average Reconstruction MSE: {avg_mse:.4f}")
 
-        if rank == 0:
-            # Correctly unwrap the model
-            eval_model = model.module if isinstance(model, DDP) else model
+        # Codebook usage analysis
+        print("Evaluating codebook usage...")
+        all_idxs = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                idxs = eval_model.encode_indices(batch)
+                all_idxs.append(idxs.view(-1).cpu())
 
-            # Calculate codebook usage
-            print("Evaluating codebook usage...")
-            all_idxs = []
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = batch.to(device)
-                    # Now we're using the properly unwrapped model
-                    idxs = eval_model.encode_indices(batch)
-                    all_idxs.append(idxs.view(-1).cpu())
+        all_idxs = torch.cat(all_idxs, dim=0)
+        counts = torch.bincount(all_idxs, minlength=eval_model.vq.codebook_size).float()
 
-            all_idxs = torch.cat(all_idxs, dim=0)
-            counts = torch.bincount(all_idxs, minlength=eval_model.vq.codebook_size).float()
-            
-        # Plot distribution
-        plt.figure(figsize=(10, 4))
-        plt.bar(np.arange(len(counts)), counts.numpy())
-        plt.xlabel("Codebook Index")
-        plt.ylabel("Count")
-        plt.title("Distribution of Latent Codes")
-        plt.tight_layout()
-        plt.savefig(f"{args.output_dir}/latent_code_distribution.png")
-        plt.close()
-        print("Latent code distribution plot saved to", f"{args.output_dir}/latent_code_distribution.png")
-
-        # Calculate perplexity
+        # Plot distribution and calculate perplexity
         total = counts.sum().item()
         probs = counts / total
         entropy = -(probs * torch.log(probs + 1e-10)).sum().item()
         perplexity = np.exp(entropy)
-        print(f"Codebook usage perplexity: {perplexity:.2f}")
 
-        # Plot codebook usage
         plt.figure(figsize=(8, 4))
         plt.bar(np.arange(eval_model.vq.codebook_size), counts.numpy())
         plt.xlabel("Codebook Index")
@@ -761,6 +752,7 @@ def main():
         plt.tight_layout()
         plt.savefig(f"{args.output_dir}/codebook_usage.png")
         plt.close()
+        print(f"Codebook usage perplexity: {perplexity:.2f}")
         print("Codebook usage histogram saved to", f"{args.output_dir}/codebook_usage.png")
 
         print("Evaluation complete!")
