@@ -221,7 +221,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=128, codebook_size=128).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=512, codebook_size=128).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(args.epochs):
