@@ -207,7 +207,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
