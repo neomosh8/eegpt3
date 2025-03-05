@@ -47,7 +47,7 @@ class CustomLRScheduler(torch.optim.lr_scheduler._LRScheduler):
 # -------------------------
 class EEGNpyDataset(Dataset):
     def __init__(self, directory, normalize=False):
-        self.files = [f for f in os.listdir(directory) if f.endswith('.npy')][0:20]
+        self.files = [f for f in os.listdir(directory) if f.endswith('.npy')]
         if not self.files:
             raise ValueError("No .npy files found in {}".format(directory))
         self.files.sort()
