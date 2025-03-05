@@ -64,7 +64,7 @@ class EEGNpyDataset(Dataset):
         return torch.from_numpy(x).float()
 
 class VectorQuantizerEMA(nn.Module):
-    def __init__(self, codebook_size, embedding_dim, decay=0.99, eps=1e-5):
+    def __init__(self, codebook_size, embedding_dim, decay=0.3, eps=1e-5):
         super().__init__()
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
@@ -260,7 +260,7 @@ def main():
     sample = ds[0]
     in_channels = sample.shape[0]
 
-    model = VQCAE(in_channels=in_channels, hidden_channels=512, codebook_size=512).to(args.device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=256, codebook_size=256).to(args.device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Compute total steps and warmup steps (using 10% of total steps for warmup)
