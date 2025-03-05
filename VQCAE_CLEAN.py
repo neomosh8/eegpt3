@@ -50,7 +50,7 @@ class EEGNpyDataset(Dataset):
         self.files = [f for f in os.listdir(directory) if f.endswith('.npy')]
         if not self.files:
             raise ValueError("No .npy files found in {}".format(directory))
-        self.files.sort()
+        self.files.sort()[0:20]
         self.dir = directory
         self.normalize = normalize
 
@@ -240,7 +240,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--epochs", type=int, default=200)
     # Base learning rate used during warmup
     parser.add_argument("--lr", type=float, default=4e-4, help="Base learning rate")
     # Maximum learning rate after warmup
