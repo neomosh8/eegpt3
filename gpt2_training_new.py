@@ -258,20 +258,17 @@ class GPT(nn.Module):
 
 class EEGTokenDataLoader:
     """
-    A data loader that loads EEG token files from a directory, concatenates them,
+    A data loader that loads EEG token files from a provided list, concatenates them,
     and iterates through the tokens for training/validation.
     """
-
     def __init__(
             self,
             B: int,  # Batch size
             T: int,  # Sequence length (context window)
             process_rank: int,  # For DDP
             num_processes: int,  # For DDP
-            data_dir: str = "training_data_shards",  # Directory with token files
-            split: str = "train",  # "train" or "val"
-            train_val_split: float = 0.9,  # Ratio of train/val split
-            shuffle_files: bool = True  # Whether to shuffle files
+            token_files: list,  # List of token file paths
+            split: str = "train"  # "train" or "val" (for logging purposes)
     ):
         """
         Args:
@@ -279,43 +276,25 @@ class EEGTokenDataLoader:
             T: Sequence length (context window)
             process_rank: (DDP) process rank
             num_processes: total DDP processes
-            data_dir: directory containing the token files
-            split: "train" or "val"
-            train_val_split: Ratio of train/val split
-            shuffle_files: whether to shuffle the order of files
+            token_files: list of paths to token files
+            split: "train" or "val" (for identification/logging)
         """
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-
-        # Find all token files in the data directory
-        pattern = os.path.join(data_dir, "*_tokens.pt")
-        token_files = sorted(glob.glob(pattern))
+        self.token_files = token_files
 
         if not token_files:
-            raise ValueError(f"No token files found in {data_dir} with pattern '*_tokens.pt'")
+            raise ValueError(f"No token files provided for {split} split")
 
-        if master_process:
-            print(f"Found {len(token_files)} token files in {data_dir}")
-
-        # Split into train and validation sets
-        if shuffle_files:
-            random.shuffle(token_files)
-
-        split_idx = int(len(token_files) * train_val_split)
-        if split == "train":
-            self.token_files = token_files[:split_idx]
-        else:  # "val"
-            self.token_files = token_files[split_idx:]
-
-        if master_process:
+        if ddp_rank == 0:  # Assuming master_process is ddp_rank == 0
             print(f"Using {len(self.token_files)} files for {split} split")
 
         # Load all token files and concatenate
         all_tokens = []
 
-        if master_process:
+        if ddp_rank == 0:
             print(f"Loading {split} token files...")
 
         for file_path in self.token_files:
@@ -323,68 +302,51 @@ class EEGTokenDataLoader:
                 token_tensor = torch.load(file_path, map_location='cpu')
                 all_tokens.append(token_tensor)
             except Exception as e:
-                if master_process:
+                if ddp_rank == 0:
                     print(f"Error loading {file_path}: {e}")
                 continue
 
-        # Concatenate all tokens into a single tensor
         if not all_tokens:
             raise ValueError(f"No valid token tensors loaded for {split} split")
 
         self.tokens = torch.cat(all_tokens, dim=0)
 
-        if master_process:
+        if ddp_rank == 0:
             print(f"Loaded total of {len(self.tokens)} tokens for {split} split")
 
         # Current read position (offset by process_rank for DDP)
         self.current_position = self.B * self.T * self.process_rank
-
-        # Store total length for convenience
         self.total_len = len(self.tokens)
 
     def next_batch(self):
+        # [Unchanged from original code]
         """Fetch next batch of tokens as (x, y) for training"""
         B, T = self.B, self.T
-        needed = B * T + 1  # need one extra token for targets
+        needed = B * T + 1
 
-        # Check if we need to wrap around the end of the token sequence
         if self.current_position + needed <= self.total_len:
-            # No wrap needed
             buf_tokens = self.tokens[self.current_position: self.current_position + needed]
-            self.current_position += B * T * self.num_processes  # Move position forward (with DDP stride)
-
-            # If the next position would exceed the total length, wrap around
+            self.current_position += B * T * self.num_processes
             if self.current_position + needed > self.total_len:
                 self.current_position = self.process_rank * B * T
         else:
-            # Wrap around
             leftover = self.total_len - self.current_position
             wrap_amount = needed - leftover
-
-            # Get tokens from end and beginning
             part1_tokens = self.tokens[self.current_position:]
             part2_tokens = self.tokens[:wrap_amount]
-
-            # Concatenate
             buf_tokens = torch.cat([part1_tokens, part2_tokens], dim=0)
-
-            # Update position for next batch
             self.current_position = wrap_amount + (B * T * (self.num_processes - 1))
 
-        # Ensure we have exactly the needed number of tokens
         if len(buf_tokens) != needed:
             raise RuntimeError(f"Unexpected token count. Expected {needed}, got {len(buf_tokens)}")
 
-        # Create inputs (x) and targets (y)
         x = buf_tokens[:-1].view(B, T)
         y = buf_tokens[1:].view(B, T)
-
         return x, y
 
     def reset(self):
-        """Reset position to beginning (useful for validation)"""
+        # [Unchanged from original code]
         self.current_position = self.B * self.T * self.process_rank
-
 
 def moving_average(values, window_size=10):
     """
@@ -429,16 +391,46 @@ if master_process:
 
 torch.set_float32_matmul_precision('high')
 
+
+# Assume these are defined: ddp_rank, ddp_world_size, master_process
+data_dir = "training_data_shards"
+train_val_split = 0.9
+shuffle_files = True
+
+if ddp_rank == 0:  # Master process
+    # Find all token files
+    token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))
+    if not token_files:
+        raise ValueError(f"No token files found in {data_dir}")
+
+    # Shuffle files with a fixed seed for consistency
+    if shuffle_files:
+        rng = random.Random(42)  # Fixed seed for determinism
+        rng.shuffle(token_files)
+
+    # Split into train and val
+    split_idx = int(len(token_files) * train_val_split)
+    train_files = token_files[:split_idx]
+    val_files = token_files[split_idx:]
+
+    print(f"Master process: Found {len(token_files)} files")
+    print(f"Train files: {len(train_files)}, Val files: {len(val_files)}")
+else:
+    train_files = None
+    val_files = None
+
+# Broadcast the file lists to all processes
+train_files = dist.broadcast_object_list([train_files], src=0)[0] if train_files is None else train_files
+val_files = dist.broadcast_object_list([val_files], src=0)[0] if val_files is None else val_files
 # Initialize the data loaders with the new EEGTokenDataLoader
+# Assuming B, T, ddp_rank, ddp_world_size are defined
 train_loader = EEGTokenDataLoader(
     B=B,
     T=T,
     process_rank=ddp_rank,
     num_processes=ddp_world_size,
-    data_dir="training_data_shards",  # Directory with your token files
-    split='train',
-    train_val_split=0.9,
-    shuffle_files=True
+    token_files=train_files,
+    split='train'
 )
 
 val_loader = EEGTokenDataLoader(
@@ -446,10 +438,8 @@ val_loader = EEGTokenDataLoader(
     T=T,
     process_rank=ddp_rank,
     num_processes=ddp_world_size,
-    data_dir="training_data_shards",  # Directory with your token files
-    split='val',
-    train_val_split=0.9,
-    shuffle_files=False
+    token_files=val_files,
+    split='val'
 )
 
 model = GPT(GPTConfig())
