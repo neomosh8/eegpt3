@@ -16,8 +16,8 @@ def plot_token_histogram(tokens, region, filename, output_dir):
     eos_token = tokens[-1].item()
     tokens_without_eos = tokens[:-1]
 
-    # Count token frequencies
-    token_counts = Counter(tokens_without_eos.numpy())
+    # Count token frequencies - move to CPU first
+    token_counts = Counter(tokens_without_eos.cpu().numpy())
 
     # Plot settings
     plt.figure(figsize=(12, 6))
@@ -67,8 +67,8 @@ def plot_token_sequence(tokens, region, filename, output_dir, segment_size=None)
     else:
         tokens_slice = tokens
 
-    # Convert to numpy array
-    tokens_np = tokens_slice.numpy()
+    # Convert to numpy array - move to CPU first
+    tokens_np = tokens_slice.cpu().numpy()
 
     # Create figure
     plt.figure(figsize=(20, 6))
@@ -111,7 +111,7 @@ def plot_token_heatmap(tokens, region, filename, output_dir, max_cols=100):
     for i, token in enumerate(tokens_without_eos):
         row = i // n_cols
         col = i % n_cols
-        grid[row, col] = token.item()
+        grid[row, col] = token.cpu().item()  # Move to CPU first
 
     # Plot settings
     plt.figure(figsize=(min(20, n_cols / 5), min(10, n_rows / 5)))
@@ -150,17 +150,25 @@ def compare_regions(tokens_dict, filename, output_dir):
 
         # Plot tokens (select first 1000 tokens if longer)
         plot_length = min(len(tokens_without_eos), 1000)
-        tokens_to_plot = tokens_without_eos[:plot_length].numpy()
+        tokens_to_plot = tokens_without_eos[:plot_length].cpu().numpy()  # Move to CPU first
 
         # Plot as line
-        axes[i].plot(tokens_to_plot, marker='.', markersize=2, linestyle='-', linewidth=0.5)
-        axes[i].set_title(f"{region} Tokens")
-        axes[i].set_ylabel("Token Index")
-        axes[i].grid(True, linestyle='--', alpha=0.5)
+        if len(regions) == 1:
+            ax = axes  # If only one region, axes is not a list
+        else:
+            ax = axes[i]
+
+        ax.plot(tokens_to_plot, marker='.', markersize=2, linestyle='-', linewidth=0.5)
+        ax.set_title(f"{region} Tokens")
+        ax.set_ylabel("Token Index")
+        ax.grid(True, linestyle='--', alpha=0.5)
 
     # Add overall title
     plt.suptitle(f"Region Comparison - {os.path.basename(filename)}")
-    axes[-1].set_xlabel("Position")
+    if len(regions) == 1:
+        axes.set_xlabel("Position")
+    else:
+        axes[-1].set_xlabel("Position")
 
     # Save the plot
     save_path = os.path.join(output_dir, f"{os.path.basename(filename)}_region_comparison.png")
@@ -217,8 +225,8 @@ def visualize_token_tensors(input_dir, output_dir, num_files=5):
             filename = os.path.basename(file)
             region = filename.split('_')[-2]  # Format: base_name_region_tokens.pt
 
-            # Load tensor
-            tokens = torch.load(file)
+            # Load tensor with safety parameter
+            tokens = torch.load(file, map_location=torch.device('cpu'))  # Force CPU loading
             tokens_dict[region] = tokens
 
             # Create visualizations for this region
