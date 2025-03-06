@@ -470,7 +470,6 @@ no_improvement_count = 0
 patience = 3
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=min_lr, device=device)
-max_lr_main = 6e-3
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
