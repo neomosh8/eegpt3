@@ -340,48 +340,8 @@ class EEGTokenDataLoader:
         all_tokens = []
         for file_path in epoch_files:
             try:
-                # Try to load directly as tensor first
-                loaded_data = torch.load(file_path, map_location='cpu')
-
-                # Handle different possible formats
-                if isinstance(loaded_data, dict) and 'tokens' in loaded_data:
-                    # If it's a dictionary with 'tokens' key
-                    token_tensor = loaded_data['tokens']
-                elif isinstance(loaded_data, torch.Tensor):
-                    # If it's already a tensor
-                    token_tensor = loaded_data
-                else:
-                    # Try other common keys or formats
-                    if isinstance(loaded_data, dict):
-                        possible_keys = ['token', 'data', 'tensor', 'values']
-                        for key in possible_keys:
-                            if key in loaded_data:
-                                token_tensor = loaded_data[key]
-                                if master_process:
-                                    print(f"Found tokens using key: {key}")
-                                break
-                        else:
-                            # If no known keys found, try the first value
-                            if loaded_data:
-                                first_key = next(iter(loaded_data))
-                                token_tensor = loaded_data[first_key]
-                                if master_process:
-                                    print(f"Using first available key: {first_key}")
-                            else:
-                                raise ValueError(f"Cannot find tokens in file: {file_path}")
-                    else:
-                        raise ValueError(f"Unsupported data type: {type(loaded_data)}")
-
-                # Ensure it's a tensor
-                if not isinstance(token_tensor, torch.Tensor):
-                    token_tensor = torch.tensor(token_tensor)
-
-                # Ensure it's a 1D tensor
-                if token_tensor.dim() > 1:
-                    token_tensor = token_tensor.flatten()
-
+                token_tensor = torch.load(file_path, map_location='cpu')
                 all_tokens.append(token_tensor)
-
             except Exception as e:
                 if master_process:
                     print(f"Error loading {file_path}: {e}")
