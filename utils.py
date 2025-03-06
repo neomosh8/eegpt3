@@ -5,6 +5,7 @@ import math
 
 import boto3
 import pandas as pd
+from dotenv import load_dotenv
 # from dotenv import load_dotenv
 from matplotlib.animation import FuncAnimation
 
@@ -14,7 +15,7 @@ import pywt
 import matplotlib.pyplot as plt  # <-- needed for plotting histogram
 from  openai import OpenAI
 
-# load_dotenv()
+load_dotenv()
 wvlet = 'db2'
 level = 4
 client = OpenAI(
@@ -52,6 +53,138 @@ import matplotlib.pyplot as plt
 
 
 def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0,
+                             verbose=True):
+    """
+    Apply continuous wavelet transform (CWT) with emphasis on frequency bands related to
+    higher cognitive functions, emotions, attention, and decision-making.
+
+    Args:
+        window (numpy.ndarray): 2D array (channels x samples).
+        wavelet (str): Wavelet type (default: 'cmor1.5-1.0').
+        scales (list or None): Scales for CWT. If None, computed based on cognitive bands.
+        normalization (bool): If True, apply per-scale z-score normalization to coefficients.
+        sampling_period (float): Sampling period in seconds.
+        verbose (bool): If True, plot the wavelet decomposition result for each channel.
+
+    Returns:
+        tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
+    """
+    num_channels, num_samples = window.shape
+    decomposed_channels = []
+    normalized_data = []
+
+    # Make a copy of the input window data
+    window_normalized = window.copy()
+
+    # Define scales with emphasis on cognitive function bands
+    if scales is None:
+        fs = 1.0 / sampling_period  # For example, if sampling_period = 1/256, then fs = 256 Hz.
+
+        # Define EEG bands with their frequency ranges and cognitive associations
+        eeg_bands = {
+            "delta": (0.1, 4),  # Sleep, unconscious processes
+            "theta": (4, 8),  # Memory, emotional processing, meditation
+            "alpha": (8, 12),  # Attention, inhibition, relaxation, awareness
+            "low_beta": (12, 16),  # Active thinking, focus, problem-solving
+            "mid_beta": (16, 20),  # Active thinking, anxiety
+            "high_beta": (20, 30),  # Alert, anxiety, excitement
+            "low_gamma": (30, 50),  # Cognitive processing, feature binding
+            "high_gamma": (50, 80)  # Advanced cognitive processing
+        }
+
+        # Allocate more scales to bands associated with cognitive functions
+        scales_per_band = {
+            "delta": 15,  # Fewer scales for delta
+            "theta": 60,  # More for memory, emotional processing
+            "alpha": 70,  # Most for attention, awareness
+            "low_beta": 50,  # High for problem-solving, decision-making
+            "mid_beta": 40,  # Good amount for active thinking
+            "high_beta": 30,  # Moderate for alertness
+            "low_gamma": 20,  # Some for cognitive processing
+            "high_gamma": 10  # Fewer for highest frequencies
+        }
+
+        scales = []
+        # Generate scales for each band, with more detail in cognitively important frequencies
+        for band_name, (f_min, f_max) in eeg_bands.items():
+            scale_min = fs / f_max  # Smaller scale for higher frequency components
+            scale_max = fs / f_min  # Larger scale for lower frequency components
+            band_scales = np.logspace(
+                np.log10(scale_min),
+                np.log10(scale_max),
+                scales_per_band[band_name]
+            )
+            scales.extend(band_scales)
+
+        scales = np.unique(np.sort(scales))  # Ensure unique and sorted scales
+
+    # Process each channel
+    for channel_idx in range(num_channels):
+        # Perform continuous wavelet transform on the channel data
+        coeffs, _ = pywt.cwt(window_normalized[channel_idx, :], scales, wavelet, sampling_period=sampling_period)
+        # Take the absolute value to get the magnitude
+        magnitude = np.abs(coeffs)
+
+        # If normalization is enabled, standardize each scale separately
+        if normalization:
+            for j in range(magnitude.shape[0]):
+                mean_scale = np.mean(magnitude[j, :])
+                std_scale = np.std(magnitude[j, :]) if np.std(magnitude[j, :]) > 0 else 1e-8
+                magnitude[j, :] = (magnitude[j, :] - mean_scale) / std_scale
+
+        decomposed_channels.append(magnitude)
+        normalized_data.append(window_normalized[channel_idx, :])
+
+        # If verbose, plot the wavelet coefficients with cognitive band emphasis
+        if verbose:
+            plt.figure(figsize=(12, 8))
+
+            # Use a perceptually uniform colormap for better feature visibility
+            plt.imshow(magnitude, aspect='auto', cmap='plasma',
+                       extent=[0, num_samples, 0, len(scales)], origin='lower')
+
+            # Set custom y-ticks to show frequency instead of scale
+            freq_ticks = []
+            tick_positions = []
+            cognitive_functions = {
+                "delta": "Sleep, unconscious",
+                "theta": "Memory, emotion",
+                "alpha": "Attention, awareness",
+                "low_beta": "Problem-solving",
+                "mid_beta": "Active thinking",
+                "high_beta": "Alertness",
+                "low_gamma": "Cognitive processing",
+                "high_gamma": "Advanced cognition"
+            }
+
+            # Add markers for EEG band boundaries
+            for band, (f_min, f_max) in eeg_bands.items():
+                # Find scales closest to band boundaries
+                s_min_idx = np.argmin(np.abs(scales - fs / f_max))
+                s_max_idx = np.argmin(np.abs(scales - fs / f_min))
+
+                # Add frequency ticks
+                freq_ticks.extend([f"{f_max} Hz", f"{f_min} Hz"])
+                tick_positions.extend([s_min_idx, s_max_idx])
+
+                # Add band label with cognitive function
+                mid_pos = (s_min_idx + s_max_idx) // 2
+                plt.text(num_samples + 10, mid_pos, f"{band}: {cognitive_functions[band]}",
+                         verticalalignment='center', fontsize=8)
+
+            plt.yticks(tick_positions, freq_ticks)
+
+            plt.colorbar(label='Coefficient (normalized)' if normalization else 'Coefficient magnitude')
+            plt.title(f'Wavelet Decomposition (Ch{channel_idx}) - Enhanced for Cognitive Functions')
+            plt.xlabel('Time')
+            plt.ylabel('Frequency (Hz)')
+            plt.tight_layout()
+            plt.show()
+    print(np.shape(decomposed_channels),np.shape(np.array(normalized_data)))
+    return (decomposed_channels, scales, num_samples, np.array(normalized_data))
+
+
+def wavelet_decompose_window_(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0,
                              verbose=True):
     """
     Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
@@ -123,52 +256,6 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
     return (decomposed_channels, scales, num_samples, np.array(normalized_data))
 
 
-def wavelet_decompose_window_old(window, wavelet='cmor1.5-1.0', scales=None, normalization=True, sampling_period=1.0):
-    """
-    Apply continuous wavelet transform (CWT) with Morlet wavelet to each channel in the window.
-
-    Args:
-        window (numpy.ndarray): 2D array (channels x samples).
-        wavelet (str): Wavelet type (default: 'cmor1.5-1.0').
-        scales (list): Scales for CWT (if None, computed for EEG bands).
-        normalization (bool): If True, apply z-score normalization.
-        sampling_period (float): Sampling period in seconds.
-
-    Returns:
-        tuple: (decomposed_channels, scales, original_signal_length, normalized_data)
-               - decomposed_channels: List of 2D arrays, each (scales, time_points), real-valued magnitudes.
-               - scales: Array of scales used in CWT.
-               - original_signal_length: Number of samples in the input signal.
-               - normalized_data: List of normalized input signals.
-    """
-    num_channels, num_samples = window.shape
-    decomposed_channels = []
-    normalized_data = []
-
-
-    window_normalized = window.copy()
-
-    # Define scales for EEG bands if not provided
-    if scales is None:
-        fs = 1.0 / sampling_period  # fs = 256 Hz in your case
-        eeg_bands = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 12), "beta": (12, 30), "gamma": (30, 40)}
-        scales_per_band = 5  # Number of scales per band
-        scales = []
-        for f_min, f_max in eeg_bands.values():
-            scale_min = fs / f_max  # Smaller scale for higher frequency
-            scale_max = fs / f_min  # Larger scale for lower frequency
-            band_scales = np.logspace(np.log10(scale_min), np.log10(scale_max), scales_per_band)
-            scales.extend(band_scales)
-        scales = np.unique(np.sort(scales))  # Ensure unique, sorted scales
-
-    # Perform CWT per channel and compute magnitude
-    for channel_idx in range(num_channels):
-        coeffs, _ = pywt.cwt(window_normalized[channel_idx, :], scales, wavelet, sampling_period=sampling_period)
-        magnitude = np.abs(coeffs)  # Convert complex coefficients to real-valued magnitude, shape (scales, time_points)
-        decomposed_channels.append(magnitude)
-        normalized_data.append(window_normalized[channel_idx, :])
-
-    return (decomposed_channels, scales, num_samples, np.array(normalized_data))
 def wavelet_reconstruct_window(decomposed_channels, coeffs_lengths, num_samples, wavelet='db2'):
     """
     Reconstruct the normalized signal from decomposed channels.

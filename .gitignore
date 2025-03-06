@@ -31,3 +31,4 @@ log.txt
 final_report.txt
 *.pt
 *.log
+/training_data

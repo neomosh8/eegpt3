@@ -11,7 +11,7 @@ from create_text_files_from_csv_3 import create_regional_bipolar_channels
 from utils import wavelet_decompose_window, preprocess_data, calculate_sps, call_gpt_for_instructions
 
 
-def process_csv_for_coeffs(csv_path, window_length_sec=2, num_samples_per_file=10, z_threshold=2):
+def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file=10, z_threshold=2):
     """
     Processes a local CSV file containing EEG signal data to compute and save wavelet decomposition coefficients.
 
@@ -147,7 +147,7 @@ def process_csv_for_coeffs(csv_path, window_length_sec=2, num_samples_per_file=1
             scales=None,
             normalization=True,
             sampling_period=1.0 / new_sps_val,
-            verbose=False
+            verbose=True
         )
 
         # Ensure we have at least 3 channels (one per region)
