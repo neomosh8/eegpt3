@@ -136,12 +136,12 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 65  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        # n_layer: int = 12  # number of layers
-        # n_head: int = 12  # number of heads
-        # n_embd: int = 768  # embedding dimension
-        n_layer: int = 12
-        n_head: int = 12
-        n_embd: int = 384
+        n_layer: int = 12  # number of layers
+        n_head: int = 12  # number of heads
+        n_embd: int = 768  # embedding dimension
+        # n_layer: int = 12
+        # n_head: int = 12
+        # n_embd: int = 384
     else:
         # n_layer: int = 36
         # n_head: int = 20
@@ -461,8 +461,8 @@ raw_model = model.module if ddp else model  # always contains the "raw" unwrappe
 
 max_lr = 4e-3
 min_lr = 1e-4
-max_steps = math.ceil(200e6 // total_batch_size) * epoch_num
-warmup_steps = int(0.02 * max_steps)
+max_steps = math.ceil(400e6 // total_batch_size) * epoch_num
+warmup_steps = int(0.1 * max_steps)
 
 if master_process:
     print("Max Steps: ", max_steps)
@@ -641,7 +641,7 @@ for step in range(start_step, max_steps):
         train_losses.append(train_loss_val)
         train_steps.append(step)
         # Plot every several steps
-        if step % 50 == 0:
+        if step % 10 == 0:
             # ---- 1) Figure for Train Loss & Val Loss ----
             plt.figure(figsize=(10, 6))
             plt.plot(train_steps, train_losses, label='Train Loss', color='#63B8FF', alpha=0.6)
