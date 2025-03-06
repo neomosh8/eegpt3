@@ -510,12 +510,12 @@ if __name__ == "__main__":
 
     # List CSV files from S3
     print("Listing S3 folders...")
-    folders = list_s3_folders()[0:2]  # Process first 40 folders
+    folders = list_s3_folders()[0:40]  # Process first 40 folders
 
     csv_files = []
     for i, folder in enumerate(folders, 1):
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
-        files = list_csv_files_in_folder(folder)[0:2]
+        files = list_csv_files_in_folder(folder)
         csv_files.extend(files)
 
     print(f"Done listing. Found {len(csv_files)} CSV files to process.")
