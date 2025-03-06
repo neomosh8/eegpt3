@@ -402,9 +402,9 @@ def moving_average(values, window_size=10):
 
 
 if small_model:
-    epoch_num = 50
+    epoch_num = 10
     total_batch_size = 524288
-    B = 64
+    B = 32
     T = 1024
 else:
     # epoch_num = 20
