@@ -136,9 +136,12 @@ class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 65  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
-        n_embd: int = 768  # embedding dimension
+        # n_layer: int = 12  # number of layers
+        # n_head: int = 12  # number of heads
+        # n_embd: int = 768  # embedding dimension
+        n_layer: int = 12
+        n_head: int = 12
+        n_embd: int = 384
     else:
         # n_layer: int = 36
         # n_head: int = 20
@@ -458,7 +461,7 @@ raw_model = model.module if ddp else model  # always contains the "raw" unwrappe
 
 max_lr = 4e-3
 min_lr = 1e-4
-max_steps = math.ceil(1e9 // total_batch_size) * epoch_num
+max_steps = math.ceil(200e6 // total_batch_size) * epoch_num
 warmup_steps = int(0.02 * max_steps)
 
 if master_process:
