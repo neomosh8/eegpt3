@@ -675,7 +675,23 @@ def main():
         state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
 
         # Load weights into evaluation model
-        eval_model.load_state_dict(state_dict)
+        # Clean up state dict keys by removing the unexpected prefixes
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.module.'):
+                # Remove the '_orig_mod.module.' prefix
+                new_key = key[len('_orig_mod.module.'):]
+                cleaned_state_dict[new_key] = value
+            elif key.startswith('module.'):
+                # Handle case where only 'module.' prefix is present (DDP without compile)
+                new_key = key[len('module.'):]
+                cleaned_state_dict[new_key] = value
+            else:
+                # Keep keys that don't have these prefixes
+                cleaned_state_dict[key] = value
+
+        # Load the cleaned state dict
+        eval_model.load_state_dict(cleaned_state_dict)
         eval_model.eval()
 
         # Reconstruction visualization
