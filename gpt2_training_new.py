@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
-from gpt2_training import moving_average
 
 small_model = True
 resume = False
@@ -20,6 +19,22 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from matplotlib import pyplot as plt
+def moving_average(values, window_size=10):
+    """
+    Compute the simple moving average of a list of values.
+    """
+    if len(values) < window_size:
+        return values  # not enough data, just return as-is
+
+    # We'll output an array of the same length,
+    # where each index i is the average of the last `window_size` points
+    # (or fewer at the start).
+    averaged = []
+    for i in range(len(values)):
+        start = max(0, i - window_size + 1)
+        chunk = values[start : i + 1]
+        averaged.append(sum(chunk) / len(chunk))
+    return averaged
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
