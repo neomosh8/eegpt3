@@ -199,15 +199,21 @@ def process_csv_with_tokenizer(csv_path, tokenizer, window_length_sec=2, z_thres
             verbose=False
         )
 
-        # Ensure we have enough channels
+        # Check if we have the expected number of channels
         if len(decomposed_channels) < len(regional_preprocessed):
             continue
 
-        # Use the tokenizer to encode each window
+        # Combine the decomposed channels into a single 3-channel image
+        # Create a combined image with shape [3, H, W] for the tokenizer
+        combined_image = np.stack([
+            decomposed_channels[idx] for idx, region in enumerate(regional_preprocessed.keys())
+        ], axis=0)
+
+        # Encode the combined image with the tokenizer
+        token_indices = tokenizer.encode(combined_image)
+
+        # Store the token indices for each region
         for idx, region in enumerate(regional_preprocessed.keys()):
-            coeff_image = decomposed_channels[idx]
-            # Encode with the tokenizer
-            token_indices = tokenizer.encode(coeff_image)
             # Flatten and store the token indices
             token_lists[region].append(token_indices.flatten())
 
