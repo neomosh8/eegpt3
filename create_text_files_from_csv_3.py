@@ -10,19 +10,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
-from matplotlib.animation import FuncAnimation
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# --------------------------------------------------------------------------------
-# Wavelet parameters
-wvlet = 'db2'
-level = 4
-epoch_len = 1.96
+# Import the VQCAETokenizer class (definition from previous code)
+from VQCAE_TOKENIZER import (VQCAETokenizer)
 
 # --------------------------------------------------------------------------------
 # Import your custom wavelet/quantization utils (or define them here if needed)
@@ -39,13 +35,9 @@ from utils import (
     list_csv_files_in_folder
 )
 
-# --------------------------------------------------------------------------------
-# Import your CAE class definition (adjust the module name/path as needed)
-# For example, if your CAE class is defined in a module called cae_model.py:
-from train_kmean import CAE
 
 # --------------------------------------------------------------------------------
-
+# Reuse the existing create_regional_bipolar_channels function
 def create_regional_bipolar_channels(df, channels_to_drop):
     valid_channels = [col for col in df.columns if col not in channels_to_drop]
     frontal = []
@@ -103,205 +95,259 @@ def create_regional_bipolar_channels(df, channels_to_drop):
         "motor_temporal": ct_bipolar
     }
 
-# --------------------------------------------------------------------------------
-# Updated token generation function using CAE encoder and GMM
-def generate_quantized_files_local(csv_file: str,
-                                   output_folder: str,
-                                   gmm_model_paths: dict,
-                                   cae_model_paths: dict,
-                                   window_length_sec: float = 2.0,
-                                   wvlet: str = 'cmor1.5-1.0',
-                                   scales: list = None,
-                                   sampling_period: float = None):
-    """
-    Generate quantized token files from a CSV file using wavelet decomposition,
-    a pre-trained CAE encoder, and pre-trained GMM models.
-    """
-    base_name = os.path.splitext(os.path.basename(csv_file))[0]
-    try:
-        # Load and preprocess CSV data
-        df = pd.read_csv(csv_file)
-        all_columns = list(df.columns)
-        instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
-        if instructions.get("action") == "skip":
-            print(f"Skipping dataset '{base_name}' as instructed by GPT.")
-            return base_name, 0, True, "Skipped by GPT"
-
-        channels_to_drop = instructions.get("channels_to_drop", [])
-        print(f"Processing dataset '{base_name}'. Dropping channels: {channels_to_drop}")
-
-        # Create output directory for this dataset
-        dataset_dir = os.path.join(output_folder, base_name)
-        os.makedirs(dataset_dir, exist_ok=True)
-
-        # --- Step 1: Create Regional Bipolar Channels ---
-        regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
-
-        # Plot regional bipolar channels
-        plt.figure(figsize=(15, 10))
-        for idx, (region, signal) in enumerate(regional_bipolar.items(), 1):
-            plt.subplot(3, 1, idx)
-            plt.plot(signal, label=f"{region.capitalize()} Bipolar", color=['blue', 'red', 'green'][idx-1])
-            plt.title(f"{region.capitalize()} Bipolar Channel - {base_name}")
-            plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(dataset_dir, f"{base_name}_regional_bipolar_channels.png"))
-        plt.close()
-
-        # --- Step 2: Preprocess Signals ---
-        original_sps = calculate_sps(csv_file)
-        regional_preprocessed = {}
-        new_sps_val = None
-        for key, signal_array in regional_bipolar.items():
-            signal_2d = signal_array[np.newaxis, :]
-            preprocessed_signal, new_sps = preprocess_data(signal_2d, original_sps)
-            regional_preprocessed[key] = preprocessed_signal[0, :]
-            if new_sps_val is None:
-                new_sps_val = new_sps
-
-        # Global normalization (consistent with training)
-        all_data = np.concatenate([regional_preprocessed[region] for region in regional_preprocessed])
-        global_mean = np.mean(all_data)
-        global_std = np.std(all_data) if np.std(all_data) > 0 else 1e-8
-        for key in regional_preprocessed:
-            regional_preprocessed[key] = (regional_preprocessed[key] - global_mean) / global_std
-
-        # Plot preprocessed signals
-        plt.figure(figsize=(15, 10))
-        for idx, (region, signal) in enumerate(regional_preprocessed.items(), 1):
-            plt.subplot(3, 1, idx)
-            plt.plot(signal, label=f"{region.capitalize()} Preprocessed", color=['blue', 'red', 'green'][idx-1])
-            plt.title(f"Preprocessed {region.capitalize()} Bipolar Channel - {base_name}")
-            plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(dataset_dir, f"{base_name}_regional_preprocessed_bipolar_channels.png"))
-        plt.close()
-
-        # --- Step 3: Load Pre-trained Models ---
-        # Load GMM models (saved with joblib)
-        gmm_models = {region: joblib.load(path) for region, path in gmm_model_paths.items()}
-        # Load CAE encoder models (saved as .pt files)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        cae_encoders = {}
-        for region, path in cae_model_paths.items():
-            cae_model = CAE(input_shape=(25, 512), latent_dim=32).to(device)
-            cae_model.load_state_dict(torch.load(path, map_location=device))
-            cae_model.eval()
-            # Extract encoder part (assuming similar to training)
-            encoder = nn.Sequential(*list(cae_model.encoder.children()))
-            encoder.eval()
-            cae_encoders[region] = encoder
-
-        # --- Step 4: Wavelet Decomposition, CAE Encoding, and Quantization ---
-        min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed)
-        n_window_samples = int(window_length_sec * new_sps_val)
-        num_windows = min_length // n_window_samples
-        sampling_period = 1.0 / new_sps_val if sampling_period is None else sampling_period
-
-        tokens_dict = {region: [] for region in ["frontal", "motor_temporal", "parietal_occipital"]}
-        regions = list(tokens_dict.keys())
-
-        for i in range(num_windows):
-            window_start = i * n_window_samples
-            window_end = window_start + n_window_samples
-            # For wavelet decomposition, we stack signals from all regions
-            window_data = np.vstack([regional_preprocessed[region][window_start:window_end] for region in regions])
-
-            # Perform CWT with Morlet wavelet (or other as specified)
-            decomposed_channels, scales, num_samples, normalized_data = wavelet_decompose_window(
-                window_data,
-                wavelet=wvlet,
-                scales=scales,
-                normalization=False,  # Already normalized globally
-                sampling_period=sampling_period
-            )
-
-            # For each region, obtain the corresponding 2D coefficient array,
-            # feed it through the CAE encoder, then predict a token using the GMM.
-            for idx, region in enumerate(regions):
-                # Assume decomposed_channels[idx] is a 2D array with shape (25,512)
-                coeffs_2d = decomposed_channels[idx]
-                # Convert to tensor with shape (1, 1, 25, 512)
-                coeffs_tensor = torch.tensor(coeffs_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    latent = cae_encoders[region](coeffs_tensor)  # shape (1, latent_dim)
-                latent_np = latent.cpu().numpy()  # (1, latent_dim)
-                token = str(gmm_models[region].predict(latent_np)[0])
-                tokens_dict[region].append(token)
-
-        # Verify token lengths
-        lengths = {region: len(tokens) for region, tokens in tokens_dict.items()}
-        print(f"Token counts per region for {base_name}: {lengths}")
-        if len(set(lengths.values())) != 1:
-            print("Warning: Token sequences for regions have different lengths.")
-
-        # --- Step 5: Write Token Files ---
-        token_file_paths = {}
-        for region, tokens in tokens_dict.items():
-            token_fname = f"{base_name}_quantized_coeffs_{region}.txt"
-            out_fname = os.path.join(output_folder, token_fname)
-            with open(out_fname, "w") as f_out:
-                f_out.write(" ".join(tokens))
-            token_file_paths[region] = out_fname
-        print(f"Generated quantized files for {csv_file}.")
-
-        total_tokens = sum(lengths.values())
-        return base_name, total_tokens, False, "Processed successfully"
-
-    except Exception as e:
-        print(f"Error processing dataset '{base_name}': {e}")
-        return base_name, 0, True, f"Error: {str(e)}"
 
 # --------------------------------------------------------------------------------
-# S3 processing functions
-def process_csv_file_s3(csv_key: str,
-                        bucket: str = "dataframes--use1-az6--x-s3",
-                        local_dir: str = "/tmp",
-                        output_prefix: str = "output_emotiv",
-                        gmm_model_paths: dict = None,
-                        cae_model_paths: dict = None):
+# New function to process CSV file with sequential window tokenization
+def process_csv_with_tokenizer(csv_path, tokenizer, window_length_sec=2, z_threshold=2):
     """
-    Downloads the CSV file from S3, processes it locally, and (if not skipped)
-    uploads the resulting token files back to S3.
+    Process a CSV file with the VQCAE tokenizer, processing sequential windows
+    and encoding them into tokens.
+
+    Parameters:
+        csv_path (str): Path to the CSV file.
+        tokenizer (VQCAETokenizer): The trained VQCAE tokenizer.
+        window_length_sec (float): Window length in seconds (default: 2).
+        z_threshold (float): Z-score threshold for artifact rejection (default: 2).
+
+    Returns:
+        tokens_tensor_dict (dict): Dictionary with a tensor of tokens for each region.
+        windows_kept (int): Number of windows kept after artifact rejection.
+        windows_total (int): Total number of windows.
     """
+    # Read CSV into a DataFrame
+    df = pd.read_csv(csv_path)
+    base_name = os.path.splitext(os.path.basename(csv_path))[0]
+    all_columns = list(df.columns)
+    instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
+    original_sps = calculate_sps(csv_path)
+
+    if instructions.get("action") == "skip":
+        print(f"Skipping dataset '{base_name}'.")
+        return {}, 0, 0
+
+    channels_to_drop = instructions.get("channels_to_drop", [])
+    print(f"Processing '{base_name}'. Dropping: {channels_to_drop}")
+
+    # Create regional bipolar channels
+    regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
+    channels = list(regional_bipolar.keys())
+    data_2d = np.vstack([regional_bipolar[ch] for ch in channels])
+
+    # Preprocess data
+    preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
+    regional_preprocessed = {ch: preprocessed_data[i, :] for i, ch in enumerate(channels)}
+    new_sps_val = new_sps
+
+    # Standardize the signals
+    for key in regional_preprocessed:
+        signal = regional_preprocessed[key]
+        mean_signal = np.mean(signal)
+        std_signal = np.std(signal) if np.std(signal) > 0 else 1e-8
+        regional_preprocessed[key] = (signal - mean_signal) / std_signal
+
+    # Calculate window parameters
+    min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed)
+    if min_length == 0:
+        return {}, 0, 0
+
+    n_window_samples = int(window_length_sec * new_sps_val)
+    num_windows = min_length // n_window_samples
+
+    # Compute window statistics for artifact rejection
+    window_stats = []
+    for i in range(num_windows):
+        window_start = i * n_window_samples
+        window_end = window_start + n_window_samples
+        window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
+                                 for region in regional_preprocessed])
+        window_mean = np.mean(window_data)
+        window_stats.append(window_mean)
+
+    window_stats = np.array(window_stats)
+    window_mu = np.mean(window_stats)
+    window_sigma = np.std(window_stats) if np.std(window_stats) > 0 else 1e-8
+    z_scores = (window_stats - window_mu) / window_sigma
+
+    keep_indices = np.where(np.abs(z_scores) <= z_threshold)[0]
+    rejected_indices = np.where(np.abs(z_scores) > z_threshold)[0]
+    discarded_count = len(rejected_indices)
+    print(f"Discarded {discarded_count} windows out of {num_windows} due to artifact rejection (|Z| > {z_threshold}).")
+
+    # Initialize token lists for each region
+    token_lists = {region: [] for region in regional_preprocessed.keys()}
+
+    # Process all windows sequentially (not randomly sampled)
+    for i in range(num_windows):
+        # Skip windows that didn't pass artifact rejection
+        if i not in keep_indices:
+            continue
+
+        window_start = i * n_window_samples
+        window_end = window_start + n_window_samples
+        window_data = np.vstack([
+            regional_preprocessed[region][window_start:window_end]
+            for region in regional_preprocessed
+        ])
+
+        # Perform wavelet decomposition
+        decomposed_channels, _, _, _ = wavelet_decompose_window(
+            window_data,
+            wavelet='cmor1.5-1.0',
+            scales=None,
+            normalization=True,
+            sampling_period=1.0 / new_sps_val,
+            verbose=False
+        )
+
+        # Ensure we have enough channels
+        if len(decomposed_channels) < len(regional_preprocessed):
+            continue
+
+        # Use the tokenizer to encode each window
+        for idx, region in enumerate(regional_preprocessed.keys()):
+            coeff_image = decomposed_channels[idx]
+            # Encode with the tokenizer
+            token_indices = tokenizer.encode(coeff_image)
+            # Flatten and store the token indices
+            token_lists[region].append(token_indices.flatten())
+
+    # For each region, concatenate all tokens and add EOS token
+    tokens_tensor_dict = {}
+    for region, tokens in token_lists.items():
+        if not tokens:
+            continue
+
+        # Concatenate all tokens
+        all_tokens = torch.cat(tokens)
+
+        # Add EOS token
+        eos_token = torch.tensor([tokenizer.get_eos_token()], device=all_tokens.device)
+        all_tokens_with_eos = torch.cat([all_tokens, eos_token])
+
+        # Store in dictionary
+        tokens_tensor_dict[region] = all_tokens_with_eos
+
+    return tokens_tensor_dict, len(keep_indices), num_windows
+
+
+# --------------------------------------------------------------------------------
+# Function to process a single CSV file, downloading from S3 if needed
+def process_csv_file_with_tokenizer(csv_key, tokenizer_model_path,
+                                    bucket="dataframes--use1-az6--x-s3",
+                                    local_dir="/tmp",
+                                    output_dir="training_data_shards"):
+    """
+    Downloads a CSV file from S3, processes it using the VQCAE tokenizer,
+    and saves encoded tokens as tensor files.
+
+    Args:
+        csv_key (str): S3 key for the CSV file
+        tokenizer_model_path (str): Path to the trained VQCAE model
+        bucket (str): S3 bucket name
+        local_dir (str): Local directory for temporary files
+        output_dir (str): Output directory for tokenized tensors
+
+    Returns:
+        tuple: (folder, base_name, total_tokens, skipped, reason)
+    """
+    # Create required directories
     s3 = boto3.client("s3")
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     csv_name = os.path.basename(csv_key)
+    base_name = os.path.splitext(csv_name)[0]
     local_csv = os.path.join(local_dir, csv_name)
-    s3.download_file(bucket, csv_key, local_csv)
 
-    # Extract folder name from the S3 key.
-    folder = os.path.dirname(csv_key)  # e.g., "ds004504"
+    try:
+        # Download the CSV file
+        print(f"Downloading {csv_key} to {local_csv}")
+        s3.download_file(bucket, csv_key, local_csv)
 
-    result = generate_quantized_files_local(csv_file=local_csv,
-                                              output_folder=local_dir,
-                                              gmm_model_paths=gmm_model_paths,
-                                              cae_model_paths=cae_model_paths)
-    base_name, token_count, skipped, reason = result
+        # Extract folder name from the S3 key
+        folder = os.path.dirname(csv_key)
 
-    if not skipped:
-        for region in ["frontal", "motor_temporal", "parietal_occipital"]:
-            token_fname = f"{base_name}_quantized_coeffs_{region}.txt"
-            fpath = os.path.join(local_dir, token_fname)
-            s3.upload_file(fpath, bucket, f"{output_prefix}/{token_fname}")
-            os.remove(fpath)
-    os.remove(local_csv)
-    return folder, base_name, token_count, skipped, reason
+        # Initialize tokenizer
+        tokenizer = VQCAETokenizer(model_path=tokenizer_model_path)
 
-def parallel_process_csv_files(csv_files, gmm_model_paths, cae_model_paths):
+        # Process the CSV and get tokens
+        tokens_dict, windows_kept, windows_total = process_csv_with_tokenizer(
+            local_csv, tokenizer)
+
+        # Skip if no windows were kept
+        if windows_kept == 0:
+            if os.path.exists(local_csv):
+                os.remove(local_csv)
+            return folder, base_name, 0, True, "No valid windows"
+
+        # For each region, save token tensor
+        total_tokens = 0
+        for region, tokens in tokens_dict.items():
+            if tokens is None or len(tokens) == 0:
+                continue
+
+            # Create output filename based on region
+            output_file = f"{base_name}_{region}_tokens.pt"
+            output_path = os.path.join(output_dir, output_file)
+
+            # Save the tensor
+            torch.save(tokens, output_path)
+            print(f"Saved {len(tokens)} tokens to {output_path}")
+
+            # Track total tokens
+            total_tokens += len(tokens)
+
+        # Clean up local CSV file
+        if os.path.exists(local_csv):
+            os.remove(local_csv)
+
+        return folder, base_name, total_tokens, False, f"Processed {windows_kept}/{windows_total} windows"
+
+    except Exception as e:
+        if os.path.exists(local_csv):
+            os.remove(local_csv)
+        print(f"Error processing {csv_key}: {e}")
+        return folder, base_name, 0, True, f"Error: {str(e)}"
+
+
+# --------------------------------------------------------------------------------
+# Function to process multiple CSV files in parallel
+def parallel_process_csv_files_with_tokenizer(csv_files, tokenizer_model_path,
+                                              bucket="dataframes--use1-az6--x-s3",
+                                              local_dir="/tmp",
+                                              output_dir="training_data_shards"):
     """
-    Processes CSV files in parallel.
-    Returns a list of tuples (folder, base_name, total_tokens, skipped, reason) for all files.
+    Processes CSV files in parallel using the VQCAE tokenizer.
+
+    Args:
+        csv_files (list): List of CSV file S3 keys
+        tokenizer_model_path (str): Path to the trained VQCAE model
+        bucket (str): S3 bucket name
+        local_dir (str): Local directory for temporary files
+        output_dir (str): Output directory for tokenized tensors
+
+    Returns:
+        list: List of results tuples (folder, base_name, total_tokens, skipped, reason)
     """
     results = []
     max_workers = max(multiprocessing.cpu_count() // 3, 1)
     total = len(csv_files)
+
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_csv_file_s3, f,
-                                   gmm_model_paths=gmm_model_paths,
-                                   cae_model_paths=cae_model_paths): i
-                                   for i, f in enumerate(csv_files, start=1)}
+        futures = {}
+        for i, csv_file in enumerate(csv_files, start=1):
+            future = executor.submit(
+                process_csv_file_with_tokenizer,
+                csv_file,
+                tokenizer_model_path,
+                bucket,
+                local_dir,
+                output_dir
+            )
+            futures[future] = i
+
         for future in as_completed(futures):
             idx = futures[future]
             csvfile = csv_files[idx - 1]
@@ -309,10 +355,13 @@ def parallel_process_csv_files(csv_files, gmm_model_paths, cae_model_paths):
                 res = future.result()
                 results.append(res)
                 folder, base, token_count, skipped, reason = res
-                print(f"[{idx}/{total}] Done: {csvfile} -> Folder: {folder}, DB: {base}, tokens: {token_count}, skipped: {skipped}, reason: {reason}")
+                print(
+                    f"[{idx}/{total}] Done: {csvfile} -> Folder: {folder}, DB: {base}, tokens: {token_count}, skipped: {skipped}, reason: {reason}")
             except Exception as e:
                 print(f"Error processing {csvfile}: {e}")
+
     return results
+
 
 def write_final_report(results):
     """
@@ -344,50 +393,39 @@ def write_final_report(results):
     print(f"Final report written to {report_file}")
 
 # --------------------------------------------------------------------------------
-def download_model_from_s3(s3_client, bucket, key, local_dir):
-    local_path = os.path.join(local_dir, os.path.basename(key))
-    s3_client.download_file(bucket, key, local_path)
-    return local_path
-
-# --- MAIN EXECUTION ---
+# Main execution
 if __name__ == "__main__":
-    # Define S3 bucket and a local temporary directory to store downloaded models.
+    # Configuration parameters
     bucket = "dataframes--use1-az6--x-s3"
-    local_model_dir = os.path.join(tempfile.gettempdir(), "models")
-    os.makedirs(local_model_dir, exist_ok=True)
-    s3 = boto3.client("s3")
+    local_dir = "/tmp/eeg_processing"
+    output_dir = "training_data_shards"
+    tokenizer_model_path = "output/vqcae_final.pt"  # Update with your model path
 
-    # Download CAE and GMM models for each region from S3.
-    regions = ["frontal", "motor_temporal", "parietal_occipital"]
-    gmm_model_paths = {}
-    cae_model_paths = {}
-    for region in regions:
-        gmm_key = f"gmm_models/gmm_{region}.pkl"
-        cae_key = f"cae_models/cae_{region}.pt"
-        gmm_local_path = download_model_from_s3(s3, bucket, gmm_key, local_model_dir)
-        cae_local_path = download_model_from_s3(s3, bucket, cae_key, local_model_dir)
-        gmm_model_paths[region] = gmm_local_path
-        cae_model_paths[region] = cae_local_path
-        print(f"Downloaded {region} models to local paths:\n  GMM: {gmm_local_path}\n  CAE: {cae_local_path}")
+    # Ensure the output directory exists
+    os.makedirs(output_dir, exist_ok=True)
 
     # List CSV files from S3
-    folders = list_s3_folders()[0:40]
+    print("Listing S3 folders...")
+    folders = list_s3_folders()[0:5]  # Process first 40 folders
+
     csv_files = []
-    i = 1
-    for folder in folders:
+    for i, folder in enumerate(folders, 1):
         print(f"{i}/{len(folders)}: Looking into folder: {folder}")
-        files = list_csv_files_in_folder(folder)
+        files = list_csv_files_in_folder(folder)[0:2]
         csv_files.extend(files)
-        i += 1
-    print(f"Done listing. Total files: {len(csv_files)}")
 
-    # Option 1: Process all CSV files in parallel.
-    results = parallel_process_csv_files(csv_files, gmm_model_paths, cae_model_paths)
+    print(f"Done listing. Found {len(csv_files)} CSV files to process.")
 
-    # Option 2: For testing, process a single CSV file from S3 locally.
-    # Uncomment the following lines to test with a single file.
-    # result = process_csv_file_s3(csv_files[0], gmm_model_paths=gmm_model_paths, cae_model_paths=cae_model_paths)
-    # results = [result]
+    # Process all CSV files in parallel using the VQCAE tokenizer
+    results = parallel_process_csv_files_with_tokenizer(
+        csv_files,
+        tokenizer_model_path,
+        bucket=bucket,
+        local_dir=local_dir,
+        output_dir=output_dir
+    )
 
-    # Write final report with overall statistics.
+    # Write the final report
     write_final_report(results)
+
+    print(f"Processing complete. Token files saved to: {output_dir}")
