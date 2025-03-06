@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
-small_model = False
+small_model = True
 resume = False
 
 # run the training loop
@@ -134,7 +134,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 6460  # Update this based on your VQCAE tokenizer vocab size
+    vocab_size: int = 65  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
         n_layer: int = 12  # number of layers
         n_head: int = 12  # number of heads
