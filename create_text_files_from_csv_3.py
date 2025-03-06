@@ -244,7 +244,7 @@ def process_csv_file_with_tokenizer(csv_key, tokenizer_model_path,
                                     output_dir="training_data_shards"):
     """
     Downloads a CSV file from S3, processes it using the VQCAE tokenizer,
-    and saves encoded tokens as tensor files.
+    and saves encoded tokens as a single tensor file.
 
     Args:
         csv_key (str): S3 key for the CSV file
@@ -278,44 +278,142 @@ def process_csv_file_with_tokenizer(csv_key, tokenizer_model_path,
         # Initialize tokenizer
         tokenizer = VQCAETokenizer(model_path=tokenizer_model_path)
 
-        # Process the CSV and get tokens
-        tokens_dict, windows_kept, windows_total = process_csv_with_tokenizer(
-            local_csv, tokenizer)
+        # Read CSV into a DataFrame
+        df = pd.read_csv(local_csv)
+        all_columns = list(df.columns)
+        instructions = call_gpt_for_instructions(channel_names=all_columns, dataset_id=base_name)
+        original_sps = calculate_sps(local_csv)
 
-        # Skip if no windows were kept
-        if windows_kept == 0:
+        if instructions.get("action") == "skip":
+            print(f"Skipping dataset '{base_name}'.")
             if os.path.exists(local_csv):
                 os.remove(local_csv)
-            return folder, base_name, 0, True, "No valid windows"
+            return folder, base_name, 0, True, "Skipped by GPT"
 
-        # For each region, save token tensor
-        total_tokens = 0
-        for region, tokens in tokens_dict.items():
-            if tokens is None or len(tokens) == 0:
+        channels_to_drop = instructions.get("channels_to_drop", [])
+        print(f"Processing '{base_name}'. Dropping: {channels_to_drop}")
+
+        # Create regional bipolar channels
+        regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
+        channels = list(regional_bipolar.keys())
+        data_2d = np.vstack([regional_bipolar[ch] for ch in channels])
+
+        # Preprocess data
+        preprocessed_data, new_sps = preprocess_data(data_2d, original_sps)
+        regional_preprocessed = {ch: preprocessed_data[i, :] for i, ch in enumerate(channels)}
+        new_sps_val = new_sps
+
+        # Standardize the signals
+        for key in regional_preprocessed:
+            signal = regional_preprocessed[key]
+            mean_signal = np.mean(signal)
+            std_signal = np.std(signal) if np.std(signal) > 0 else 1e-8
+            regional_preprocessed[key] = (signal - mean_signal) / std_signal
+
+        # Calculate window parameters
+        min_length = min(len(regional_preprocessed[region]) for region in regional_preprocessed)
+        if min_length == 0:
+            if os.path.exists(local_csv):
+                os.remove(local_csv)
+            return folder, base_name, 0, True, "No valid data in regional channels"
+
+        n_window_samples = int(2.0 * new_sps_val)  # 2 second windows
+        num_windows = min_length // n_window_samples
+
+        # Compute window statistics for artifact rejection
+        window_stats = []
+        for i in range(num_windows):
+            window_start = i * n_window_samples
+            window_end = window_start + n_window_samples
+            window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
+                                     for region in regional_preprocessed])
+            window_mean = np.mean(window_data)
+            window_stats.append(window_mean)
+
+        window_stats = np.array(window_stats)
+        window_mu = np.mean(window_stats)
+        window_sigma = np.std(window_stats) if np.std(window_stats) > 0 else 1e-8
+        z_scores = (window_stats - window_mu) / window_sigma
+
+        keep_indices = np.where(np.abs(z_scores) <= 2.0)[0]  # Z threshold of 2.0
+        rejected_indices = np.where(np.abs(z_scores) > 2.0)[0]
+        discarded_count = len(rejected_indices)
+        print(f"Discarded {discarded_count} windows out of {num_windows} due to artifact rejection (|Z| > 2.0).")
+
+        # Initialize a single token list
+        token_list = []
+
+        # Process all windows sequentially
+        for i in range(num_windows):
+            # Skip windows that didn't pass artifact rejection
+            if i not in keep_indices:
                 continue
 
-            # Create output filename based on region
-            output_file = f"{base_name}_{region}_tokens.pt"
-            output_path = os.path.join(output_dir, output_file)
+            window_start = i * n_window_samples
+            window_end = window_start + n_window_samples
+            window_data = np.vstack([
+                regional_preprocessed[region][window_start:window_end]
+                for region in regional_preprocessed
+            ])
 
-            # Save the tensor
-            torch.save(tokens, output_path)
-            print(f"Saved {len(tokens)} tokens to {output_path}")
+            # Perform wavelet decomposition
+            decomposed_channels, _, _, _ = wavelet_decompose_window(
+                window_data,
+                wavelet='cmor1.5-1.0',
+                scales=None,
+                normalization=True,
+                sampling_period=1.0 / new_sps_val,
+                verbose=False
+            )
 
-            # Track total tokens
-            total_tokens += len(tokens)
+            # Check if we have the expected number of channels
+            if len(decomposed_channels) < len(regional_preprocessed):
+                continue
+
+            # Combine the decomposed channels into a single 3-channel image
+            combined_image = np.stack([
+                decomposed_channels[idx] for idx, region in enumerate(regional_preprocessed.keys())
+            ], axis=0)
+
+            # Encode the combined image with the tokenizer
+            token_indices = tokenizer.encode(combined_image)
+
+            # Store the flattened token indices
+            token_list.append(token_indices.flatten())
+
+        # Check if we have any tokens
+        if not token_list:
+            if os.path.exists(local_csv):
+                os.remove(local_csv)
+            return folder, base_name, 0, True, "No valid windows after artifact rejection"
+
+        # Concatenate all tokens
+        all_tokens = torch.cat(token_list)
+
+        # Add EOS token
+        eos_token = torch.tensor([tokenizer.get_eos_token()], device=all_tokens.device)
+        all_tokens_with_eos = torch.cat([all_tokens, eos_token])
+
+        # Create output filename
+        output_file = f"{base_name}_tokens.pt"
+        output_path = os.path.join(output_dir, output_file)
+
+        # Save the tensor
+        torch.save(all_tokens_with_eos, output_path)
+        total_tokens = len(all_tokens_with_eos)
+        print(f"Saved {total_tokens} tokens to {output_path}")
 
         # Clean up local CSV file
         if os.path.exists(local_csv):
             os.remove(local_csv)
 
-        return folder, base_name, total_tokens, False, f"Processed {windows_kept}/{windows_total} windows"
+        return folder, base_name, total_tokens, False, f"Processed {len(keep_indices)}/{num_windows} windows"
 
     except Exception as e:
         if os.path.exists(local_csv):
             os.remove(local_csv)
         print(f"Error processing {csv_key}: {e}")
-        return folder, base_name, 0, True, f"Error: {str(e)}"
+        return os.path.dirname(csv_key), base_name, 0, True, f"Error: {str(e)}"
 
 
 # --------------------------------------------------------------------------------
