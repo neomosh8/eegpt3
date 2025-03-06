@@ -261,62 +261,34 @@ class EEGTokenDataLoader:
     A data loader that loads EEG token files from a provided list, concatenates them,
     and iterates through the tokens for training/validation.
     """
-    def __init__(
-            self,
-            B: int,  # Batch size
-            T: int,  # Sequence length (context window)
-            process_rank: int,  # For DDP
-            num_processes: int,  # For DDP
-            token_files: list,  # List of token file paths
-            split: str = "train"  # "train" or "val" (for logging purposes)
-    ):
-        """
-        Args:
-            B: Batch size
-            T: Sequence length (context window)
-            process_rank: (DDP) process rank
-            num_processes: total DDP processes
-            token_files: list of paths to token files
-            split: "train" or "val" (for identification/logging)
-        """
+
+    def __init__(self, B, T, process_rank, num_processes, token_files, split):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        self.token_files = token_files
+        self.split = split
 
-        if not token_files:
-            raise ValueError(f"No token files provided for {split} split")
-
-        if ddp_rank == 0:  # Assuming master_process is ddp_rank == 0
-            print(f"Using {len(self.token_files)} files for {split} split")
-
-        # Load all token files and concatenate
+        # Load tokens
         all_tokens = []
-
-        if ddp_rank == 0:
-            print(f"Loading {split} token files...")
-
-        for file_path in self.token_files:
+        for file_path in token_files:
             try:
                 token_tensor = torch.load(file_path, map_location='cpu')
                 all_tokens.append(token_tensor)
             except Exception as e:
-                if ddp_rank == 0:
+                if process_rank == 0:
                     print(f"Error loading {file_path}: {e}")
                 continue
-
-        if not all_tokens:
-            raise ValueError(f"No valid token tensors loaded for {split} split")
-
         self.tokens = torch.cat(all_tokens, dim=0)
+        print(f"Process {process_rank}: Loaded {len(self.tokens)} tokens for {split} split")
 
-        if ddp_rank == 0:
-            print(f"Loaded total of {len(self.tokens)} tokens for {split} split")
+        # Ensure all processes reach this point
+        dist.barrier()
+        print(f"Process {process_rank}: Post-barrier, tokens loaded successfully")
 
-        # Current read position (offset by process_rank for DDP)
         self.current_position = self.B * self.T * self.process_rank
         self.total_len = len(self.tokens)
+        print(f"Process {process_rank}: current_position = {self.current_position}, total_len = {self.total_len}")
 
     def next_batch(self):
         # [Unchanged from original code]
@@ -419,9 +391,17 @@ else:
     train_files = None
     val_files = None
 
-# Broadcast the file lists to all processes
-train_files = dist.broadcast_object_list([train_files], src=0)[0] if train_files is None else train_files
-val_files = dist.broadcast_object_list([val_files], src=0)[0] if val_files is None else val_files
+# Broadcast file lists
+if ddp_rank == 0:
+    objects = [train_files, val_files]
+    dist.broadcast_object_list(objects, src=0)
+    train_files, val_files = objects[0], objects[1]
+else:
+    objects = [None, None]
+    dist.broadcast_object_list(objects, src=0)
+    train_files, val_files = objects[0], objects[1]
+print(f"Process {ddp_rank}: Received {len(train_files)} train files, {len(val_files)} val files")
+dist.barrier()
 # Initialize the data loaders with the new EEGTokenDataLoader
 # Assuming B, T, ddp_rank, ddp_world_size are defined
 train_loader = EEGTokenDataLoader(
