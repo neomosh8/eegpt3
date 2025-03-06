@@ -612,17 +612,17 @@ def main():
         if rank == 0:
             print(f"Epoch {epoch + 1}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
-            # Periodically save checkpoint
-            if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
-                checkpoint = {
-                    "epoch": epoch + 1,
-                    "model_state_dict": model.module.state_dict(),  # Save unwrapped model
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "train_losses": train_losses,
-                    "val_losses": val_losses,
-                }
-                torch.save(checkpoint, f"{args.output_dir}/vqcae_checkpoint_epoch{epoch + 1}.pt")
+            # # Periodically save checkpoint
+            # if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
+            #     checkpoint = {
+            #         "epoch": epoch + 1,
+            #         "model_state_dict": model.module.state_dict(),  # Save unwrapped model
+            #         "optimizer_state_dict": optimizer.state_dict(),
+            #         "scheduler_state_dict": scheduler.state_dict(),
+            #         "train_losses": train_losses,
+            #         "val_losses": val_losses,
+            #     }
+            #     torch.save(checkpoint, f"{args.output_dir}/vqcae_checkpoint_epoch{epoch + 1}.pt")
 
     # Training complete
     end_time = time.time()
