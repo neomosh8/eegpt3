@@ -402,7 +402,7 @@ def moving_average(values, window_size=10):
 
 
 if small_model:
-    epoch_num = 10
+    epoch_num = 4
     total_batch_size = 524288
     B = 8
     T = 1024
@@ -456,8 +456,8 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model  # always contains the "raw" unwrapped model
 
-max_lr = 1e-3
-min_lr = 1e-9
+max_lr = 4e-3
+min_lr = 1e-4
 max_steps = math.ceil(1e9 // total_batch_size) * epoch_num
 warmup_steps = int(0.02 * max_steps)
 
