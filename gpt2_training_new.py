@@ -341,7 +341,7 @@ def moving_average(values, window_size=10):
 if small_model:
     epoch_num = 4
     total_batch_size = 65536
-    B = 2
+    B = 1
     T = 2048
 else:
     # epoch_num = 20
