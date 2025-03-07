@@ -139,9 +139,9 @@ class GPTConfig:
         # n_layer: int = 12  # number of layers
         # n_head: int = 12  # number of heads
         # n_embd: int = 768  # embedding dimension
-        # n_layer: int = 12
-        # n_head: int = 12
-        # n_embd: int = 384
+        n_layer: int = 36
+        n_head: int = 20
+        n_embd: int = 1280
     else:
         n_layer: int = 36
         n_head: int = 20
@@ -341,7 +341,7 @@ def moving_average(values, window_size=10):
 if small_model:
     epoch_num = 4
     total_batch_size = 65536
-    B = 1
+    B = 2
     T = 2048
 else:
     # epoch_num = 20
