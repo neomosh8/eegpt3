@@ -133,7 +133,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 2048
+    block_size: int = 1024
     vocab_size: int = 257  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
         # n_layer: int = 12  # number of layers
@@ -342,7 +342,7 @@ if small_model:
     epoch_num = 4
     total_batch_size = 65536 *8
     B = 1
-    T = 2048
+    T = 1024
 else:
     # epoch_num = 20
     # total_batch_size = 524288
