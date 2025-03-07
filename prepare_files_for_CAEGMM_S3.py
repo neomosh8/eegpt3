@@ -45,7 +45,7 @@ def process_s3_csv(s3_csv_path):
             print(f"Cleaned up temporary file for {s3_csv_path}")
 
 
-def process_csv_for_coeffs(csv_path, window_length_sec=2, num_samples_per_file=10, z_threshold=2):
+def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file=200, z_threshold=2):
     """
     Process a local CSV file containing EEG signal data to compute and save wavelet decomposition coefficients.
 
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     for i, folder in enumerate(selected_folders):
         print(f"{i + 1}/{len(selected_folders)}: Folder: {folder}")
         all_files = list_csv_files_in_folder(folder)
-        selected_files = random.sample(all_files, min(3, len(all_files)))
+        selected_files = random.sample(all_files, min(4, len(all_files)))
         csv_files.extend(selected_files)
         print(f"Selected {len(selected_files)} files")
 
