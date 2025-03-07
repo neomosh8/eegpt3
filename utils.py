@@ -180,7 +180,6 @@ def wavelet_decompose_window(window, wavelet='cmor1.5-1.0', scales=None, normali
             plt.ylabel('Frequency (Hz)')
             plt.tight_layout()
             plt.show()
-    print(np.shape(decomposed_channels),np.shape(np.array(normalized_data)))
     return (decomposed_channels, scales, num_samples, np.array(normalized_data))
 
 
