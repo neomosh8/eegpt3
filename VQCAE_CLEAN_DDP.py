@@ -427,7 +427,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
     parser.add_argument("--batch_size", type=int, default=5 * 16*2)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
     parser.add_argument("--max_lr", type=float, default=4e-3, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-4, help="Final learning rate")
@@ -498,7 +498,7 @@ def main():
     in_channels = sample.shape[0]
 
     # Create model and explicitly move to device BEFORE wrapping with DDP
-    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=256).to(device)
 
     # Verify all model parameters are on the correct device
     for param in model.parameters():
@@ -669,7 +669,7 @@ def main():
         print("Starting evaluations...")
 
         # Create a fresh model for evaluation (not DDP, not compiled)
-        eval_model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
+        eval_model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=256).to(device)
 
         # Extract state dict from trained model
         state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
