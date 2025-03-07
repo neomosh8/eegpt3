@@ -134,7 +134,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 2048
-    vocab_size: int = 65  # Update this based on your VQCAE tokenizer vocab size
+    vocab_size: int = 129  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
         n_layer: int = 12  # number of layers
         n_head: int = 12  # number of heads
