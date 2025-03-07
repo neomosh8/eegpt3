@@ -136,16 +136,16 @@ class GPTConfig:
     block_size: int = 2048
     vocab_size: int = 257  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
-        n_embd: int = 768  # embedding dimension
+        # n_layer: int = 12  # number of layers
+        # n_head: int = 12  # number of heads
+        # n_embd: int = 768  # embedding dimension
         # n_layer: int = 12
         # n_head: int = 12
         # n_embd: int = 384
     else:
-        # n_layer: int = 36
-        # n_head: int = 20
-        # n_embd: int = 1280
+        n_layer: int = 36
+        n_head: int = 20
+        n_embd: int = 1280
         # model xL
         n_layer: int = 48  # reduced from 64 (multiple of 8)
         n_head: int = 24  # reduced from 32 (multiple of 8)
@@ -341,7 +341,7 @@ def moving_average(values, window_size=10):
 if small_model:
     epoch_num = 4
     total_batch_size = 65536
-    B = 4
+    B = 2
     T = 2048
 else:
     # epoch_num = 20
