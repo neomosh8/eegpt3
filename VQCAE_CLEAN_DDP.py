@@ -426,14 +426,14 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=5 * 16)
-    parser.add_argument("--epochs", type=int, default=2000)
+    parser.add_argument("--batch_size", type=int, default=5 * 16*2)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
     parser.add_argument("--max_lr", type=float, default=4e-3, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-4, help="Final learning rate")
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--seed", type=int, default=88, help="Random seed")
     args = parser.parse_args()
 
     # Set up distributed training
