@@ -814,6 +814,247 @@ def run_low_data_experiment(pretrained_model_path, tokenized_dir, output_dir,
         json.dump(results, f, indent=4)
 
     return results
+
+
+def run_few_shot_evaluation(pretrained_model_path, tokenized_dir, output_dir,
+                            shots_per_class=[1, 2, 3, 5, 10],
+                            repetitions=5, epochs=10, learning_rate=5e-5):
+    """
+    Evaluate few-shot learning performance with specific numbers of examples per class
+
+    Args:
+        pretrained_model_path: Path to pre-trained model checkpoint
+        tokenized_dir: Directory containing tokenized BCI data
+        output_dir: Directory to save results
+        shots_per_class: List of number of examples per class to test
+        repetitions: Number of times to repeat each experiment (for statistical reliability)
+        epochs: Number of training epochs
+        learning_rate: Learning rate for training
+    """
+    # Set up device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Create output directory
+    few_shot_dir = os.path.join(output_dir, "few_shot_learning")
+    os.makedirs(few_shot_dir, exist_ok=True)
+
+    # Load pre-trained model
+    print("Loading pre-trained model...")
+    pretrained_model = load_pretrained_model(pretrained_model_path)
+    pretrained_model.to(device)
+    pretrained_model.eval()
+
+    # Create a randomly initialized model with the same architecture
+    random_model = GPT(pretrained_model.config)
+    # Initialize with random weights
+    for p in random_model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_normal_(p)
+    random_model.to(device)
+
+    # Load tokenized data
+    token_files, labels, label_mapping = prepare_bci_data(tokenized_dir)
+    num_classes = len(label_mapping)
+    print(f"Found {len(token_files)} token files across {num_classes} classes")
+
+    # Group files by class
+    class_files = {}
+    for token_file, label in zip(token_files, labels):
+        if label not in class_files:
+            class_files[label] = []
+        class_files[label].append(token_file)
+
+    # Print distribution of files per class
+    for label, files in class_files.items():
+        class_name = [name for name, idx in label_mapping.items() if idx == label][0]
+        print(f"Class '{class_name}' (label {label}): {len(files)} files")
+
+    # Prepare results storage
+    results = {
+        'pretrained': {shot: [] for shot in shots_per_class},
+        'random': {shot: [] for shot in shots_per_class},
+        'metadata': {
+            'shots_per_class': shots_per_class,
+            'repetitions': repetitions,
+            'epochs': epochs,
+            'label_mapping': label_mapping,
+            'files_per_class': {label: len(files) for label, files in class_files.items()}
+        }
+    }
+
+    # For each number of shots
+    for n_shots in shots_per_class:
+        print(f"\n===== Testing with {n_shots} shots per class =====")
+
+        # Check if we have enough samples
+        can_run = all(len(files) >= n_shots + 1 for label, files in class_files.items())
+        if not can_run:
+            print(f"Not enough samples for {n_shots} shots per class, skipping.")
+            continue
+
+        # Run multiple repetitions for statistical reliability
+        for rep in range(repetitions):
+            print(f"\nRepetition {rep + 1}/{repetitions}")
+
+            # Create few-shot training set and test set
+            train_files = []
+            train_labels = []
+            test_files = []
+            test_labels = []
+
+            for label, files in class_files.items():
+                # Shuffle files for this repetition
+                shuffled_files = random.sample(files, len(files))
+
+                # Select n_shots for training
+                train_files.extend(shuffled_files[:n_shots])
+                train_labels.extend([label] * n_shots)
+
+                # Use remaining files for testing (up to 5 per class)
+                remaining = shuffled_files[n_shots:]
+                test_count = min(len(remaining), 5)  # At most 5 test samples per class
+                test_files.extend(remaining[:test_count])
+                test_labels.extend([label] * test_count)
+
+            print(f"Created dataset with {len(train_files)} training samples and {len(test_files)} test samples")
+
+            # Create datasets
+            train_dataset = BCIDataset(train_files, train_labels)
+            test_dataset = BCIDataset(test_files, test_labels)
+
+            # Create dataloaders
+            batch_size = min(4, len(train_files))  # Adjust batch size based on dataset size
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+            # --- Train and evaluate with pre-trained model ---
+            print("Training with pre-trained model...")
+            pretrained_classifier = BCIClassifier(
+                pretrained_model, num_classes, freeze_backbone=True
+            ).to(device)
+
+            # Training setup - lower learning rate for few-shot
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.AdamW(pretrained_classifier.parameters(), lr=learning_rate, weight_decay=0.01)
+
+            # Train
+            best_val_acc = 0
+            for epoch in range(epochs):
+                train_loss, train_acc, _ = train_epoch(
+                    pretrained_classifier, train_loader, criterion, optimizer, device
+                )
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
+
+            # Evaluate on test set
+            _, pretrained_acc, pretrained_f1, pretrained_cm, _, _ = evaluate(
+                pretrained_classifier, test_loader, criterion, device
+            )
+
+            print(f"Pretrained model: Test Acc={pretrained_acc:.4f}, F1={pretrained_f1:.4f}")
+
+            # --- Train and evaluate with random initialization ---
+            print("Training with random initialization...")
+            random_classifier = BCIClassifier(
+                random_model, num_classes, freeze_backbone=False
+            ).to(device)
+
+            optimizer = optim.AdamW(random_classifier.parameters(), lr=learning_rate, weight_decay=0.01)
+
+            # Train
+            for epoch in range(epochs):
+                train_loss, train_acc, _ = train_epoch(
+                    random_classifier, train_loader, criterion, optimizer, device
+                )
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
+
+            # Evaluate on test set
+            _, random_acc, random_f1, random_cm, _, _ = evaluate(
+                random_classifier, test_loader, criterion, device
+            )
+
+            print(f"Random model: Test Acc={random_acc:.4f}, F1={random_f1:.4f}")
+
+            # Store results for this repetition
+            results['pretrained'][n_shots].append({
+                'accuracy': pretrained_acc,
+                'f1_score': pretrained_f1,
+                'confusion_matrix': pretrained_cm.tolist()
+            })
+
+            results['random'][n_shots].append({
+                'accuracy': random_acc,
+                'f1_score': random_f1,
+                'confusion_matrix': random_cm.tolist()
+            })
+
+    # Calculate mean and std for each configuration
+    summary = {
+        'pretrained': {},
+        'random': {}
+    }
+
+    for n_shots in shots_per_class:
+        if n_shots in results['pretrained'] and results['pretrained'][n_shots]:
+            pretrained_accs = [r['accuracy'] for r in results['pretrained'][n_shots]]
+            random_accs = [r['accuracy'] for r in results['random'][n_shots]]
+
+            summary['pretrained'][n_shots] = {
+                'mean_accuracy': sum(pretrained_accs) / len(pretrained_accs),
+                'std_accuracy': np.std(pretrained_accs) if len(pretrained_accs) > 1 else 0,
+                'individual_runs': pretrained_accs
+            }
+
+            summary['random'][n_shots] = {
+                'mean_accuracy': sum(random_accs) / len(random_accs),
+                'std_accuracy': np.std(random_accs) if len(random_accs) > 1 else 0,
+                'individual_runs': random_accs
+            }
+
+    # Create few-shot learning plot
+    plt.figure(figsize=(10, 6))
+
+    # Data for plotting
+    x_values = [k for k in summary['pretrained'].keys()]
+
+    # Pretrained model results
+    pretrained_means = [summary['pretrained'][k]['mean_accuracy'] for k in x_values]
+    pretrained_stds = [summary['pretrained'][k]['std_accuracy'] for k in x_values]
+
+    # Random model results
+    random_means = [summary['random'][k]['mean_accuracy'] for k in x_values]
+    random_stds = [summary['random'][k]['std_accuracy'] for k in x_values]
+
+    # Plot with error bars
+    plt.errorbar(x_values, pretrained_means, yerr=pretrained_stds,
+                 label='Pretrained Model', marker='o', capsize=5, linewidth=2, markersize=8, color='#3498db')
+    plt.errorbar(x_values, random_means, yerr=random_stds,
+                 label='Random Model', marker='s', capsize=5, linewidth=2, markersize=8, color='#e74c3c')
+
+    plt.xlabel('Shots per Class')
+    plt.ylabel('Test Accuracy')
+    plt.title('Few-Shot Learning: Pre-trained vs Random Initialization')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    # Set integer x-axis ticks
+    plt.xticks(x_values)
+
+    # Save plot
+    plt.tight_layout()
+    plt.savefig(os.path.join(few_shot_dir, 'few_shot_learning.png'), dpi=300, bbox_inches='tight')
+
+    # Save results
+    with open(os.path.join(few_shot_dir, 'few_shot_results.json'), 'w') as f:
+        json.dump({
+            'raw_results': results,
+            'summary': summary
+        }, f, indent=4)
+
+    print("\nFew-shot learning evaluation completed!")
+    return summary
+
+
 if __name__ == "__main__":
     # Set paths
     pretrained_model_path = "log/model_03047.pt"  # Update with your model path
@@ -841,4 +1082,13 @@ if __name__ == "__main__":
         epochs=10
     )
 
+    # Run few-shot learning evaluation
+    print("\nRunning few-shot learning evaluation...")
+    few_shot_summary = run_few_shot_evaluation(
+        pretrained_model_path=pretrained_model_path,
+        tokenized_dir=tokenized_dir,
+        output_dir=output_dir,
+        shots_per_class=[1, 2, 3, 5],  # Adjust based on your dataset size
+        repetitions=3  # Increase for more reliable statistics
+    )
     print("\nAll experiments completed!")
