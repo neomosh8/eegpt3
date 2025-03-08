@@ -245,7 +245,7 @@ def create_label_mapping(csv_files, output_dir):
     # Extract class names from filenames
     for csv_file in csv_files:
         filename = os.path.basename(csv_file)
-        match = re.search(r'(\w+)_(\w+)\.csv', filename)
+        match = re.search(r'(.+)_(\w+)\.csv', filename)
 
         if match:
             dataset_id = match.group(1)

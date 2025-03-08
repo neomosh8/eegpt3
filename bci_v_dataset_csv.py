@@ -3,17 +3,16 @@ import pandas as pd
 import os
 import glob
 import re
-from tqdm import tqdm
 
 
 def load_bci_dataset(base_dir):
     """
-    Load BCI Competition IV Dataset 1 files with improved error handling
+    Load BCI Competition IV Dataset files
     """
     # Find all dataset files
-    cnt_files = sorted(glob.glob(os.path.join(base_dir, "*_cnt.txt")))
-    mrk_files = sorted(glob.glob(os.path.join(base_dir, "*_mrk.txt")))
-    nfo_files = sorted(glob.glob(os.path.join(base_dir, "*_nfo.txt")))
+    cnt_files = sorted(glob.glob(os.path.join(base_dir, "BCICIV_calib_*_cnt.txt")))
+    mrk_files = sorted(glob.glob(os.path.join(base_dir, "BCICIV_calib_*_mrk.txt")))
+    nfo_files = sorted(glob.glob(os.path.join(base_dir, "BCICIV_calib_*_nfo.txt")))
 
     if not cnt_files:
         print(f"No *_cnt.txt files found in {base_dir}. Check the directory path.")
@@ -38,99 +37,39 @@ def load_bci_dataset(base_dir):
 
         nfo_file = matching_nfo_files[0]
 
-        # Load the entire NFO file content for debugging
+        # Load NFO file content
         with open(nfo_file, 'r') as f:
             nfo_content = f.read()
 
-        # Print a sample of the NFO content to debug
-        print(f"  NFO file sample content (first 200 chars):\n{nfo_content[:200]}...")
-
-        # Try different patterns to extract channel information
-        channel_names = None
-
-        # Try to find a line with 'clab' that might contain channel info
-        for line in nfo_content.split('\n'):
-            if 'clab' in line.lower():
-                print(f"  Found clab line: {line}")
-
-                # Try various patterns
-                patterns = [
-                    r'clab\s*:\s*\[(.*?)\]',  # Format: clab : [ch1 ch2 ch3]
-                    r'clab\s*:\s*(.*)',  # Format: clab : ch1 ch2 ch3
-                    r'clab\s*=\s*\{(.*?)\}',  # Format: clab = {ch1 ch2 ch3}
-                    r'clab\s*=\s*(.*)'  # Format: clab = ch1 ch2 ch3
-                ]
-
-                for pattern in patterns:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        channel_names = match.group(1).split()
-                        break
-
-                if channel_names:
-                    break
-
-        # If we still don't have channel names, count the columns and use generic names
-        if not channel_names:
-            print("  Could not extract channel names using regex patterns.")
-            print("  Creating generic channel names based on data dimensions.")
-            num_channels = cnt_data.shape[1]
-            channel_names = [f"CH{i + 1}" for i in range(num_channels)]
-
-        print(f"  Found {len(channel_names)} channels: {channel_names[:5]}...")
-
         # Extract sampling rate
-        fs = None
-        for line in nfo_content.split('\n'):
-            if 'fs' in line.lower():
-                print(f"  Found fs line: {line}")
-                match = re.search(r'fs\s*[:=]\s*(\d+)', line)
-                if match:
-                    fs = float(match.group(1))
-                    break
-
-        if fs is None:
-            print("  Could not extract sampling rate. Using default of 100 Hz.")
-            fs = 100.0
-
+        fs = 100  # Default
+        fs_match = re.search(r'fs:\s*(\d+)', nfo_content)
+        if fs_match:
+            fs = float(fs_match.group(1))
         print(f"  Sampling rate: {fs} Hz")
 
-        # Extract class information
-        classes = []
-        for line in nfo_content.split('\n'):
-            if 'classes' in line.lower():
-                print(f"  Found classes line: {line}")
-                # Try different patterns
-                patterns = [
-                    r'classes\s*:\s*\[(.*?)\]',  # Format: classes : [class1 class2]
-                    r'classes\s*:\s*(.*)',  # Format: classes : class1 class2
-                    r'classes\s*=\s*\{(.*?)\}',  # Format: classes = {class1 class2}
-                    r'classes\s*=\s*(.*)'  # Format: classes = class1 class2
-                ]
+        # Extract channel names - make sure to strip any whitespace or commas
+        clab_match = re.search(r'clab:\s*(.*)', nfo_content)
+        if clab_match:
+            # Split by comma and strip whitespace from each channel name
+            channel_names = [ch.strip() for ch in clab_match.group(1).split(',')]
+        else:
+            # Create generic channel names
+            channel_names = [f"CH{i + 1}" for i in range(cnt_data.shape[1])]
+        print(f"  Found {len(channel_names)} channels")
 
-                for pattern in patterns:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        classes = match.group(1).split()
-                        break
-
-                if classes:
-                    break
-
-        if not classes:
-            print("  Could not extract class information. Using default classes.")
-            classes = ['left', 'right']  # Default motor imagery classes
-
+        # Extract class information - make sure to strip any whitespace or commas
+        classes = ['left', 'right']  # Default
+        classes_match = re.search(r'classes:\s*(.*)', nfo_content)
+        if classes_match:
+            # Split by comma and strip whitespace from each class name
+            classes = [cls.strip() for cls in classes_match.group(1).split(',')]
         print(f"  Classes: {classes}")
 
-        # Determine if this is calibration or evaluation data
-        is_calibration = False
+        # Load marker information
         markers = None
         corresponding_mrk_file = [f for f in mrk_files if dataset_id in f]
-
         if corresponding_mrk_file:
-            is_calibration = True
-            # Load marker information
             try:
                 markers = np.loadtxt(corresponding_mrk_file[0])
                 if markers.ndim == 1:  # Handle case with only one marker
@@ -146,7 +85,6 @@ def load_bci_dataset(base_dir):
             'channel_names': channel_names,
             'fs': fs,
             'classes': classes,
-            'is_calibration': is_calibration,
             'markers': markers
         })
 
@@ -156,12 +94,6 @@ def load_bci_dataset(base_dir):
 def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
     """
     Process calibration data into CSV files by class
-
-    Args:
-        dataset: Dictionary containing dataset information
-        output_dir: Directory to save CSV files
-        window_size: Duration of each trial in seconds (default is 4.0 as per description)
-        offset: Time offset from cue in seconds (to skip initial transient)
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -173,7 +105,6 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
 
     print(f"Processing dataset {dataset['id']}")
     print(f"  Data shape: {cnt_data.shape}")
-    print(f"  Number of channels: {len(channel_names)}")
     print(f"  Classes: {classes}")
 
     if markers is None or len(markers) == 0:
@@ -183,27 +114,27 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
     # Create dataframe with timestamps
     timestamps = np.arange(cnt_data.shape[0]) / fs
 
-    # Convert EEG values to microvolts
-    cnt_data = 0.1 * cnt_data  # As per the instructions in the dataset description
+    # Convert EEG values to microvolts (if needed)
+    cnt_data = 0.1 * cnt_data  # Adjust scaling factor if needed
 
     # Create full dataframe with all channels
     full_df = pd.DataFrame(cnt_data, columns=channel_names)
     full_df.insert(0, 'timestamp', timestamps)
 
-    # Check if we have at least 2 unique class codes in markers
+    # Check marker class codes
     unique_class_codes = np.unique(markers[:, 1])
-    if len(unique_class_codes) < 2:
-        print(f"  Warning: Only found {len(unique_class_codes)} unique class codes: {unique_class_codes}")
-        print("  Will try to process anyway.")
+    print(f"  Found {len(unique_class_codes)} unique class codes: {unique_class_codes}")
+
+    # Map class codes to class names
+    class_mapping = {}
+    for i, code in enumerate(unique_class_codes):
+        if i < len(classes):
+            class_mapping[code] = classes[i]
+        else:
+            class_mapping[code] = f"class{int(code)}"
 
     # Extract trials for each class
-    for i, class_code in enumerate(unique_class_codes):
-        # If we have more class codes than class names, use generic names
-        if i < len(classes):
-            class_name = classes[i]
-        else:
-            class_name = f"class{int(class_code)}"
-
+    for class_code, class_name in class_mapping.items():
         print(f"  Processing class: {class_name} (code {class_code})")
 
         # Get all trials for this class
@@ -230,7 +161,7 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
             # Combine all trials for this class
             class_df = pd.concat(class_data, ignore_index=True)
 
-            # Save to CSV
+            # Save to CSV - ensure clean filename with no commas
             csv_filename = f"{dataset['id']}_{class_name}.csv"
             csv_path = os.path.join(output_dir, csv_filename)
             class_df.to_csv(csv_path, index=False)
@@ -238,12 +169,11 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
         else:
             print(f"  No valid trials for class {class_name}, skipping CSV creation.")
 
-    # Create a dataframe for rest/no control periods (intermitting periods)
-    # Intermitting periods are between trials
-    print("  Processing rest/no control periods")
+    # Create a dataframe for rest periods
+    print("  Processing rest periods")
     rest_data = []
 
-    # Identify rest periods - we'll consider time between trials as rest
+    # Identify rest periods between trials
     all_trial_pos = markers[:, 0].astype(int)
     all_trial_pos.sort()
 
@@ -253,8 +183,8 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
         start_sample = int(all_trial_pos[i] + window_size * fs)  # End of current trial
         end_sample = int(all_trial_pos[i + 1])  # Start of next trial
 
-        # Check if there's a valid rest period
-        if end_sample - start_sample > fs:  # At least 1 second
+        # Check if there's a valid rest period (at least 1 second)
+        if end_sample - start_sample > fs:
             rest_period = full_df.iloc[start_sample:end_sample].copy()
             rest_period['trial'] = i + 1
             rest_data.append(rest_period)
@@ -279,8 +209,11 @@ def process_calibration_data(dataset, output_dir, window_size=4.0, offset=0.0):
 
 def main():
     # Directory where the BCI Competition IV dataset files are located
+
     base_dir = "/Volumes/Untitled/BCICIV_1_asc"
     output_dir = "/Volumes/Untitled/processed_data"
+
+
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -297,11 +230,11 @@ def main():
 
     # Process each calibration dataset
     for dataset in datasets:
-        if dataset['is_calibration']:
+        if dataset['markers'] is not None:
             print(f"\nProcessing calibration dataset {dataset['id']}...")
             process_calibration_data(dataset, output_dir)
         else:
-            print(f"\nSkipping evaluation dataset {dataset['id']} (no markers)")
+            print(f"\nSkipping dataset {dataset['id']} (no markers)")
 
     print("\nProcessing complete!")
 
