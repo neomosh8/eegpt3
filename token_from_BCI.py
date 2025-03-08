@@ -62,7 +62,7 @@ def process_csv_file_for_bci(csv_file, output_dir):
         valid_channels = [col for col in df.columns if col not in channels_to_drop]
 
         # Calculate original sampling rate
-        original_sps = calculate_sps(csv_file)
+        original_sps = 1000
 
         # Create regional bipolar channels
         regional_bipolar = create_regional_bipolar_channels(df, channels_to_drop)
