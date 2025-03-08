@@ -276,6 +276,9 @@ def evaluate(model, dataloader, criterion, device):
 
 # Load the pre-trained model
 def load_pretrained_model(checkpoint_path):
+    """
+    Load a pre-trained model with handling for compiled model checkpoints
+    """
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
     # Create model with the saved configuration
@@ -283,14 +286,32 @@ def load_pretrained_model(checkpoint_path):
 
     # If config is not in the checkpoint, create a default one
     if config is None:
+        print("No config found in checkpoint, using default GPT configuration")
         config = GPTConfig()
 
     model = GPT(config)
-    model.load_state_dict(checkpoint['model'])
+
+    # Check if this is a compiled model (keys start with "_orig_mod.")
+    state_dict = checkpoint['model']
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        print("Detected compiled model checkpoint, removing '_orig_mod.' prefix from keys")
+        # Remove the "_orig_mod." prefix from all keys
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('_orig_mod.'):
+                new_key = k[len('_orig_mod.'):]
+                new_state_dict[new_key] = v
+            else:
+                new_state_dict[k] = v
+        state_dict = new_state_dict
+
+    # Load the modified state dict
+    model.load_state_dict(state_dict)
+
+    print(
+        f"Successfully loaded model with config: n_layer={config.n_layer}, n_head={config.n_head}, n_embd={config.n_embd}")
 
     return model
-
-
 # Prepare tokenized BCI data for classification
 def prepare_bci_data(tokenized_dir):
     # Load label mapping
