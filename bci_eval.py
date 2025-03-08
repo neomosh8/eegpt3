@@ -197,7 +197,7 @@ class BCIDataset(Dataset):
 
     def __getitem__(self, idx):
         # Load tokenized data
-        tokens = torch.load(self.token_files[idx])
+        tokens = torch.load(self.token_files[idx],weights_only=False)
 
         # Truncate or pad tokens to max_length
         if len(tokens) > self.max_length:
@@ -279,7 +279,7 @@ def load_pretrained_model(checkpoint_path):
     """
     Load a pre-trained model with handling for compiled model checkpoints
     """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu",weights_only=False)
 
     # Create model with the saved configuration
     config = checkpoint.get('config', None)
@@ -428,7 +428,7 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
             print("Saved new best model!")
 
     # Load best model for testing
-    model.load_state_dict(torch.load(os.path.join(output_dir, "best_pretrained_model.pt")))
+    model.load_state_dict(torch.load(os.path.join(output_dir, "best_pretrained_model.pt"),weights_only=False))
 
     # Test on test set
     test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
@@ -509,7 +509,7 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
             print("Saved new best model!")
 
     # Load best model for testing
-    random_classifier.load_state_dict(torch.load(os.path.join(output_dir, "best_random_model.pt")))
+    random_classifier.load_state_dict(torch.load(os.path.join(output_dir, "best_random_model.pt"),weights_only=False))
 
     # Test on test set
     test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
