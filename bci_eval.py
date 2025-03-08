@@ -623,8 +623,8 @@ def create_comparison_plots(results, label_mapping, output_dir):
 
 # Run low-data regime experiment
 def run_low_data_experiment(pretrained_model_path, tokenized_dir, output_dir,
-                            ratios=[0.05, 0.1, 0.25, 0.5, 1.0],
-                            epochs=10, batch_size=16, learning_rate=1e-4):
+                            ratios=[0.1, 0.25, 0.5, 0.75, 1.0],  # Adjusted ratios for small datasets
+                            epochs=10, batch_size=4, learning_rate=1e-4):  # Smaller batch size
     """Test performance with different amounts of training data"""
     # Set up device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -651,35 +651,85 @@ def run_low_data_experiment(pretrained_model_path, tokenized_dir, output_dir,
     # Create full dataset
     full_dataset = BCIDataset(token_files, labels)
 
-    # Create test set (20% of data) - same for all experiments
+    # For very small datasets, adjust the test/train split
     full_size = len(full_dataset)
-    test_size = int(0.2 * full_size)
-    remainder_size = full_size - test_size
-    remainder_dataset, test_dataset = random_split(
-        full_dataset, [remainder_size, test_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    print(f"Total dataset size: {full_size} samples")
+
+    # Use a smaller test set for very small datasets
+    test_size = max(1, min(int(0.2 * full_size), 2))  # At least 1, at most 2 samples for test
+    train_val_size = full_size - test_size
+
+    # Ensure we have at least 1 sample per class in the test set if possible
+    if test_size >= num_classes:
+        # Try to create a stratified test set
+        class_indices = {}
+        for i, label in enumerate(labels):
+            if label not in class_indices:
+                class_indices[label] = []
+            class_indices[label].append(i)
+
+        # Take one sample from each class for testing
+        test_indices = []
+        for class_label, indices in class_indices.items():
+            if indices:  # If we have samples for this class
+                test_indices.append(indices[0])  # Take the first sample
+
+        # If we need more test samples, add randomly
+        if len(test_indices) < test_size:
+            remaining = [i for i in range(full_size) if i not in test_indices]
+            additional = random.sample(remaining, min(test_size - len(test_indices), len(remaining)))
+            test_indices.extend(additional)
+
+        train_val_indices = [i for i in range(full_size) if i not in test_indices]
+
+        # Create stratified test dataset
+        test_dataset = torch.utils.data.Subset(full_dataset, test_indices)
+        train_val_dataset = torch.utils.data.Subset(full_dataset, train_val_indices)
+    else:
+        # If dataset is too small for stratification, use random split
+        train_val_dataset, test_dataset = random_split(
+            full_dataset, [train_val_size, test_size],
+            generator=torch.Generator().manual_seed(42)
+        )
+
+    print(f"Split dataset: Train+Val={len(train_val_dataset)}, Test={len(test_dataset)}")
+    test_loader = DataLoader(test_dataset, batch_size=min(batch_size, test_size), shuffle=False)
 
     # Results dictionary
     results = {
         'pretrained': {},
-        'random': {}
+        'random': {},
+        'dataset_info': {
+            'total_size': full_size,
+            'test_size': test_size,
+            'train_val_size': train_val_size
+        }
     }
 
-    # Run experiments for each data ratio
+    # Adjusted ratios based on dataset size
+    adjusted_ratios = []
     for ratio in ratios:
-        print(f"\n--- Running low-data experiment with {ratio * 100:.1f}% of training data ---")
+        # Calculate how many samples this would be
+        sample_count = max(1, int(ratio * train_val_size))
+        # Back-calculate the actual ratio
+        actual_ratio = sample_count / train_val_size
+        adjusted_ratios.append(actual_ratio)
+        print(f"Adjusted ratio {ratio:.2f} to {actual_ratio:.2f} ({sample_count} samples)")
 
-        # Calculate sizes
-        train_size = int(ratio * remainder_size)
-        indices = torch.randperm(remainder_size)[:train_size].tolist()
+    # Run experiments for each data ratio
+    for ratio in adjusted_ratios:
+        # Ensure at least 1 sample
+        train_size = max(1, int(ratio * train_val_size))
+        print(f"\n--- Running low-data experiment with {ratio * 100:.1f}% of training data ({train_size} samples) ---")
+
+        # Sample without replacement
+        indices = torch.randperm(train_val_size)[:train_size].tolist()
 
         # Create training subset
-        train_dataset = torch.utils.data.Subset(remainder_dataset, indices)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        train_dataset = torch.utils.data.Subset(train_val_dataset, indices)
+        train_loader = DataLoader(train_dataset, batch_size=min(batch_size, train_size), shuffle=True)
 
-        print(f"Training with {len(train_dataset)} samples ({ratio * 100:.1f}% of available data)")
+        print(f"Training with {len(train_dataset)} samples")
 
         # 1. Train with pretrained model
         print("Training with pretrained model...")
@@ -721,35 +771,40 @@ def run_low_data_experiment(pretrained_model_path, tokenized_dir, output_dir,
         # Store results
         results['pretrained'][f"{ratio:.2f}"] = {
             'accuracy': pretrained_acc,
-            'f1_score': pretrained_f1
+            'f1_score': pretrained_f1,
+            'num_samples': train_size
         }
 
         results['random'][f"{ratio:.2f}"] = {
             'accuracy': random_acc,
-            'f1_score': random_f1
+            'f1_score': random_f1,
+            'num_samples': train_size
         }
 
-        print(f"Results with {ratio * 100:.1f}% data:")
+        print(f"Results with {ratio * 100:.1f}% data ({train_size} samples):")
         print(f"  Pretrained: Acc={pretrained_acc:.4f}, F1={pretrained_f1:.4f}")
         print(f"  Random: Acc={random_acc:.4f}, F1={random_f1:.4f}")
 
     # Create low-data regime plot
     plt.figure(figsize=(12, 7))
 
+    # Extract the results
     ratio_values = [float(r) for r in results['pretrained'].keys()]
+    sample_counts = [results['pretrained'][f"{r:.2f}"]['num_samples'] for r in ratio_values]
     pretrained_accs = [results['pretrained'][f"{r:.2f}"]['accuracy'] for r in ratio_values]
     random_accs = [results['random'][f"{r:.2f}"]['accuracy'] for r in ratio_values]
 
-    plt.plot(ratio_values, pretrained_accs, 'o-', label='Pretrained Model', linewidth=2, markersize=8, color='#3498db')
-    plt.plot(ratio_values, random_accs, 'o-', label='Random Model', linewidth=2, markersize=8, color='#e74c3c')
+    # Plot by number of samples instead of ratio
+    plt.plot(sample_counts, pretrained_accs, 'o-', label='Pretrained Model', linewidth=2, markersize=8, color='#3498db')
+    plt.plot(sample_counts, random_accs, 'o-', label='Random Model', linewidth=2, markersize=8, color='#e74c3c')
 
-    plt.xlabel('Fraction of Training Data')
+    plt.xlabel('Number of Training Samples')
     plt.ylabel('Test Accuracy')
     plt.title('Low-Data Regime: Transfer Learning Effectiveness')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.xscale('log')
-    plt.xticks(ratio_values, [f"{r * 100:.1f}%" for r in ratio_values])
+    plt.xticks(sample_counts, [str(s) for s in sample_counts])
 
     plt.tight_layout()
     plt.savefig(os.path.join(low_data_dir, 'low_data_regime.png'), dpi=300, bbox_inches='tight')
@@ -759,8 +814,6 @@ def run_low_data_experiment(pretrained_model_path, tokenized_dir, output_dir,
         json.dump(results, f, indent=4)
 
     return results
-
-
 if __name__ == "__main__":
     # Set paths
     pretrained_model_path = "log/model_03047.pt"  # Update with your model path
