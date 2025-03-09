@@ -396,7 +396,7 @@ if __name__ == "__main__":
     output_dir = "training_data_shards"
     tokenizer_model_path = "output/vqcae_final.pt"  # Update with your model path
     overlap_percent = 50  # Default overlap percentage
-    window_length_sec = 2.0  # Default window length in seconds
+    window_length_sec = 0.5  # Default window length in seconds
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
