@@ -141,9 +141,16 @@ class Encoder(nn.Module):
     def __init__(self, in_channels=3, hidden_channels=128):
         super().__init__()
         self.net = nn.Sequential(
+            # No downsampling: basic feature extraction
             nn.Conv2d(in_channels, 16, 3, 1, 1), nn.ReLU(),
+            # Downsample once: resolution halved
             nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(),
-            nn.Conv2d(32, 64, 3, 2, 1), nn.ReLU(),
+            # Extra depth without changing resolution
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
+            # Maintain resolution: more layers for better features
+            nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            # Final downsampling: halve resolution again (overall 4× downsampling)
             nn.Conv2d(64, hidden_channels, 3, 2, 1), nn.ReLU()
         )
 
@@ -155,10 +162,16 @@ class Decoder(nn.Module):
     def __init__(self, out_channels=3, hidden_channels=128):
         super().__init__()
         self.net = nn.Sequential(
+            # Upsample: double spatial dimensions
             nn.ConvTranspose2d(hidden_channels, 64, 3, 2, 1, output_padding=1), nn.ReLU(),
+            # Extra depth: refine features without changing resolution
+            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            # Upsample again to recover original resolution
             nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, 3, 2, 1, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose2d(16, out_channels, 3, 1, 1),
+            # Further processing for depth
+            nn.Conv2d(32, 16, 3, 1, 1), nn.ReLU(),
+            # Final layer to output desired channels
+            nn.Conv2d(16, out_channels, 3, 1, 1)
         )
 
     def forward(self, x):
@@ -166,7 +179,7 @@ class Decoder(nn.Module):
 
 
 class VQCAE(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.3):
+    def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.2):
         super().__init__()
         self.encoder = Encoder(in_channels, hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
@@ -498,7 +511,7 @@ def main():
     in_channels = sample.shape[0]
 
     # Create model and explicitly move to device BEFORE wrapping with DDP
-    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=256).to(device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=128).to(device)
 
     # Verify all model parameters are on the correct device
     for param in model.parameters():
