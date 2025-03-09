@@ -502,7 +502,7 @@ def main():
         train_ds,
         batch_size=args.batch_size,
         sampler=train_sampler,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True
     )
 
@@ -510,7 +510,7 @@ def main():
         val_ds,
         batch_size=args.batch_size,
         sampler=val_sampler,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True
     )
 
