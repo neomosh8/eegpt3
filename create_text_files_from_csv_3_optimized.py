@@ -38,6 +38,7 @@ from utils import (
 # Global variable to store tokenizer instance per process
 _GLOBAL_TOKENIZER = None
 
+
 # Function to initialize the tokenizer in each process
 def init_worker(tokenizer_path):
     """Initialize the tokenizer once for each worker process"""
@@ -109,9 +110,11 @@ def create_regional_bipolar_channels(df, channels_to_drop):
 # --------------------------------------------------------------------------------
 # Modified function to process a single CSV file, using global tokenizer
 def process_csv_file_with_global_tokenizer(csv_key,
-                                           bucket="dataframes--use1-az6--x-s3",
-                                           local_dir="/tmp",
-                                           output_dir="training_data_shards"):
+                                         bucket="dataframes--use1-az6--x-s3",
+                                         local_dir="/tmp",
+                                         output_dir="training_data_shards",
+                                         overlap_percent=50,
+                                         window_length_sec=2.0):
     """
     Downloads a CSV file from S3, processes it using the global VQCAE tokenizer,
     and saves encoded tokens as a single tensor file.
@@ -121,6 +124,7 @@ def process_csv_file_with_global_tokenizer(csv_key,
         bucket (str): S3 bucket name
         local_dir (str): Local directory for temporary files
         output_dir (str): Output directory for tokenized tensors
+        overlap_percent (float): Percentage of overlap between consecutive windows (default: 50)
 
     Returns:
         tuple: (folder, base_name, total_tokens, skipped, reason)
@@ -128,7 +132,8 @@ def process_csv_file_with_global_tokenizer(csv_key,
     # Access the global tokenizer initialized for this process
     global _GLOBAL_TOKENIZER
     if _GLOBAL_TOKENIZER is None:
-        return os.path.dirname(csv_key), os.path.splitext(os.path.basename(csv_key))[0], 0, True, "Tokenizer not initialized"
+        return os.path.dirname(csv_key), os.path.splitext(os.path.basename(csv_key))[
+            0], 0, True, "Tokenizer not initialized"
 
     # Create required directories
     s3 = boto3.client("s3")
@@ -188,13 +193,18 @@ def process_csv_file_with_global_tokenizer(csv_key,
                 os.remove(local_csv)
             return folder, base_name, 0, True, "No valid data in regional channels"
 
-        n_window_samples = int(2.0 * new_sps_val)  # 2 second windows
-        num_windows = min_length // n_window_samples
+        n_window_samples = int(window_length_sec * new_sps_val)
+
+        # Calculate step size based on overlap percentage
+        step_size = int(n_window_samples * (1 - overlap_percent / 100))
+
+        # Calculate number of windows with overlap
+        num_windows = (min_length - n_window_samples) // step_size + 1 if step_size > 0 else 1
 
         # Compute window statistics for artifact rejection
         window_stats = []
         for i in range(num_windows):
-            window_start = i * n_window_samples
+            window_start = i * step_size
             window_end = window_start + n_window_samples
             window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
                                      for region in regional_preprocessed])
@@ -220,7 +230,7 @@ def process_csv_file_with_global_tokenizer(csv_key,
             if i not in keep_indices:
                 continue
 
-            window_start = i * n_window_samples
+            window_start = i * step_size
             window_end = window_start + n_window_samples
             window_data = np.vstack([
                 regional_preprocessed[region][window_start:window_end]
@@ -290,9 +300,11 @@ def process_csv_file_with_global_tokenizer(csv_key,
 # --------------------------------------------------------------------------------
 # Function to process multiple CSV files in parallel using the global tokenizer
 def parallel_process_csv_files_with_tokenizer(csv_files, tokenizer_model_path,
-                                              bucket="dataframes--use1-az6--x-s3",
-                                              local_dir="/tmp",
-                                              output_dir="training_data_shards"):
+                                            bucket="dataframes--use1-az6--x-s3",
+                                            local_dir="/tmp",
+                                            output_dir="training_data_shards",
+                                            overlap_percent=50,
+                                            window_length_sec=2.0):
     """
     Processes CSV files in parallel using the VQCAE tokenizer.
     Uses a global tokenizer instance per worker process.
@@ -303,6 +315,7 @@ def parallel_process_csv_files_with_tokenizer(csv_files, tokenizer_model_path,
         bucket (str): S3 bucket name
         local_dir (str): Local directory for temporary files
         output_dir (str): Output directory for tokenized tensors
+        overlap_percent (float): Percentage of overlap between consecutive windows (default: 50)
 
     Returns:
         list: List of results tuples (folder, base_name, total_tokens, skipped, reason)
@@ -322,7 +335,9 @@ def parallel_process_csv_files_with_tokenizer(csv_files, tokenizer_model_path,
                 csv_file,
                 bucket,
                 local_dir,
-                output_dir
+                output_dir,
+                overlap_percent,
+                window_length_sec
             )
             futures[future] = i
 
@@ -362,13 +377,15 @@ def write_final_report(results):
     report_lines.append("")
     report_lines.append("Details per database:")
     for folder, base, token_count, skipped, reason in results:
-        report_lines.append(f"  - Folder: {folder}, Database: {base}: {token_count} tokens, skipped: {skipped}, Reason: {reason}")
+        report_lines.append(
+            f"  - Folder: {folder}, Database: {base}: {token_count} tokens, skipped: {skipped}, Reason: {reason}")
 
     report_text = "\n".join(report_lines)
     report_file = os.path.join(os.getcwd(), "final_report.txt")
     with open(report_file, "w") as f:
         f.write(report_text)
     print(f"Final report written to {report_file}")
+
 
 # --------------------------------------------------------------------------------
 # Main execution
@@ -378,7 +395,8 @@ if __name__ == "__main__":
     local_dir = "/tmp/eeg_processing"
     output_dir = "training_data_shards"
     tokenizer_model_path = "output/vqcae_final.pt"  # Update with your model path
-
+    overlap_percent = 50  # Default overlap percentage
+    window_length_sec = 2.0  # Default window length in seconds
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -400,7 +418,9 @@ if __name__ == "__main__":
         tokenizer_model_path,
         bucket=bucket,
         local_dir=local_dir,
-        output_dir=output_dir
+        output_dir=output_dir,
+        overlap_percent=overlap_percent,
+        window_length_sec=window_length_sec
     )
 
     # Write the final report

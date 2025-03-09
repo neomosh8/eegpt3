@@ -45,14 +45,16 @@ def process_s3_csv(s3_csv_path):
             print(f"Cleaned up temporary file for {s3_csv_path}")
 
 
-def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file=200, z_threshold=2):
+def process_csv_for_coeffs(csv_path, window_length_sec=0.5, overlap_percent=50, num_samples_per_file=200,
+                           z_threshold=2):
     """
     Process a local CSV file containing EEG signal data to compute and save wavelet decomposition coefficients.
 
     Parameters:
         csv_path (str): Path to the local CSV file.
-        window_length_sec (float): Window length in seconds (default: 2).
-        num_samples_per_file (int): Number of windows to select per file (default: 10).
+        window_length_sec (float): Window length in seconds (default: 0.5).
+        overlap_percent (float): Percentage of overlap between consecutive windows (default: 50).
+        num_samples_per_file (int): Number of windows to select per file (default: 200).
         z_threshold (float): Z-score threshold for artifact rejection (default: 2).
 
     Returns:
@@ -93,12 +95,17 @@ def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file
         return []
 
     n_window_samples = int(window_length_sec * new_sps_val)
-    num_windows = min_length // n_window_samples
+
+    # Calculate step size based on overlap percentage
+    step_size = int(n_window_samples * (1 - overlap_percent / 100))
+
+    # Calculate number of windows with overlap
+    num_windows = (min_length - n_window_samples) // step_size + 1 if step_size > 0 else 1
 
     # Compute window statistics for artifact rejection
     window_stats = []
     for i in range(num_windows):
-        window_start = i * n_window_samples
+        window_start = i * step_size
         window_end = window_start + n_window_samples
         window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
                                  for region in regional_preprocessed if len(regional_preprocessed[region]) > 0])
@@ -127,8 +134,8 @@ def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file
             ax.plot(time, signal, label=region)
             ax.set_ylabel(region)
             for i in rejected_indices:
-                start_time = (i * n_window_samples) / new_sps_val
-                end_time = ((i + 1) * n_window_samples) / new_sps_val
+                start_time = (i * step_size) / new_sps_val
+                end_time = (i * step_size + n_window_samples) / new_sps_val
                 ax.axvspan(start_time, end_time, color='red', alpha=0.3)
         else:
             ax.set_visible(False)
@@ -147,7 +154,7 @@ def process_csv_for_coeffs(csv_path, window_length_sec=0.5, num_samples_per_file
 
     # Process selected windows
     for i in selected_indices:
-        window_start = i * n_window_samples
+        window_start = i * step_size
         window_end = window_start + n_window_samples
         window_data = np.vstack([
             regional_preprocessed[region][window_start:window_end]
