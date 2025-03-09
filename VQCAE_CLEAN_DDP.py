@@ -442,7 +442,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2 * 16)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
-    parser.add_argument("--max_lr", type=float, default=4e-3, help="Peak learning rate")
+    parser.add_argument("--max_lr", type=float, default=1e-3, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-4, help="Final learning rate")
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
@@ -574,6 +574,7 @@ def main():
 
             _, loss = model(batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()  # Update LR every batch
 
