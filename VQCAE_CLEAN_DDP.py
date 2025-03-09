@@ -691,7 +691,7 @@ def main():
         print("Starting evaluations...")
 
         # Create a fresh model for evaluation (not DDP, not compiled)
-        eval_model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=256).to(device)
+        eval_model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
 
         # Extract state dict from trained model
         state_dict = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
