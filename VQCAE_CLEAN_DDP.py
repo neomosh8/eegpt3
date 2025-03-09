@@ -141,17 +141,22 @@ class Encoder(nn.Module):
     def __init__(self, in_channels=3, hidden_channels=128):
         super().__init__()
         self.net = nn.Sequential(
-            # No downsampling: basic feature extraction
-            nn.Conv2d(in_channels, 16, 3, 1, 1), nn.ReLU(),
-            # Downsample once: resolution halved
-            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(),
-            # Extra depth without changing resolution
+            # Initial block: feature extraction without spatial reduction
+            nn.Conv2d(in_channels, 32, 3, 1, 1), nn.ReLU(),
             nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
-            # Maintain resolution: more layers for better features
-            nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
+            # First downsampling: spatial dimensions halved (factor 2)
+            nn.Conv2d(32, 64, 3, 2, 1), nn.ReLU(),
+            # Deep block at this resolution
             nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            # Final downsampling: halve resolution again (overall 4× downsampling)
-            nn.Conv2d(64, hidden_channels, 3, 2, 1), nn.ReLU()
+            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            # Second downsampling: spatial dimensions halved again (overall factor 4)
+            nn.Conv2d(64, 128, 3, 2, 1), nn.ReLU(),
+            # Final deep block at the lower resolution
+            nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(128, hidden_channels, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1), nn.ReLU()
         )
 
     def forward(self, x):
@@ -162,16 +167,19 @@ class Decoder(nn.Module):
     def __init__(self, out_channels=3, hidden_channels=128):
         super().__init__()
         self.net = nn.Sequential(
-            # Upsample: double spatial dimensions
-            nn.ConvTranspose2d(hidden_channels, 64, 3, 2, 1, output_padding=1), nn.ReLU(),
-            # Extra depth: refine features without changing resolution
+            # Initial deep block at low resolution
+            nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(hidden_channels, 128, 3, 1, 1), nn.ReLU(),
+            # First upsampling: doubles spatial dimensions (inverse of second downsampling)
+            nn.ConvTranspose2d(128, 64, 3, 2, 1, output_padding=1), nn.ReLU(),
+            # Deep block at intermediate resolution
             nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            # Upsample again to recover original resolution
+            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
+            # Second upsampling: doubles spatial dimensions (inverse of first downsampling)
             nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
-            # Further processing for depth
-            nn.Conv2d(32, 16, 3, 1, 1), nn.ReLU(),
-            # Final layer to output desired channels
-            nn.Conv2d(16, out_channels, 3, 1, 1)
+            # Final refinement block
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(32, out_channels, 3, 1, 1)
         )
 
     def forward(self, x):
