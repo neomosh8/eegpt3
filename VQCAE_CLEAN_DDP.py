@@ -447,7 +447,7 @@ def evaluate_codebook_usage(model, data_loader, device, save_path="output/codebo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="training_data/coeffs/")
-    parser.add_argument("--batch_size", type=int, default=2 * 16)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=3e-4, help="Base learning rate")
     parser.add_argument("--max_lr", type=float, default=1e-3, help="Peak learning rate")
@@ -519,7 +519,7 @@ def main():
     in_channels = sample.shape[0]
 
     # Create model and explicitly move to device BEFORE wrapping with DDP
-    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=128).to(device)
+    model = VQCAE(in_channels=in_channels, hidden_channels=4096, codebook_size=64).to(device)
 
     # Verify all model parameters are on the correct device
     for param in model.parameters():
