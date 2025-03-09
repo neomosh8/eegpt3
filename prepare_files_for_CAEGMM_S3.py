@@ -193,6 +193,9 @@ if __name__ == "__main__":
 
     # Step 1: Get the list of CSV files from S3
     all_folders = list_s3_folders()
+    with open("folder_list.txt", 'w') as f:
+        for folder in all_folders:
+            f.write(folder + "\n")
     random.shuffle(all_folders)
     selected_folders = all_folders
     csv_files = []
