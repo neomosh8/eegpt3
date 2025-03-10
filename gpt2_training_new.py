@@ -137,7 +137,7 @@ class GPTConfig:
     block_size: int = 8192
     vocab_size: int = 129  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        n_layer: int = 40  # number of layers
+        n_layer: int = 36  # number of layers
         n_head: int = 12  # number of heads
         n_embd: int = 768  # embedding dimension
         # n_layer: int = 36
