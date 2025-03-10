@@ -180,15 +180,31 @@ class GPT(nn.Module):
         self.lm_head.weight = self.transformer.wte.weight
 
     def _init_weights(self, module):
+        """Balanced initialization across different layer types"""
         if isinstance(module, nn.Linear):
+            # Default initialization for linear layers
             std = 0.02
+
+            # Scale attention projections to prevent vanishing gradients
+            if any(x in module._get_name() for x in ['c_attn', 'c_proj']):
+                std = 0.04  # Stronger initialization for attention
+
+            # Scale residual outputs to prevent vanishing/exploding gradients
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
                 std *= (2 * self.config.n_layer) ** -0.5
+
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Reduce embedding initialization scale to prevent dominating the gradients
+            if module == self.transformer.wte:  # Token embeddings
+                std = 0.01  # Smaller init for token embeddings
+            else:  # Position embeddings
+                std = 0.02  # Normal init for position embeddings
+
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
@@ -216,52 +232,37 @@ class GPT(nn.Module):
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
-        """
-        Configure the optimizer, separating parameters into weight decay and no weight decay groups
-        """
-        # Gather all trainable params with their names
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        """Configure optimizer with different learning rates for different components"""
+        # Group parameters by component type
+        embed_params = []
+        attn_params = []
+        other_params = []
 
-        decay_params = []
-        nodecay_params = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            # Apply weight decay to 2D+ parameters only
+            wd = weight_decay if param.dim() >= 2 else 0.0
 
-        for pn, p in param_dict.items():
-            # If tensor has 2+ dims, we apply weight decay
-            if p.dim() >= 2:
-                decay_params.append(p)
+            if 'wte' in name:
+                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.1})
+            elif 'attn' in name:
+                attn_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 2.0})
             else:
-                nodecay_params.append(p)
+                other_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate})
 
-        # Set up param groups
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
-            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
-        ]
+        # Combine all parameter groups
+        optim_groups = embed_params + attn_params + other_params
 
-        # Count how many parameters in each group for logging
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-
-        # Check fused AdamW availability
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and ('cuda' in device)
-
-        # Only print this info on master process
-        if master_process:
-            print(f"num decayed parameter tensors: {len(decay_params)} with {num_decay_params:,} parameters")
-            print(f"num non-decayed parameter tensors: {len(nodecay_params)} with {num_nodecay_params:,} parameters")
-            print(f"Using fused AdamW: {use_fused}")
-
-        # Create the optimizer
+        # Create optimizer
         optimizer = torch.optim.AdamW(
             optim_groups,
             betas=(0.9, 0.95),
             eps=1e-8,
-            fused=use_fused
+            fused='cuda' in device and 'fused' in inspect.signature(torch.optim.AdamW).parameters
         )
 
         return optimizer
-
 
 class EEGTokenDataLoader:
     """
@@ -602,7 +603,18 @@ for step in range(start_step, max_steps):
             c_attn_grad_norm = c_attn_grad.norm(2).item() if c_attn_grad is not None else 0.0
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}")
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+    # norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+
+    # Separate clipping for embedding vs attention parameters
+    embed_params = [p for n, p in raw_model.named_parameters() if 'wte' in n]
+    attn_params = [p for n, p in raw_model.named_parameters() if 'attn' in n]
+    other_params = [p for n, p in raw_model.named_parameters() if 'wte' not in n and 'attn' not in n]
+
+    # Apply stricter clipping to embeddings
+    torch.nn.utils.clip_grad_norm_(embed_params, 0.5)  # Stricter for embeddings
+    torch.nn.utils.clip_grad_norm_(attn_params, 2.0)  # More lenient for attention
+    torch.nn.utils.clip_grad_norm_(other_params, 1.0)  # Default for everything else
+
     optimizer.step()
     scheduler.step()  # updates the learning rate according to OneCycleLR
 
