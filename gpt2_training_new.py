@@ -345,7 +345,7 @@ if small_model:
     epoch_num = 4
     B = 1
     T = 8192
-    total_batch_size = B * T * 10
+    total_batch_size = B * T * 8
 
 else:
     # epoch_num = 20
