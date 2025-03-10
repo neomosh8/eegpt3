@@ -1057,7 +1057,7 @@ def run_few_shot_evaluation(pretrained_model_path, tokenized_dir, output_dir,
 
 if __name__ == "__main__":
     # Set paths
-    pretrained_model_path = "log/model_03047.pt"  # Update with your model path
+    pretrained_model_path = "log/model_03500.pt"  # Update with your model path
     tokenized_dir = "tokenized_bci_data"
     output_dir = "bci_evaluation_results"
 
