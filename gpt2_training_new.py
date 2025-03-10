@@ -10,6 +10,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
+from model_new_arch_small import max_steps
+
 small_model = True
 resume = False
 
@@ -347,8 +349,8 @@ def moving_average(values, window_size=10):
 if small_model:
     epoch_num = 4
     B = 1
-    T = 8192
-    total_batch_size = B * T * 8 * 10
+    T = GPTConfig.block_size
+    total_batch_size = B * T * 8 * 8
 
 else:
     # epoch_num = 20
@@ -438,7 +440,11 @@ raw_model = model.module if ddp else model  # always contains the "raw" unwrappe
 
 max_lr = 4e-3
 min_lr = 1e-4
-max_steps = math.ceil(400e6 // total_batch_size) * epoch_num
+tokens_per_step =  B * T * ddp_world_size
+max_steps_for_one_epoch = train_loader.total_len // tokens_per_step
+max_steps =  epoch_num  * max_steps_for_one_epoch
+
+
 warmup_steps = int(0.01 * max_steps)
 
 if master_process:
