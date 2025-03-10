@@ -18,8 +18,8 @@ def init_worker(tokenizer_path):
     _GLOBAL_TOKENIZER = VQCAETokenizer(model_path=tokenizer_path)
 
 
-def process_csv_file_for_bci(csv_file, output_dir):
-    """Process a local CSV file using the global tokenizer"""
+def process_csv_file_for_bci(csv_file, output_dir, overlap_percent=50, window_length_sec=2.0):
+    """Process a local CSV file using the global tokenizer with overlapping windows"""
     global _GLOBAL_TOKENIZER
     if _GLOBAL_TOKENIZER is None:
         return os.path.basename(csv_file), 0, True, "Tokenizer not initialized"
@@ -86,13 +86,19 @@ def process_csv_file_for_bci(csv_file, output_dir):
         if min_length == 0:
             return base_name, 0, True, "No valid data in regional channels"
 
-        n_window_samples = int(2.0 * new_sps_val)  # 2 second windows
-        num_windows = min_length // n_window_samples
+        # Use the windowing logic from paste-2.txt
+        n_window_samples = int(window_length_sec * new_sps_val)
+
+        # Calculate step size based on overlap percentage
+        step_size = int(n_window_samples * (1 - overlap_percent / 100))
+
+        # Calculate number of windows with overlap
+        num_windows = (min_length - n_window_samples) // step_size + 1 if step_size > 0 else 1
 
         # Compute window statistics for artifact rejection
         window_stats = []
         for i in range(num_windows):
-            window_start = i * n_window_samples
+            window_start = i * step_size
             window_end = window_start + n_window_samples
             window_data = np.vstack([regional_preprocessed[region][window_start:window_end]
                                      for region in regional_preprocessed])
@@ -112,13 +118,13 @@ def process_csv_file_for_bci(csv_file, output_dir):
         # Initialize a single token list
         token_list = []
 
-        # Process all windows sequentially
+        # Process all windows with overlap
         for i in range(num_windows):
             # Skip windows that didn't pass artifact rejection
             if i not in keep_indices:
                 continue
 
-            window_start = i * n_window_samples
+            window_start = i * step_size
             window_end = window_start + n_window_samples
             window_data = np.vstack([
                 regional_preprocessed[region][window_start:window_end]
@@ -178,7 +184,8 @@ def process_csv_file_for_bci(csv_file, output_dir):
 
 
 def tokenize_bci_dataset(csv_dir="processed_data", output_dir="tokenized_bci_data",
-                         tokenizer_model_path="output/vqcae_final.pt"):
+                         tokenizer_model_path="output/vqcae_final.pt",
+                         overlap_percent=50, window_length_sec=2.0):
     """
     Tokenize all CSV files in the specified directory using the VQCAE tokenizer
 
@@ -186,6 +193,8 @@ def tokenize_bci_dataset(csv_dir="processed_data", output_dir="tokenized_bci_dat
         csv_dir: Directory containing processed BCI CSV files
         output_dir: Directory to save tokenized data
         tokenizer_model_path: Path to the trained VQCAE model
+        overlap_percent: Percentage of overlap between consecutive windows (default: 50)
+        window_length_sec: Length of each window in seconds (default: 2.0)
     """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -198,6 +207,7 @@ def tokenize_bci_dataset(csv_dir="processed_data", output_dir="tokenized_bci_dat
         return []
 
     print(f"Found {len(csv_files)} CSV files to process")
+    print(f"Using window length: {window_length_sec}s with {overlap_percent}% overlap")
 
     # Process files in parallel
     results = []
@@ -212,7 +222,9 @@ def tokenize_bci_dataset(csv_dir="processed_data", output_dir="tokenized_bci_dat
             future = executor.submit(
                 process_csv_file_for_bci,
                 csv_file,
-                output_dir
+                output_dir,
+                overlap_percent,
+                window_length_sec
             )
             futures[future] = i
 
@@ -282,8 +294,18 @@ if __name__ == "__main__":
     output_dir = "tokenized_bci_data"
     tokenizer_model_path = "output/vqcae_final.pt"  # Update this with your actual model path
 
+    # Window parameters
+    overlap_percent = 50  # 50% overlap between windows
+    window_length_sec = 0.5  # 2 second windows
+
     # Run tokenization
-    results = tokenize_bci_dataset(csv_dir, output_dir, tokenizer_model_path)
+    results = tokenize_bci_dataset(
+        csv_dir,
+        output_dir,
+        tokenizer_model_path,
+        overlap_percent,
+        window_length_sec
+    )
 
     # Summarize results
     total_files = len(results)
