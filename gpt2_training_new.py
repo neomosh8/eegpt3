@@ -245,7 +245,7 @@ class GPT(nn.Module):
             wd = weight_decay if param.dim() >= 2 else 0.0
 
             if 'wte' in name:
-                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.05})
+                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.5})
             elif 'attn' in name:
                 attn_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate *5.0})
             else:
