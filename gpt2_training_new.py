@@ -458,14 +458,30 @@ patience = 3
 
 optimizer = raw_model.configure_optimizer(weight_decay=0.05, learning_rate=min_lr, device=device)
 
+max_lr_per_group = []
+for group in optimizer.param_groups:
+    # Scale max_lr based on the base learning rate in each group
+    group_lr = group['lr']
+    if group_lr == learning_rate * 0.1:  # Embedding params
+        max_lr_per_group.append(max_lr * 0.1)
+    elif group_lr == learning_rate * 2.0:  # Attention params
+        max_lr_per_group.append(max_lr * 2.0)
+    else:  # Other params with base learning rate
+        max_lr_per_group.append(max_lr)
+
+# Now create the scheduler with the correct number of max_lr values
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    max_lr=[max_lr, max_lr],
-    total_steps=max_steps,  # total number of training steps
-    pct_start=warmup_steps / max_steps,  # fraction of steps for warmup
-    anneal_strategy='cos',  # cosine annealing for decay
-    cycle_momentum=False  # typically False for AdamW
+    max_lr=max_lr_per_group,  # Each group gets its own max_lr
+    total_steps=max_steps,
+    pct_start=warmup_steps / max_steps,
+    anneal_strategy='cos',
+    cycle_momentum=False
 )
+
+if master_process:
+    print(f"Configured OneCycleLR with {len(max_lr_per_group)} learning rates")
+    print(f"LR ranges: Embeddings: {min_lr*0.1:.2e}-{max_lr*0.1:.2e}, Attention: {min_lr*2.0:.2e}-{max_lr*2.0:.2e}, Other: {min_lr:.2e}-{max_lr:.2e}")
 start_step = 0
 
 ####RESUME
