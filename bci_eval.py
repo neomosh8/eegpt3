@@ -335,6 +335,7 @@ def prepare_bci_data(tokenized_dir):
 
 
 # Main evaluation function
+# Simplified version of the evaluate_bci_classification function
 def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir,
                                 epochs=15, batch_size=16, learning_rate=1e-4):
     # Set up device
@@ -392,7 +393,8 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
 
     # Training loop
-    best_val_acc = 0
+    best_val_acc = -1  # Initialize to -1 to ensure we save at least one model
+    best_model_state = None
     train_losses, val_losses = [], []
     train_accs, val_accs = [], []
 
@@ -421,14 +423,18 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
         print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
 
-        # Save best model
+        # Save best model state in memory
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(output_dir, "best_pretrained_model.pt"))
-            print("Saved new best model!")
+            best_model_state = model.state_dict().copy()
+            print("Found new best model!")
 
-    # Load best model for testing
-    model.load_state_dict(torch.load(os.path.join(output_dir, "best_pretrained_model.pt"),weights_only=False))
+            # Optionally save to disk as well
+            torch.save(best_model_state, os.path.join(output_dir, "best_pretrained_model.pt"))
+
+    # If we found a better model during training, use it
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
     # Test on test set
     test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
@@ -473,7 +479,8 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
 
     # Training loop
-    best_val_acc = 0
+    best_val_acc = -1
+    best_model_state = None
     train_losses, val_losses = [], []
     train_accs, val_accs = [], []
 
@@ -502,14 +509,20 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
         print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
 
-        # Save best model
+        # Save best model state in memory
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(random_classifier.state_dict(), os.path.join(output_dir, "best_random_model.pt"))
-            print("Saved new best model!")
+            best_model_state = random_classifier.state_dict().copy()
+            print("Found new best random model!")
 
-    # Load best model for testing
-    random_classifier.load_state_dict(torch.load(os.path.join(output_dir, "best_random_model.pt"),weights_only=False))
+            # Optionally save to disk as well
+            torch.save(best_model_state, os.path.join(output_dir, "best_random_model.pt"))
+
+    # If we found a better model during training, use it
+    if best_model_state is not None:
+        random_classifier.load_state_dict(best_model_state)
+    else:
+        print("No improved model found during training, using final model state")
 
     # Test on test set
     test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
@@ -539,7 +552,6 @@ def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir
         json.dump(results, f, indent=4)
 
     return results
-
 
 def create_comparison_plots(results, label_mapping, output_dir):
     """Create plots comparing pretrained and random models"""
