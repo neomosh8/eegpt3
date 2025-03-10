@@ -142,9 +142,12 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        n_layer: int = 48
-        n_head: int = 25
-        n_embd: int = 1600
+        # n_layer: int = 48
+        # n_head: int = 25
+        # n_embd: int = 1600
+        n_layer: int = 36
+        n_head: int = 32  # Increased attention heads
+        n_embd: int = 2048  # Increased embedding dimension
     else:
         n_layer: int = 36
         n_head: int = 20
@@ -153,9 +156,9 @@ class GPTConfig:
         n_layer: int = 48  # reduced from 64 (multiple of 8)
         n_head: int = 24  # reduced from 32 (multiple of 8)
         n_embd: int = 1536  # reduced from 2048 (multiple of 128)
-    mlp_dropout: float = 0.02
-    attn_dropout: float = 0.02
-    resid_dropout: float = 0.02
+    mlp_dropout: float = 0.05
+    attn_dropout: float = 0.05
+    resid_dropout: float = 0.05
 
 
 class GPT(nn.Module):
