@@ -108,17 +108,15 @@ class VectorQuantizerEMA(nn.Module):
         quantized = quantized.view_as(z)
 
         if self.training:
-            # EMA update - critical part for device consistency
-            # Use inplace operations where possible to avoid device issues
-
-            # Update cluster size
+            # EMA update - avoiding in-place operations for better DDP compatibility
             cluster_size_new = encodings.sum(0)
-            self.cluster_size.data.mul_(self.decay).add_(cluster_size_new, alpha=1 - self.decay)
+            # Non-inplace version of EMA update
+            self.cluster_size.data = self.cluster_size.data * self.decay + cluster_size_new * (1 - self.decay)
 
-            # Update EMA weights
+            # Update EMA weights (non-inplace)
             flat_z_t = flat_z.t()
             embed_sums = torch.matmul(flat_z_t, encodings)
-            self.ema_w.data.mul_(self.decay).add_(embed_sums.t(), alpha=1 - self.decay)
+            self.ema_w.data = self.ema_w.data * self.decay + embed_sums.t() * (1 - self.decay)
 
             # Normalize embeddings
             n = self.cluster_size.sum()
@@ -135,61 +133,6 @@ class VectorQuantizerEMA(nn.Module):
         vq_loss = e_latent_loss + q_latent_loss
 
         return quantized_st, encoding_indices.view(z.shape[:-1]), vq_loss
-
-
-class ResBlock(nn.Module):
-    """Residual block with bottleneck design for efficiency"""
-
-    def __init__(self, channels, bottleneck_ratio=0.25, groups=1):
-        super().__init__()
-        bottleneck_channels = int(channels * bottleneck_ratio)
-        self.conv1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
-        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3,
-                               padding=1, groups=groups, bias=False)
-        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
-        self.conv3 = nn.Conv2d(bottleneck_channels, channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-
-        out = self.conv3(out)
-        out = self.bn3(out)
-
-        out += identity
-        out = self.relu(out)
-
-        return out
-
-
-class SEBlock(nn.Module):
-    """Squeeze-and-Excitation block for channel attention"""
-
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
 
 
 class ResBlock(nn.Module):
@@ -416,9 +359,10 @@ class DecoderWithNetAttr(Decoder, NetAttributeAdapter):
 class VQCAE(nn.Module):
     def __init__(self, in_channels=3, hidden_channels=128, codebook_size=128, decay=0.9, commitment_beta=0.2):
         super().__init__()
-        self.encoder = EncoderWithNetAttr(in_channels=3, hidden_channels=4096)
+        # Use the parameters rather than hard-coding values
+        self.encoder = EncoderWithNetAttr(in_channels=in_channels, hidden_channels=hidden_channels)
         self.vq = VectorQuantizerEMA(codebook_size, hidden_channels, decay=decay)
-        self.decoder = DecoderWithNetAttr(out_channels=3, hidden_channels=4096)
+        self.decoder = DecoderWithNetAttr(out_channels=in_channels, hidden_channels=hidden_channels)
         self.commitment_beta = commitment_beta
 
     def forward(self, x):
@@ -427,7 +371,6 @@ class VQCAE(nn.Module):
         z_q, idxs, vq_loss = self.vq(z_e)
         z_q = z_q.permute(0, 3, 1, 2).contiguous()
         x_rec = self.decoder(z_q)
-        # Keep everything on the same device
         loss = F.mse_loss(x_rec, x) + self.commitment_beta * vq_loss
         return x_rec, loss
 
@@ -436,8 +379,6 @@ class VQCAE(nn.Module):
         z_e = z_e.permute(0, 2, 3, 1).contiguous()
         _, idxs, _ = self.vq(z_e)
         return idxs
-
-
 # -------------------------
 # Distributed Training Setup
 # -------------------------
