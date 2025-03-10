@@ -350,7 +350,7 @@ if small_model:
     epoch_num = 4
     B = 1
     T = GPTConfig.block_size
-    total_batch_size = B * T * 8 * 8
+    total_batch_size = B * T * 8 * 4
 
 else:
     # epoch_num = 20
@@ -449,6 +449,7 @@ warmup_steps = int(0.01 * max_steps)
 
 if master_process:
     print("Max Steps: ", max_steps)
+    print("Steps_per_epoch: ", max_steps_for_one_epoch)
 
 plateau_count = 0
 best_val_loss = float('inf')
