@@ -1,3 +1,4 @@
+import copy
 import os
 import glob
 import json
@@ -334,224 +335,197 @@ def prepare_bci_data(tokenized_dir):
     return token_files, labels, label_mapping
 
 
-# Main evaluation function
-# Simplified version of the evaluate_bci_classification function
-def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir,
-                                epochs=15, batch_size=16, learning_rate=1e-4):
-    # Set up device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+from sklearn.model_selection import train_test_split
 
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
 
-    # Load pre-trained model
-    print("Loading pre-trained model...")
-    pretrained_model = load_pretrained_model(pretrained_model_path)
-    pretrained_model.to(device)
-    pretrained_model.eval()
-
-    # Prepare BCI data
-    print("Preparing BCI data...")
-    token_files, labels, label_mapping = prepare_bci_data(tokenized_dir)
-
-    if not token_files:
-        print("No tokenized files found!")
-        return
-
-    # Create dataset
-    dataset = BCIDataset(token_files, labels)
-
-    # Split into train, validation, test
-    train_size = int(0.7 * len(dataset))
-    val_size = int(0.15 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
-
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42)
+def stratified_split(token_files, labels, train_size=0.7, val_size=0.15, test_size=0.15, random_state=42):
+    """
+    Returns train, val, test splits (files and labels) with stratification.
+    The arguments `train_size, val_size, test_size` should sum to 1.0.
+    """
+    # First split (train vs. temp)
+    train_files, temp_files, train_labels, temp_labels = train_test_split(
+        token_files, labels,
+        test_size=(1 - train_size),
+        stratify=labels,
+        random_state=random_state
     )
 
-    print(f"Dataset splits: Train={train_size}, Val={val_size}, Test={test_size}")
+    # Now we need to split `temp_files` into val and test
+    # Suppose we want `val_size=0.15` and `test_size=0.15`. That means out of the 'temp' portion,
+    # we want val to be val_size/(val_size+test_size) fraction, etc.
+    relative_val = val_size / (val_size + test_size)
 
-    # Create data loaders
+    val_files, test_files, val_labels, test_labels = train_test_split(
+        temp_files, temp_labels,
+        test_size=(1 - relative_val),
+        stratify=temp_labels,
+        random_state=random_state
+    )
+
+    return (train_files, train_labels), (val_files, val_labels), (test_files, test_labels)
+
+
+# Main evaluation function
+# Simplified version of the evaluate_bci_classification function
+import copy  # Ensure you import copy at the top
+
+
+def evaluate_bci_classification(pretrained_model_path, tokenized_dir, output_dir,
+                                epochs=15, batch_size=16, learning_rate=1e-4):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load pretrained GPT
+    pretrained_model = load_pretrained_model(pretrained_model_path).to(device)
+    pretrained_model.eval()
+
+    # Prepare data
+    token_files, labels, label_mapping = prepare_bci_data(tokenized_dir)
+    num_classes = len(label_mapping)
+
+    # STRATIFIED SPLIT (train=70%, val=15%, test=15%)
+    (train_files, train_labels), (val_files, val_labels), (test_files, test_labels) = stratified_split(
+        token_files, labels, train_size=0.70, val_size=0.15, test_size=0.15, random_state=42
+    )
+
+    train_dataset = BCIDataset(train_files, train_labels)
+    val_dataset = BCIDataset(val_files, val_labels)
+    test_dataset = BCIDataset(test_files, test_labels)
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
     test_loader = DataLoader(test_dataset, batch_size=batch_size)
 
-    # Run two evaluations: pretrained vs. random initialization
     results = {}
 
-    # 1. Evaluate with pretrained model
-    num_classes = len(label_mapping)
-    print(f"\n--- Evaluating with pre-trained model ({num_classes} classes) ---")
-
+    # -----------------------------
+    # 1. Evaluate Pretrained Model
+    # -----------------------------
     model = BCIClassifier(pretrained_model, num_classes, freeze_backbone=True).to(device)
-
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
 
-    # Training loop
-    best_val_acc = -1  # Initialize to -1 to ensure we save at least one model
+    # Initialize lists to record metrics during training
+    train_losses_pre = []
+    val_losses_pre = []
+    train_accs_pre = []
+    val_accs_pre = []
+
+    best_val_acc = 0
     best_model_state = None
-    train_losses, val_losses = [], []
-    train_accs, val_accs = [], []
-
     for epoch in range(epochs):
-        # Train
-        train_loss, train_acc, train_f1 = train_epoch(
-            model, train_loader, criterion, optimizer, device
-        )
-
-        # Validate
-        val_loss, val_acc, val_f1, _, _, _ = evaluate(
-            model, val_loader, criterion, device
-        )
-
-        # Update learning rate
+        train_loss, train_acc, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, val_acc, val_f1, _, _, _ = evaluate(model, val_loader, criterion, device)
         scheduler.step(val_loss)
 
-        # Save metrics
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_accs.append(train_acc)
-        val_accs.append(val_acc)
+        train_losses_pre.append(train_loss)
+        val_losses_pre.append(val_loss)
+        train_accs_pre.append(train_acc)
+        val_accs_pre.append(val_acc)
 
-        # Print progress
-        print(f"Epoch {epoch + 1}/{epochs}")
-        print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
-        print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
+        print(f"Pretrained Epoch {epoch + 1}/{epochs}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f}, "
+              f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}")
 
-        # Save best model state in memory
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_model_state = model.state_dict().copy()
-            print("Found new best model!")
+            best_model_state = copy.deepcopy(model.state_dict())
 
-            # Optionally save to disk as well
-            torch.save(best_model_state, os.path.join(output_dir, "best_pretrained_model.pt"))
-
-    # If we found a better model during training, use it
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    # Test on test set
-    test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
-        model, test_loader, criterion, device
-    )
+    test_loss, test_acc, test_f1, test_cm, _, _ = evaluate(model, test_loader, criterion, device)
 
-    print(f"\nPretrained Model Test Results:")
-    print(f"Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}, F1 Score: {test_f1:.4f}")
-
-    # Save pretrained results
+    # Save pretrained results using the correct variables
     results['pretrained'] = {
         'test_loss': test_loss,
         'test_accuracy': test_acc,
         'test_f1': test_f1,
-        'confusion_matrix': conf_mat.tolist(),
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'train_accs': train_accs,
-        'val_accs': val_accs
+        'confusion_matrix': test_cm.tolist(),  # use test_cm which is defined above
+        'train_losses': train_losses_pre,
+        'val_losses': val_losses_pre,
+        'train_accs': train_accs_pre,
+        'val_accs': val_accs_pre
     }
 
-    # 2. Evaluate with randomly initialized model
-    print("\n--- Evaluating with randomly initialized model ---")
+    print(f"\nPretrained Model Test Results:")
+    print(f"Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}, F1 Score: {test_f1:.4f}")
 
-    # Create a new model with same architecture but random weights
+    # -----------------------------
+    # 2. Evaluate Randomly Initialized Model
+    # -----------------------------
+    # Here, re-initialize a fresh model (ensure this is done inside the evaluation block)
     config = pretrained_model.config
     random_model = GPT(config)
-
-    # Initialize the model with random weights
     for p in random_model.parameters():
         if p.dim() > 1:
             nn.init.xavier_normal_(p)
-
     random_model.to(device)
 
-    # Create classifier with random model
     random_classifier = BCIClassifier(random_model, num_classes, freeze_backbone=False).to(device)
-
-    # Training setup
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(random_classifier.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5)
 
-    # Training loop
+    # Initialize lists for random model training metrics
+    train_losses_rand = []
+    val_losses_rand = []
+    train_accs_rand = []
+    val_accs_rand = []
+
     best_val_acc = -1
     best_model_state = None
-    train_losses, val_losses = [], []
-    train_accs, val_accs = [], []
 
     for epoch in range(epochs):
-        # Train
-        train_loss, train_acc, train_f1 = train_epoch(
-            random_classifier, train_loader, criterion, optimizer, device
-        )
-
-        # Validate
-        val_loss, val_acc, val_f1, _, _, _ = evaluate(
-            random_classifier, val_loader, criterion, device
-        )
-
-        # Update learning rate
+        train_loss, train_acc, train_f1 = train_epoch(random_classifier, train_loader, criterion, optimizer, device)
+        val_loss, val_acc, val_f1, _, _, _ = evaluate(random_classifier, val_loader, criterion, device)
         scheduler.step(val_loss)
 
-        # Save metrics
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_accs.append(train_acc)
-        val_accs.append(val_acc)
+        train_losses_rand.append(train_loss)
+        val_losses_rand.append(val_loss)
+        train_accs_rand.append(train_acc)
+        val_accs_rand.append(val_acc)
 
-        # Print progress
-        print(f"Epoch {epoch + 1}/{epochs}")
-        print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
-        print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
+        print(f"Random Model Epoch {epoch + 1}/{epochs}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f}, "
+              f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}")
 
-        # Save best model state in memory
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_model_state = random_classifier.state_dict().copy()
+            best_model_state = copy.deepcopy(random_classifier.state_dict())
             print("Found new best random model!")
-
-            # Optionally save to disk as well
             torch.save(best_model_state, os.path.join(output_dir, "best_random_model.pt"))
 
-    # If we found a better model during training, use it
     if best_model_state is not None:
         random_classifier.load_state_dict(best_model_state)
     else:
         print("No improved model found during training, using final model state")
 
-    # Test on test set
-    test_loss, test_acc, test_f1, conf_mat, _, _ = evaluate(
-        random_classifier, test_loader, criterion, device
-    )
+    test_loss_rand, test_acc_rand, test_f1_rand, test_cm_rand, _, _ = evaluate(random_classifier, test_loader,
+                                                                               criterion, device)
 
     print(f"\nRandom Model Test Results:")
-    print(f"Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}, F1 Score: {test_f1:.4f}")
+    print(f"Loss: {test_loss_rand:.4f}, Accuracy: {test_acc_rand:.4f}, F1 Score: {test_f1_rand:.4f}")
 
-    # Save random model results
     results['random'] = {
-        'test_loss': test_loss,
-        'test_accuracy': test_acc,
-        'test_f1': test_f1,
-        'confusion_matrix': conf_mat.tolist(),
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'train_accs': train_accs,
-        'val_accs': val_accs
+        'test_loss': test_loss_rand,
+        'test_accuracy': test_acc_rand,
+        'test_f1': test_f1_rand,
+        'confusion_matrix': test_cm_rand.tolist(),
+        'train_losses': train_losses_rand,
+        'val_losses': val_losses_rand,
+        'train_accs': train_accs_rand,
+        'val_accs': val_accs_rand
     }
 
-    # Create comparison plots
+    # Create comparison plots and save overall results as before
     create_comparison_plots(results, label_mapping, output_dir)
 
-    # Save overall results
     with open(os.path.join(output_dir, "classification_results.json"), "w") as f:
         json.dump(results, f, indent=4)
 
     return results
+
 
 def create_comparison_plots(results, label_mapping, output_dir):
     """Create plots comparing pretrained and random models"""
