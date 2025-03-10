@@ -348,9 +348,9 @@ def moving_average(values, window_size=10):
 
 if small_model:
     epoch_num = 4
-    B = 4
+    B = 12
     T = GPTConfig.block_size
-    total_batch_size = B * T * 8 * 3
+    total_batch_size = B * T * 8
 
 else:
     # epoch_num = 20
