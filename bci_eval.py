@@ -337,13 +337,17 @@ def prepare_bci_data(tokenized_dir):
 
 from sklearn.model_selection import train_test_split
 
+from sklearn.model_selection import train_test_split
+from collections import Counter
 
-def stratified_split(token_files, labels, train_size=0.7, val_size=0.15, test_size=0.15, random_state=42):
+
+def stratified_split(token_files, labels, train_size=0.70, val_size=0.15, test_size=0.15, random_state=42):
     """
-    Returns train, val, test splits (files and labels) with stratification.
-    The arguments `train_size, val_size, test_size` should sum to 1.0.
+    Splits token_files and labels into three subsets (train, validation, test) using stratification
+    where possible. If the temporary set (for val+test) is too small to stratify (i.e. one class has <2 samples),
+    then a non-stratified split is performed for that split.
     """
-    # First split (train vs. temp)
+    # First split: train vs. temp
     train_files, temp_files, train_labels, temp_labels = train_test_split(
         token_files, labels,
         test_size=(1 - train_size),
@@ -351,18 +355,25 @@ def stratified_split(token_files, labels, train_size=0.7, val_size=0.15, test_si
         random_state=random_state
     )
 
-    # Now we need to split `temp_files` into val and test
-    # Suppose we want `val_size=0.15` and `test_size=0.15`. That means out of the 'temp' portion,
-    # we want val to be val_size/(val_size+test_size) fraction, etc.
+    # Calculate how many samples in temp should go to validation vs. test
     relative_val = val_size / (val_size + test_size)
 
-    val_files, test_files, val_labels, test_labels = train_test_split(
-        temp_files, temp_labels,
-        test_size=(1 - relative_val),
-        stratify=temp_labels,
-        random_state=random_state
-    )
-
+    # Check if the temp set is large enough for stratification
+    temp_counts = Counter(temp_labels)
+    if min(temp_counts.values()) < 2:
+        print("Warning: Temporary split too small for stratification; falling back to non-stratified split.")
+        val_files, test_files, val_labels, test_labels = train_test_split(
+            temp_files, temp_labels,
+            test_size=(1 - relative_val),
+            random_state=random_state
+        )
+    else:
+        val_files, test_files, val_labels, test_labels = train_test_split(
+            temp_files, temp_labels,
+            test_size=(1 - relative_val),
+            stratify=temp_labels,
+            random_state=random_state
+        )
     return (train_files, train_labels), (val_files, val_labels), (test_files, test_labels)
 
 
