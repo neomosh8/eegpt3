@@ -437,7 +437,7 @@ if ddp:
 raw_model = model.module if ddp else model  # always contains the "raw" unwrapped model
 
 max_lr = 4e-3
-min_lr = 3e-4
+min_lr = 1e-4
 max_steps = math.ceil(400e6 // total_batch_size) * epoch_num
 warmup_steps = int(0.5 * max_steps)
 
