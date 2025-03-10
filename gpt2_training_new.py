@@ -145,7 +145,7 @@ class GPTConfig:
         # n_layer: int = 48
         # n_head: int = 25
         # n_embd: int = 1600
-        n_layer: int = 38
+        n_layer: int = 36
         n_head: int = 32  # Increased attention heads
         n_embd: int = 2048  # Increased embedding dimension
     else:
