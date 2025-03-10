@@ -164,9 +164,9 @@ def process_csv_file_for_bci(csv_file, output_dir, overlap_percent=50, window_le
         all_tokens = torch.cat(token_list)
 
         # Add EOS token
-        eos_token = torch.tensor([_GLOBAL_TOKENIZER.get_eos_token()], device=all_tokens.device)
-        all_tokens_with_eos = torch.cat([all_tokens, eos_token])
-
+        all_tokens_with_eos = torch.cat(
+            [all_tokens, torch.tensor([_GLOBAL_TOKENIZER.get_eos_token()], device=all_tokens.device)])
+        print(f"Done with {i}/{num_windows}")
         # Create output filename
         output_file = f"{base_name}_tokens.pt"
         output_path = os.path.join(output_dir, output_file)
