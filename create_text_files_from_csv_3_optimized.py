@@ -402,7 +402,7 @@ if __name__ == "__main__":
 
     # List CSV files from S3
     print("Listing S3 folders...")
-    folders = list_s3_folders()  # Process first 40 folders
+    folders = list_s3_folders()[0:3]  # Process first 40 folders
 
     csv_files = []
     for i, folder in enumerate(folders, 1):
