@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
+from model_new_arch_small import base_lr
 
 small_model = True
 resume = False
@@ -440,6 +441,7 @@ raw_model = model.module if ddp else model  # always contains the "raw" unwrappe
 
 max_lr = 4e-3
 min_lr = 1e-4
+base_lr = 3e-4
 tokens_per_step =  B * T * ddp_world_size
 max_steps_for_one_epoch = train_loader.total_len // tokens_per_step
 max_steps =  epoch_num  * max_steps_for_one_epoch
@@ -461,13 +463,12 @@ optimizer = raw_model.configure_optimizer(weight_decay=0.05, learning_rate=min_l
 max_lr_per_group = []
 for group in optimizer.param_groups:
     # Scale max_lr based on the base learning rate in each group
-    group_lr = group['lr']
-    if group_lr == learning_rate * 0.1:  # Embedding params
-        max_lr_per_group.append(max_lr * 0.1)
-    elif group_lr == learning_rate * 2.0:  # Attention params
-        max_lr_per_group.append(max_lr * 2.0)
-    else:  # Other params with base learning rate
-        max_lr_per_group.append(max_lr)
+    base_lr = group['lr']
+    # Calculate the ratio to min_lr
+    lr_ratio = base_lr / min_lr if min_lr > 0 else 1.0
+    # Apply the same ratio to max_lr
+    group_max_lr = max_lr * lr_ratio
+    max_lr_per_group.append(group_max_lr)
 
 # Now create the scheduler with the correct number of max_lr values
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -627,7 +628,7 @@ for step in range(start_step, max_steps):
     other_params = [p for n, p in raw_model.named_parameters() if 'wte' not in n and 'attn' not in n]
 
     # Apply stricter clipping to embeddings
-    torch.nn.utils.clip_grad_norm_(embed_params, 0.5)  # Stricter for embeddings
+    norm=torch.nn.utils.clip_grad_norm_(embed_params, 0.5)  # Stricter for embeddings
     torch.nn.utils.clip_grad_norm_(attn_params, 2.0)  # More lenient for attention
     torch.nn.utils.clip_grad_norm_(other_params, 1.0)  # Default for everything else
 
