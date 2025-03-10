@@ -245,9 +245,9 @@ class GPT(nn.Module):
             wd = weight_decay if param.dim() >= 2 else 0.0
 
             if 'wte' in name:
-                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.1})
+                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.05})
             elif 'attn' in name:
-                attn_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 2.0})
+                attn_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate *5.0})
             else:
                 other_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate})
 
@@ -644,7 +644,7 @@ for step in range(start_step, max_steps):
 
     if master_process:
         print(
-            f"Step {step}: Loss:{loss_accum.item():.6f} | lr: {formatted_lrs} | norm {norm:.4f} | dt: {1000 * dt:.2f}ms | tok/sec: {token_per_second:.1f}")
+            f"Step {step}: Loss:{loss_accum.item():.6f}  | norm {norm:.4f} | dt: {1000 * dt:.2f}ms | tok/sec: {token_per_second:.1f}")
         with open(log_file, "a") as f:
             train_loss_val = loss_accum.item()
             f.write(f"{step} train loss: {train_loss_val:.6f} lr: {formatted_lrs} | norm {norm:.4f}\n")
