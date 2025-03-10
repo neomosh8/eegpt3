@@ -341,7 +341,7 @@ def moving_average(values, window_size=10):
 if small_model:
     epoch_num = 4
     total_batch_size = 65536 *2
-    B = 2
+    B = 4
     T = 4096
 else:
     # epoch_num = 20
@@ -429,8 +429,8 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model  # always contains the "raw" unwrapped model
 
-max_lr = 1e-3
-min_lr = 1e-4
+max_lr = 4e-3
+min_lr = 3e-4
 max_steps = math.ceil(400e6 // total_batch_size) * epoch_num
 warmup_steps = int(0.1 * max_steps)
 
@@ -442,7 +442,7 @@ best_val_loss = float('inf')
 no_improvement_count = 0
 patience = 3
 
-optimizer = raw_model.configure_optimizer(weight_decay=0.1, learning_rate=min_lr, device=device)
+optimizer = raw_model.configure_optimizer(weight_decay=0.05, learning_rate=min_lr, device=device)
 
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
