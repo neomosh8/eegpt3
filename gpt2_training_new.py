@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
-from model_new_arch_small import base_lr
 
 small_model = True
 resume = False
