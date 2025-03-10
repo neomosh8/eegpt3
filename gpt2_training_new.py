@@ -137,18 +137,18 @@ class GPTConfig:
     block_size: int = 8192
     vocab_size: int = 129  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        # n_layer: int = 12  # number of layers
-        # n_head: int = 12  # number of heads
-        # n_embd: int = 768  # embedding dimension
+        n_layer: int = 80  # number of layers
+        n_head: int = 12  # number of heads
+        n_embd: int = 768  # embedding dimension
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
         # n_layer: int = 48
         # n_head: int = 25
         # n_embd: int = 1600
-        n_layer: int = 48
-        n_head: int = 25  # Increased attention heads
-        n_embd: int = 1600  # Increased embedding dimension
+        # n_layer: int = 48
+        # n_head: int = 25  # Increased attention heads
+        # n_embd: int = 1600  # Increased embedding dimension
     else:
         n_layer: int = 36
         n_head: int = 20
@@ -175,9 +175,9 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embd)
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight
-
         self.apply(self._init_weights)
+
+        self.lm_head.weight = self.transformer.wte.weight
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -602,7 +602,7 @@ for step in range(start_step, max_steps):
             c_attn_grad_norm = c_attn_grad.norm(2).item() if c_attn_grad is not None else 0.0
 
             print(f"[Grad Norms] wte={wte_grad_norm:.4f}, c_attn={c_attn_grad_norm:.4f}")
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
     optimizer.step()
     scheduler.step()  # updates the learning rate according to OneCycleLR
 
