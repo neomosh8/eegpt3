@@ -117,12 +117,17 @@ def process_csv_file_for_bci(csv_file, output_dir, overlap_percent=50, window_le
 
         # Initialize a single token list
         token_list = []
+        print(f"Starting tokenization of {len(keep_indices)} windows for '{base_name}'...")
 
         # Process all windows with overlap
         for i in range(num_windows):
             # Skip windows that didn't pass artifact rejection
             if i not in keep_indices:
                 continue
+
+            # Add progress reporting every 100 windows
+            if i % 100 == 0:
+                print(f"  Processing window {i}/{num_windows} for '{base_name}'...")
 
             window_start = i * step_size
             window_end = window_start + n_window_samples
@@ -140,7 +145,7 @@ def process_csv_file_for_bci(csv_file, output_dir, overlap_percent=50, window_le
                 sampling_period=1.0 / new_sps_val,
                 verbose=False
             )
-
+            print("wavelet_decomp")
             # Check if we have the expected number of channels
             if len(decomposed_channels) < len(regional_preprocessed):
                 continue
@@ -152,6 +157,7 @@ def process_csv_file_for_bci(csv_file, output_dir, overlap_percent=50, window_le
 
             # Encode the combined image with the global tokenizer
             token_indices = _GLOBAL_TOKENIZER.encode(combined_image)
+            print("encoded")
 
             # Store the flattened token indices
             token_list.append(token_indices.flatten())
