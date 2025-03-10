@@ -145,7 +145,7 @@ class GPTConfig:
         # n_layer: int = 48
         # n_head: int = 25
         # n_embd: int = 1600
-        n_layer: int = 36
+        n_layer: int = 40
         n_head: int = 32  # Increased attention heads
         n_embd: int = 2048  # Increased embedding dimension
     else:
@@ -348,7 +348,7 @@ if small_model:
     epoch_num = 4
     B = 1
     T = 8192
-    total_batch_size = B * T * 8
+    total_batch_size = B * T * 8 * 10
 
 else:
     # epoch_num = 20
@@ -439,7 +439,7 @@ raw_model = model.module if ddp else model  # always contains the "raw" unwrappe
 max_lr = 4e-3
 min_lr = 1e-4
 max_steps = math.ceil(400e6 // total_batch_size) * epoch_num
-warmup_steps = int(0.5 * max_steps)
+warmup_steps = int(0.01 * max_steps)
 
 if master_process:
     print("Max Steps: ", max_steps)
