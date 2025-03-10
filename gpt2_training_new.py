@@ -142,9 +142,9 @@ class GPTConfig:
         # n_layer: int = 36
         # n_head: int = 20
         # n_embd: int = 1280
-        n_layer: int = 48
-        n_head: int = 25
-        n_embd: int = 1600
+        n_layer: int = 40
+        n_head: int = 20  # Keep same head count
+        n_embd: int = 1408  # Increased from 1280
     else:
         n_layer: int = 36
         n_head: int = 20
