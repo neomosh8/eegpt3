@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
-from model_new_arch_small import max_steps
 
 small_model = True
 resume = False
