@@ -528,7 +528,7 @@ for step in range(start_step, max_steps):
             for _ in range(val_loss_steps):
                 x_val, y_val = val_loader.next_batch()
                 x_val, y_val = x_val.to(device), y_val.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.float16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(x_val, y_val)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
@@ -580,7 +580,7 @@ for step in range(start_step, max_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         if device == 'cuda':
-            with torch.autocast(device_type=device, dtype=torch.float16):
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
                 logits, loss = model(idx=x, targets=y)
         else:
             logits, loss = model(idx=x, targets=y)
