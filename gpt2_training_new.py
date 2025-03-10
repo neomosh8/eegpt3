@@ -136,12 +136,12 @@ class GPTConfig:
     block_size: int = 8192
     vocab_size: int = 129  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
-        n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
-        n_embd: int = 768  # embedding dimension
-        # n_layer: int = 36
-        # n_head: int = 20
-        # n_embd: int = 1280
+        # n_layer: int = 12  # number of layers
+        # n_head: int = 12  # number of heads
+        # n_embd: int = 768  # embedding dimension
+        n_layer: int = 36
+        n_head: int = 20
+        n_embd: int = 1280
     else:
         n_layer: int = 36
         n_head: int = 20
@@ -150,9 +150,9 @@ class GPTConfig:
         n_layer: int = 48  # reduced from 64 (multiple of 8)
         n_head: int = 24  # reduced from 32 (multiple of 8)
         n_embd: int = 1536  # reduced from 2048 (multiple of 128)
-    mlp_dropout: float = 0.05
-    attn_dropout: float = 0.05
-    resid_dropout: float = 0.05
+    mlp_dropout: float = 0.02
+    attn_dropout: float = 0.02
+    resid_dropout: float = 0.02
 
 
 class GPT(nn.Module):
