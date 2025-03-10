@@ -137,52 +137,216 @@ class VectorQuantizerEMA(nn.Module):
         return quantized_st, encoding_indices.view(z.shape[:-1]), vq_loss
 
 
-class Encoder(nn.Module):
-    def __init__(self, in_channels=3, hidden_channels=128):
+class ResBlock(nn.Module):
+    """Residual block with bottleneck design for efficiency"""
+
+    def __init__(self, channels, bottleneck_ratio=0.25, groups=1):
         super().__init__()
-        self.net = nn.Sequential(
-            # Initial block: feature extraction without spatial reduction
-            nn.Conv2d(in_channels, 32, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
-            # First downsampling: spatial dimensions halved (factor 2)
-            nn.Conv2d(32, 64, 3, 2, 1), nn.ReLU(),
-            # Deep block at this resolution
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            # Second downsampling: spatial dimensions halved again (overall factor 4)
-            nn.Conv2d(64, 128, 3, 2, 1), nn.ReLU(),
-            # Final deep block at the lower resolution
-            nn.Conv2d(128, 128, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(128, hidden_channels, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1), nn.ReLU()
+        bottleneck_channels = int(channels * bottleneck_ratio)
+        self.conv1 = nn.Conv2d(channels, bottleneck_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3,
+                               padding=1, groups=groups, bias=False)
+        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv3 = nn.Conv2d(bottleneck_channels, channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation block for channel attention"""
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class Encoder(nn.Module):
+    def __init__(self, in_channels=3, hidden_channels=128):
+        super().__init__()
+        # Default to original hidden_channels value for compatibility
+
+        # We'll build the network procedurally but still keep the 'net' attribute
+        # for compatibility with code that might access encoder.net
+
+        layers = []
+
+        # Initial feature extraction without spatial reduction
+        layers.extend([
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        # Add a residual connection for the initial block
+        if hidden_channels >= 256:  # Only add SE blocks for larger models
+            layers.append(SEBlock(32, reduction=4))
+
+        # First downsampling: spatial dimensions halved
+        layers.extend([
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        # Deep block at this resolution
+        layers.append(ResBlock(64, bottleneck_ratio=0.5))
+        layers.append(nn.ReLU(inplace=True))
+
+        # Second downsampling: spatial dimensions halved again
+        layers.extend([
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        # If using 4096 hidden channels, we need a progression
+        if hidden_channels > 128:
+            intermediate_channels = min(1024, hidden_channels // 4)
+
+            # Third downsampling for very large hidden_channels
+            if hidden_channels >= 1024:
+                layers.extend([
+                    nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+                    nn.ReLU(inplace=True),
+                    ResBlock(256),
+                    nn.Conv2d(256, intermediate_channels, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                ])
+            else:
+                layers.extend([
+                    nn.Conv2d(128, intermediate_channels, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                ])
+
+            # Final projection to hidden_channels
+            layers.extend([
+                nn.Conv2d(intermediate_channels, hidden_channels, kernel_size=1),
+                nn.ReLU(inplace=True),
+            ])
+        else:
+            # For small hidden_channels, follow the original pattern
+            layers.extend([
+                nn.Conv2d(128, hidden_channels, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=True),
+            ])
+
+        # Store as a sequential for compatibility
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        # Keep the same interface
         return self.net(x)
 
 
 class Decoder(nn.Module):
     def __init__(self, out_channels=3, hidden_channels=128):
         super().__init__()
-        self.net = nn.Sequential(
-            # Initial deep block at low resolution
-            nn.Conv2d(hidden_channels, hidden_channels, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(hidden_channels, 128, 3, 1, 1), nn.ReLU(),
-            # First upsampling: doubles spatial dimensions (inverse of second downsampling)
-            nn.ConvTranspose2d(128, 64, 3, 2, 1, output_padding=1), nn.ReLU(),
-            # Deep block at intermediate resolution
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(64, 64, 3, 1, 1), nn.ReLU(),
-            # Second upsampling: doubles spatial dimensions (inverse of first downsampling)
-            nn.ConvTranspose2d(64, 32, 3, 2, 1, output_padding=1), nn.ReLU(),
-            # Final refinement block
-            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(),
-            nn.Conv2d(32, out_channels, 3, 1, 1)
-        )
+        # Default to original hidden_channels value for compatibility
+
+        # We'll build the network procedurally but still keep the 'net' attribute
+        # for compatibility with code that might access decoder.net
+
+        layers = []
+
+        # If using large hidden_channels, we need a progressive reduction
+        if hidden_channels > 128:
+            intermediate_channels = min(1024, hidden_channels // 4)
+
+            # Initial projection from hidden_channels
+            layers.extend([
+                nn.Conv2d(hidden_channels, intermediate_channels, kernel_size=1),
+                nn.ReLU(inplace=True),
+            ])
+
+            # For very large hidden_channels, add upsampling
+            if hidden_channels >= 1024:
+                layers.extend([
+                    nn.Conv2d(intermediate_channels, 256, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    ResBlock(256),
+                    nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+                    nn.ReLU(inplace=True),
+                ])
+            else:
+                layers.extend([
+                    nn.Conv2d(intermediate_channels, 128, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                ])
+        else:
+            # For small hidden_channels, follow the original pattern
+            layers.extend([
+                nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_channels, 128, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=True),
+            ])
+
+        # First upsampling: doubles spatial dimensions
+        layers.extend([
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        # Deep block at intermediate resolution
+        layers.append(ResBlock(64, bottleneck_ratio=0.5))
+        layers.append(nn.ReLU(inplace=True))
+
+        # Second upsampling: doubles spatial dimensions again
+        layers.extend([
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        # Final refinement block
+        layers.extend([
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+        ])
+
+        if hidden_channels >= 256:  # Only add SE blocks for larger models
+            layers.append(SEBlock(32, reduction=4))
+
+        # Output layer
+        layers.append(nn.Conv2d(32, out_channels, kernel_size=3, stride=1, padding=1))
+
+        # Store as a sequential for compatibility
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
+        # Keep the same interface
         return self.net(x)
 
 
