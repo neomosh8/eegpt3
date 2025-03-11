@@ -335,8 +335,8 @@ def train_model():
         'data_dir': 'training_data_shards',
         'log_dir': 'logs',
         'vocab_size': 129,  # From second document
-        'd_model': 512,
-        'n_head': 4,
+        'd_model': 360,
+        'n_head': 6,
         'intra_layers': 4,
         'inter_layers': 4,
         'epoch_length': 2304,  # Length of each EEG epoch
