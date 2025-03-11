@@ -254,7 +254,7 @@ def main():
     # Model parameters
     parser.add_argument("--codebook_size", type=int, default=129,
                         help="Size of the VQAE codebook")
-    parser.add_argument("--window_size", type=int, default=2304,
+    parser.add_argument("--window_size", type=int, default=2306,
                         help="Size of flattened EEG window (32x72)")
     parser.add_argument("--d_model", type=int, default=768,
                         help="Hidden dimension of the model")
@@ -268,7 +268,7 @@ def main():
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=16,
                         help="Batch size per GPU")
-    parser.add_argument("--seq_length", type=int, default=4608,
+    parser.add_argument("--seq_length", type=int, default=2306*2,
                         help="Sequence length for training")
     parser.add_argument("--learning_rate", type=float, default=5e-5,
                         help="Learning rate")
