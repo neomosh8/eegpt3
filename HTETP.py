@@ -30,12 +30,12 @@ class IntraEpochTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
 
-        # Global pooling to get epoch representation
-        self.pool = nn.Sequential(
-            nn.Linear(d_model * 2304, d_model * 4),
-            nn.GELU(),
-            nn.Linear(d_model * 4, d_model)
-        )
+        # # Global pooling to get epoch representation
+        # self.pool = nn.Sequential(
+        #     nn.Linear(d_model * 2304, d_model * 4),
+        #     nn.GELU(),
+        #     nn.Linear(d_model * 4, d_model)
+        # )
 
     def forward(self, x):
         # x shape: [batch_size, epoch_length, d_model]
