@@ -320,7 +320,7 @@ def train_model():
         'n_head': 8,
         'intra_layers': 4,
         'inter_layers': 4,
-        'epoch_length': 2400,  # Length of each EEG epoch
+        'epoch_length': 2034,  # Length of each EEG epoch
         'max_epochs': 10,  # Number of epochs in sequence for model
         'num_epochs': 4,  # Number of training epochs
         'batch_size': 16,
