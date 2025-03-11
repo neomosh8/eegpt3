@@ -21,7 +21,7 @@ class IntraEpochTransformer(nn.Module):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
         # No or minimal positional encoding since tokens aren't sequential in time
-        self.pos_embedding = nn.Parameter(torch.zeros(1, 2400, d_model))
+        self.pos_embedding = nn.Parameter(torch.zeros(1, 2304, d_model))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
