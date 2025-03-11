@@ -43,17 +43,24 @@ class IntraEpochTransformer(nn.Module):
         x = x + self.pos_embedding  # Add learned positional encoding
         x = self.transformer(x)  # [batch_size, epoch_length, d_model]
 
-        # Use global mean pooling instead of flattening
+        # Use global mean pooling
         epoch_embedding = torch.mean(x, dim=1)  # [batch_size, d_model]
-        return epoch_embedding, x
+        return epoch_embedding
 
 
 class InterEpochTransformer(nn.Module):
-    """Processes sequence of epochs to capture temporal patterns"""
+    """Processes sequence of epochs to capture temporal patterns - with causal masking"""
 
     def __init__(self, d_model=512, nhead=8, num_layers=4, max_epochs=10):
         super().__init__()
         self.pos_encoding = nn.Parameter(torch.zeros(1, max_epochs, d_model))
+
+        # Create a causal mask for the transformer
+        # This ensures each epoch only attends to itself and previous epochs
+        self.register_buffer(
+            "causal_mask",
+            torch.triu(torch.ones(max_epochs, max_epochs) * float('-inf'), diagonal=1)
+        )
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -65,7 +72,11 @@ class InterEpochTransformer(nn.Module):
     def forward(self, x):
         # x shape: [batch_size, num_epochs, d_model]
         x = x + self.pos_encoding[:, :x.size(1), :]  # Add positional encoding
-        x = self.transformer(x)  # [batch_size, num_epochs, d_model]
+
+        # Apply causal mask to prevent attending to future epochs
+        # Only use the portion of the mask that matches the current sequence length
+        mask = self.causal_mask[:x.size(1), :x.size(1)]
+        x = self.transformer(x, mask=mask)  # [batch_size, num_epochs, d_model]
         return x
 
 
@@ -89,7 +100,6 @@ class EpochPredictionHead(nn.Module):
         logits = self.proj(x)  # [batch_size, epoch_length * vocab_size]
         logits = logits.view(-1, self.epoch_length, self.vocab_size)  # [batch_size, epoch_length, vocab_size]
         return logits
-
 
 class HierarchicalEEGTransformer(nn.Module):
     def __init__(self, vocab_size, d_model=512, nhead=8,
@@ -130,15 +140,13 @@ class HierarchicalEEGTransformer(nn.Module):
 
         # Process each epoch to get embeddings
         epoch_embeddings = []
-        token_embeddings = []
         for i in range(num_epochs):
-            emb, tokens = self.intra_transformer(x_epochs[:, i])
+            emb = self.intra_transformer(x_epochs[:, i])
             epoch_embeddings.append(emb)
-            token_embeddings.append(tokens)
 
         epoch_embeddings = torch.stack(epoch_embeddings, dim=1)  # [batch_size, num_epochs, d_model]
 
-        # Process sequence of epochs
+        # Process sequence of epochs with causal masking
         temporal_embeddings = self.inter_transformer(epoch_embeddings)  # [batch_size, num_epochs, d_model]
 
         # Predict next epoch from the last temporal embedding
@@ -160,7 +168,6 @@ class HierarchicalEEGTransformer(nn.Module):
 
         return next_epoch_pred, loss
 
-    # Added from the second document
     def configure_optimizer(self, weight_decay, learning_rate, device):
         """Configure optimizer with different learning rates for different components"""
         # Group parameters by component type
@@ -193,7 +200,6 @@ class HierarchicalEEGTransformer(nn.Module):
         )
 
         return optimizer
-
 
 # Dataloader from the second document
 class EEGTokenDataLoader:
