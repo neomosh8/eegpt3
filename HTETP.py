@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import math
 
+from tqdm import tqdm
+
 
 # Model definition with special handling for pad tokens between windows
 class HierarchicalEEGTransformer(nn.Module):
@@ -584,13 +586,28 @@ def main():
     )
 
     # Training loop
-    for epoch in range(args.epochs):
+    # Training loop with tqdm progress bars
+    if rank == 0:
+        epoch_bar = tqdm(range(args.epochs), desc="Training", position=0)
+    else:
+        epoch_bar = range(args.epochs)
+
+    for epoch in epoch_bar:
         model.train()
         train_loss = 0.0
         num_train_batches = 0
 
+        # Create step progress bar (only on rank 0)
+        if rank == 0:
+            step_bar = tqdm(range(args.steps_per_epoch),
+                            desc=f"Epoch {epoch + 1}/{args.epochs}",
+                            position=1,
+                            leave=False)
+        else:
+            step_bar = range(args.steps_per_epoch)
+
         # Train for a number of steps per epoch
-        for step in range(args.steps_per_epoch):
+        for step in step_bar:
             # Get next batch
             batch = train_loader.next_batch()
             if batch is None:
@@ -604,7 +621,6 @@ def main():
                 print(f"Codebook size: {args.codebook_size}")
 
             # Clamp values to valid range to avoid CUDA assertion
-            # This ensures no token ID is higher than codebook_size-1
             batch = torch.clamp(batch, max=args.codebook_size - 1)
 
             # Forward pass: input is all but last token, target is all but first token
@@ -618,9 +634,6 @@ def main():
             min_length = min(logits.size(1), target.size(1))
             logits = logits[:, :min_length, :]
             target = target[:, :min_length]
-
-            # Create mask for padding tokens to exclude them from loss
-            pad_mask = (target != args.pad_token_id)
 
             # Compute loss with padding token ignored
             loss = F.cross_entropy(
@@ -643,6 +656,10 @@ def main():
             train_loss += loss.item()
             num_train_batches += 1
 
+            # Update step progress bar with current loss (only on rank 0)
+            if rank == 0:
+                step_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+
         # Average training loss
         train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0
 
@@ -651,13 +668,36 @@ def main():
         dist.all_reduce(train_loss_tensor)
         train_loss = train_loss_tensor.item() / world_size
 
-        # Validation
+        # Validation with progress bar
         model.eval()
         val_loss = 0.0
         num_val_batches = 0
 
+        # Reset validation data loader
+        val_loader.reset()
+
+        # Create validation progress bar (only on rank 0)
+        if rank == 0:
+            # First, we need to count the validation batches
+            val_count = 0
+            temp_loader = EEGTokenDataLoader(
+                B=args.batch_size,
+                T=args.seq_length,
+                process_rank=rank,
+                num_processes=world_size,
+                token_files=val_files,
+                window_size=args.window_size,
+                pad_token_id=args.pad_token_id,
+                eos_token_id=args.eos_token_id,
+                split='val'
+            )
+
+            while temp_loader.next_batch() is not None:
+                val_count += 1
+
+            val_bar = tqdm(total=val_count, desc="Validation", position=1, leave=False)
+
         with torch.no_grad():
-            val_loader.reset()  # Reset validation data loader
             while True:
                 # Get next batch
                 batch = val_loader.next_batch()
@@ -666,21 +706,35 @@ def main():
 
                 batch = batch.to(device)
 
+                # Clamp values for validation as well
+                batch = torch.clamp(batch, max=args.codebook_size - 1)
+
                 # Forward pass
                 x = batch[:, :-1]
                 target = batch[:, 1:]
 
                 logits = model(x)
 
+                # Make sure logits and target have same batch size
+                min_length = min(logits.size(1), target.size(1))
+                logits = logits[:, :min_length, :]
+                target = target[:, :min_length]
+
                 # Compute loss
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
-                    target.reshape(-1)
+                    target.reshape(-1),
+                    ignore_index=args.pad_token_id
                 )
 
                 # Update statistics
                 val_loss += loss.item()
                 num_val_batches += 1
+
+                # Update validation progress bar (only on rank 0)
+                if rank == 0:
+                    val_bar.update(1)
+                    val_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
 
         # Average validation loss
         val_loss = val_loss / num_val_batches if num_val_batches > 0 else float('inf')
@@ -695,8 +749,16 @@ def main():
 
         # Print progress and save checkpoint (only on rank 0)
         if rank == 0:
-            print(
-                f"Epoch {epoch + 1}/{args.epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+            # Update epoch progress bar
+            epoch_bar.set_postfix({
+                "train_loss": f"{train_loss:.4f}",
+                "val_loss": f"{val_loss:.4f}",
+                "lr": f"{scheduler.get_last_lr()[0]:.6f}"
+            })
+
+            # Close validation progress bar
+            if 'val_bar' in locals():
+                val_bar.close()
 
             # Save checkpoint
             if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
@@ -709,7 +771,8 @@ def main():
                     'val_loss': val_loss,
                 }
                 torch.save(checkpoint, os.path.join(args.save_dir, f"checkpoint_epoch_{epoch + 1}.pt"))
-                print(f"Saved checkpoint at epoch {epoch + 1}")
+                # Print outside the progress bar
+                tqdm.write(f"Saved checkpoint at epoch {epoch + 1}")
 
     # Clean up
     dist.destroy_process_group()
