@@ -423,7 +423,7 @@ def main():
                         help="Shuffle files before splitting")
 
     # Model parameters
-    parser.add_argument("--codebook_size", type=int, default=129,
+    parser.add_argument("--codebook_size", type=int, default=130,
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
