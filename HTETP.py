@@ -119,19 +119,18 @@ class HierarchicalEEGTransformer(nn.Module):
         self.max_epochs = max_epochs
 
     def forward(self, x, targets=None):
-        # Modified to handle sequential data from EEGTokenDataLoader
+        # x shape: [batch_size, num_epochs * epoch_length]
+        # targets shape: [batch_size, epoch_length] - contains exactly the next epoch
         batch_size, seq_length = x.shape
 
-        # Ensure we have enough data for at least one epoch
-        if seq_length < self.epoch_length:
-            raise ValueError(f"Input sequence length {seq_length} is less than epoch length {self.epoch_length}")
-
-        # Determine how many complete epochs we can use
-        num_epochs = min(seq_length // self.epoch_length, self.max_epochs)
+        # Ensure we have enough data for all epochs
+        if seq_length < self.epoch_length * self.max_epochs:
+            raise ValueError(
+                f"Input sequence length {seq_length} is less than required {self.epoch_length * self.max_epochs}")
 
         # Reshape sequential tokens into epochs
         epochs = []
-        for i in range(num_epochs):
+        for i in range(self.max_epochs):
             start_idx = i * self.epoch_length
             end_idx = start_idx + self.epoch_length
             epochs.append(x[:, start_idx:end_idx])
@@ -140,7 +139,7 @@ class HierarchicalEEGTransformer(nn.Module):
 
         # Process each epoch to get embeddings
         epoch_embeddings = []
-        for i in range(num_epochs):
+        for i in range(self.max_epochs):
             emb = self.intra_transformer(x_epochs[:, i])
             epoch_embeddings.append(emb)
 
@@ -154,17 +153,12 @@ class HierarchicalEEGTransformer(nn.Module):
 
         loss = None
         if targets is not None:
-            # For loss calculation, use the next epoch from targets
-            next_epoch_start = num_epochs * self.epoch_length
-            next_epoch_end = next_epoch_start + self.epoch_length
-
-            # Make sure we have enough target data
-            if next_epoch_end <= targets.size(1):
-                next_epoch_targets = targets[:, next_epoch_start:next_epoch_end]
-                loss = F.cross_entropy(
-                    next_epoch_pred.reshape(-1, self.vocab_size),
-                    next_epoch_targets.reshape(-1)
-                )
+            # With our new dataloader, targets already contains exactly the next epoch
+            # No need for complex indexing, we can use targets directly
+            loss = F.cross_entropy(
+                next_epoch_pred.reshape(-1, self.vocab_size),
+                targets.reshape(-1)
+            )
 
         return next_epoch_pred, loss
 
