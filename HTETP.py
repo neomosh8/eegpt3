@@ -433,7 +433,7 @@ def main():
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=6,
                         help="Number of transformer layers")
-    parser.add_argument("--max_windows", type=int, default=50,
+    parser.add_argument("--max_windows", type=int, default=10,
                         help="Maximum number of windows in sequence")
     parser.add_argument("--pad_token_id", type=int, default=129,
                         help="ID of padding token")
