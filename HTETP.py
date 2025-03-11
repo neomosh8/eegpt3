@@ -435,9 +435,9 @@ def main():
                         help="Number of transformer layers")
     parser.add_argument("--max_windows", type=int, default=50,
                         help="Maximum number of windows in sequence")
-    parser.add_argument("--pad_token_id", type=int, default=0,
+    parser.add_argument("--pad_token_id", type=int, default=129,
                         help="ID of padding token")
-    parser.add_argument("--eos_token_id", type=int, default=1,
+    parser.add_argument("--eos_token_id", type=int, default=128,
                         help="ID of end-of-sequence token")
 
     # Training parameters
