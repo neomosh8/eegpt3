@@ -596,31 +596,31 @@ def train_model():
                 with open(os.path.join(log_dir, "training.log"), "a") as f:
                     f.write(f"Epoch {epoch + 1} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}\n")
 
-                # Check if this is the best model
-                is_best = val_loss < best_val_loss
-                if is_best:
-                    best_val_loss = val_loss
-                    # Save best model
-                    torch.save({
-                        'epoch': epoch,
-                        'model': raw_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'scheduler': scheduler.state_dict(),
-                        'train_loss': train_loss,
-                        'val_loss': val_loss,
-                        'config': config,
-                    }, os.path.join(log_dir, "best_model.pt"))
-
-                # Save checkpoint
-                torch.save({
-                    'epoch': epoch,
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'config': config,
-                }, os.path.join(log_dir, "latest_checkpoint.pt"))
+                # # Check if this is the best model
+                # is_best = val_loss < best_val_loss
+                # if is_best:
+                #     best_val_loss = val_loss
+                #     # Save best model
+                #     torch.save({
+                #         'epoch': epoch,
+                #         'model': raw_model.state_dict(),
+                #         'optimizer': optimizer.state_dict(),
+                #         'scheduler': scheduler.state_dict(),
+                #         'train_loss': train_loss,
+                #         'val_loss': val_loss,
+                #         'config': config,
+                #     }, os.path.join(log_dir, "best_model.pt"))
+                #
+                # # Save checkpoint
+                # torch.save({
+                #     'epoch': epoch,
+                #     'model': raw_model.state_dict(),
+                #     'optimizer': optimizer.state_dict(),
+                #     'scheduler': scheduler.state_dict(),
+                #     'train_loss': train_loss,
+                #     'val_loss': val_loss,
+                #     'config': config,
+                # }, os.path.join(log_dir, "latest_checkpoint.pt"))
 
                 # Save checkpoint every 5 epochs
                 if (epoch + 1) % 5 == 0:
@@ -653,15 +653,15 @@ def train_model():
                 plt.savefig(os.path.join(log_dir, "loss_plot.png"))
                 plt.close()
 
-            # End of training
-        if master_process:
-            print(f"Training completed. Best validation loss: {best_val_loss:.4f}")
+        # End of training
+    if master_process:
+        print(f"Training completed. Best validation loss: {best_val_loss:.4f}")
 
-            # Clean up distributed training
-        if ddp:
-            destroy_process_group()
+        # Clean up distributed training
+    if ddp:
+        destroy_process_group()
 
-        return raw_model, best_val_loss
+    return raw_model, best_val_loss
 
 def main():
     # Enable higher precision for matrix multiplications
