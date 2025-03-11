@@ -479,6 +479,12 @@ def train_model():
         print(f"LR ranges: Embeddings: {config['learning_rate'] * 0.5:.2e}-{config['max_lr'] * 0.5:.2e}, "
               f"Attention: {config['learning_rate'] * 5.0:.2e}-{config['max_lr'] * 5.0:.2e}, "
               f"Other: {config['learning_rate']:.2e}-{config['max_lr']:.2e}")
+    if master_process:
+        print("total_len =", train_loader.total_len)
+        print("batch_size =", config['batch_size'])
+        print("required_seq_length =", required_seq_length)
+        print("ddp_world_size =", ddp_world_size)
+        print("steps_per_epoch =", steps_per_epoch)
 
     # Load checkpoint if resuming
     start_epoch = 0
