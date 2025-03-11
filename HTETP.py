@@ -9,7 +9,7 @@ import torch.distributed as dist
 import math
 
 
-# Model definition with handling for non-divisible sequence lengths
+# Model definition with special handling for pad tokens between windows
 class HierarchicalEEGTransformer(nn.Module):
     def __init__(self,
                  codebook_size,  # Size of your VQAE codebook
@@ -17,10 +17,12 @@ class HierarchicalEEGTransformer(nn.Module):
                  d_model=768,  # Hidden dimension
                  n_heads=12,  # Attention heads
                  n_layers=6,  # Transformer layers
-                 max_windows=50):  # Max sequence length in windows
+                 max_windows=50,  # Max sequence length in windows
+                 pad_token_id=0):  # ID of the pad token
         super().__init__()
 
         self.window_size = window_size
+        self.pad_token_id = pad_token_id
 
         # Token embedding
         self.token_embedding = nn.Embedding(codebook_size, d_model)
@@ -41,6 +43,111 @@ class HierarchicalEEGTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.output_head = nn.Linear(d_model, codebook_size)
 
+    def _extract_windows_with_pad_tokens(self, x):
+        """
+        Extract windows from sequences that have PAD tokens between windows.
+        Each window consists of window_size tokens followed by a PAD token.
+
+        Returns:
+            - windows: Tensor of shape [batch_size, num_windows, window_size]
+            - pad_mask: Boolean mask indicating positions of pad tokens
+        """
+        batch_size, seq_length = x.shape
+        device = x.device
+
+        # Create a mask where True indicates pad tokens
+        pad_mask = (x == self.pad_token_id)
+
+        # Now we'll separate the windows based on the pad tokens
+        # We know they should occur every window_size+1 positions
+        windows = []
+
+        for b in range(batch_size):
+            # Find all pad token positions
+            pad_positions = torch.where(pad_mask[b])[0]
+
+            if len(pad_positions) == 0:
+                # No pad tokens found, try to handle as single window
+                if seq_length >= self.window_size:
+                    windows.append(x[b, :self.window_size])
+                else:
+                    # Not enough tokens for a window, pad to window_size
+                    padded_window = torch.cat([
+                        x[b, :],
+                        torch.zeros(self.window_size - seq_length, dtype=x.dtype, device=device)
+                    ])
+                    windows.append(padded_window)
+            else:
+                # Extract windows based on pad positions
+                start_idx = 0
+                b_windows = []
+
+                for pad_pos in pad_positions:
+                    # Window should be tokens from start_idx to pad_pos
+                    if pad_pos - start_idx > 0:  # Ensure window has tokens
+                        window = x[b, start_idx:pad_pos]
+
+                        # Make sure window has correct size
+                        if len(window) == self.window_size:
+                            b_windows.append(window)
+                        elif len(window) < self.window_size:
+                            # Pad short window
+                            padded_window = torch.cat([
+                                window,
+                                torch.zeros(self.window_size - len(window), dtype=x.dtype, device=device)
+                            ])
+                            b_windows.append(padded_window)
+                        else:
+                            # Truncate long window
+                            b_windows.append(window[:self.window_size])
+
+                    # Move to tokens after this pad
+                    start_idx = pad_pos + 1
+
+                # Check if there are tokens after the last pad (before EOS)
+                if start_idx < seq_length:
+                    window = x[b, start_idx:seq_length]
+                    if len(window) > 0:
+                        if len(window) == self.window_size:
+                            b_windows.append(window)
+                        elif len(window) < self.window_size:
+                            # Pad short window
+                            padded_window = torch.cat([
+                                window,
+                                torch.zeros(self.window_size - len(window), dtype=x.dtype, device=device)
+                            ])
+                            b_windows.append(padded_window)
+                        else:
+                            # Truncate long window
+                            b_windows.append(window[:self.window_size])
+
+                # Stack all windows for this batch item
+                if b_windows:
+                    windows.append(torch.stack(b_windows))
+
+        # Pad to make all batches have same number of windows
+        max_windows = max([w.size(0) for w in windows]) if windows else 0
+        padded_windows = []
+
+        for w in windows:
+            num_windows = w.size(0)
+            if num_windows < max_windows:
+                # Pad with zeros
+                padding = torch.zeros(
+                    max_windows - num_windows, self.window_size,
+                    dtype=x.dtype, device=device
+                )
+                padded_windows.append(torch.cat([w, padding], dim=0))
+            else:
+                padded_windows.append(w)
+
+        if not padded_windows:
+            # Handle case where no valid windows were found
+            return torch.zeros(batch_size, 1, self.window_size, device=device), pad_mask
+
+        # Stack across batch dimension
+        return torch.stack(padded_windows), pad_mask
+
     def forward(self, x):
         """
         Args:
@@ -49,51 +156,45 @@ class HierarchicalEEGTransformer(nn.Module):
         batch_size, seq_length = x.shape
         device = x.device
 
-        # Handle case where sequence length is not divisible by window size
-        num_full_windows = seq_length // self.window_size
-        remainder = seq_length % self.window_size
+        # Handle the special case of sequences with pad tokens between windows
+        windows, pad_mask = self._extract_windows_with_pad_tokens(x)
 
-        if remainder > 0:
-            # Either pad the sequence or truncate it to multiple of window_size
-            if remainder < self.window_size // 2:
-                # Truncate - remove the remainder tokens
-                x = x[:, :num_full_windows * self.window_size]
-                seq_length = x.shape[1]
-            else:
-                # Pad - add zero padding to complete the window
-                padding_size = self.window_size - remainder
-                padding = torch.zeros((batch_size, padding_size), dtype=x.dtype, device=device)
-                x = torch.cat([x, padding], dim=1)
-                seq_length = x.shape[1]
+        # Get the shape after extracting windows
+        batch_size, num_windows, window_size = windows.shape
 
-        # Now we know seq_length is divisible by window_size
-        num_windows = seq_length // self.window_size
+        # Reshape for embedding lookup
+        flat_windows = windows.reshape(-1, window_size)
 
         # Get token embeddings
-        x = self.token_embedding(x)  # [B, S, D]
+        embedded = self.token_embedding(flat_windows)  # [B*N, W, D]
 
-        # Reshape to [batch, windows, tokens_per_window, dim]
-        x = x.view(batch_size, num_windows, self.window_size, -1)
+        # Reshape to separate batch and window dimensions
+        embedded = embedded.reshape(batch_size, num_windows, window_size, -1)
 
         # Add positional encodings
         # 1. Window-level positions
-        x = x + self.window_pos_embed[:, :num_windows, :].unsqueeze(2)
+        embedded = embedded + self.window_pos_embed[:, :num_windows, :].unsqueeze(2)
 
         # 2. Token-level positions
-        x = x + self.token_pos_embed[:, :self.window_size, :].unsqueeze(1)
+        embedded = embedded + self.token_pos_embed[:, :window_size, :].unsqueeze(1)
 
-        # Reshape back to sequence
-        x = x.view(batch_size, seq_length, -1)
+        # Reshape back to sequence for transformer processing
+        embedded = embedded.reshape(batch_size, num_windows * window_size, -1)
 
         # Create hierarchical attention mask
-        mask = self._create_hierarchical_mask(num_windows, self.window_size, device)
+        mask = self._create_hierarchical_mask(num_windows, window_size, device)
 
         # Apply transformer layers
+        x = embedded
         for layer in self.layers:
             x = layer(x, mask)
 
         x = self.norm(x)
-        return self.output_head(x)
+
+        # Output projection
+        logits = self.output_head(x)
+
+        return logits
 
     def _create_hierarchical_mask(self, num_windows, window_size, device):
         """
@@ -194,9 +295,10 @@ class MultiHeadAttention(nn.Module):
         return self.out_proj(context)
 
 
-# Modified DataLoader for EEG Tokens that ensures window divisibility
+# Custom DataLoader for EEG Tokens with pad handling
 class EEGTokenDataLoader:
-    def __init__(self, B, T, process_rank, num_processes, token_files, window_size=2304, split='train'):
+    def __init__(self, B, T, process_rank, num_processes, token_files, window_size=2304,
+                 pad_token_id=0, eos_token_id=1, split='train'):
         """
         Args:
             B: Batch size
@@ -205,6 +307,8 @@ class EEGTokenDataLoader:
             num_processes: Total number of processes for DDP
             token_files: List of token file paths
             window_size: Size of each EEG window (should be 2304 for 72x32)
+            pad_token_id: ID of padding token
+            eos_token_id: ID of end-of-sequence token
             split: 'train' or 'val'
         """
         self.B = B  # Batch size
@@ -213,16 +317,52 @@ class EEGTokenDataLoader:
         self.world_size = num_processes
         self.split = split
         self.window_size = window_size
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
 
         # Load all tokens from files
         all_tokens = []
+
         for file_path in token_files:
             tokens = torch.load(file_path)
+
+            # Verify the tokens contain expected pad tokens
+            pad_mask = (tokens == pad_token_id)
+            pad_count = pad_mask.sum().item()
+
+            if self.rank == 0 and len(all_tokens) < 3:  # Only print for the first few files
+                print(f"File: {file_path} - Tokens shape: {tokens.shape}, Pad tokens: {pad_count}")
+
+                # Calculate theoretical window count (assuming 2304 tokens per window + 1 pad between)
+                if pad_count > 0:
+                    theoretical_windows = pad_count
+                    print(f"  Approximate window count: {theoretical_windows}")
+
+                    # Verification check for a few sample windows
+                    for i in range(min(3, pad_count)):
+                        pad_positions = torch.where(pad_mask)[0]
+                        if i < len(pad_positions):
+                            if i == 0:
+                                start_idx = 0
+                            else:
+                                start_idx = pad_positions[i - 1].item() + 1
+
+                            pad_pos = pad_positions[i].item()
+                            window_size = pad_pos - start_idx
+                            print(f"  Window {i + 1}: From idx {start_idx} to {pad_pos} (size: {window_size})")
+
             all_tokens.append(tokens)
 
         # Concatenate all tokens
         self.tokens = torch.cat(all_tokens, dim=0)
         self.total_length = self.tokens.shape[0]
+
+        # Print token statistics
+        if self.rank == 0:
+            print(f"Total tokens loaded: {self.total_length}")
+            pad_count = (self.tokens == pad_token_id).sum().item()
+            eos_count = (self.tokens == eos_token_id).sum().item()
+            print(f"Total PAD tokens: {pad_count}, Total EOS tokens: {eos_count}")
 
         # Initialize position counter
         self.pos = 0
@@ -261,11 +401,6 @@ class EEGTokenDataLoader:
 
         batch = torch.stack(batch_seqs)
 
-        # Ensure sequence length is divisible by window_size
-        T_adjusted = (self.T // self.window_size) * self.window_size
-        if T_adjusted < self.T:
-            batch = batch[:, :T_adjusted]
-
         # Update position
         self.pos += self.B * self.T
 
@@ -300,6 +435,10 @@ def main():
                         help="Number of transformer layers")
     parser.add_argument("--max_windows", type=int, default=50,
                         help="Maximum number of windows in sequence")
+    parser.add_argument("--pad_token_id", type=int, default=0,
+                        help="ID of padding token")
+    parser.add_argument("--eos_token_id", type=int, default=1,
+                        help="ID of end-of-sequence token")
 
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=16,
@@ -391,7 +530,7 @@ def main():
     # Synchronize processes
     dist.barrier()
 
-    # Create data loaders with correct window size
+    # Create data loaders with proper token handling
     train_loader = EEGTokenDataLoader(
         B=args.batch_size,
         T=args.seq_length,
@@ -399,6 +538,8 @@ def main():
         num_processes=world_size,
         token_files=train_files,
         window_size=args.window_size,
+        pad_token_id=args.pad_token_id,
+        eos_token_id=args.eos_token_id,
         split='train'
     )
 
@@ -409,17 +550,20 @@ def main():
         num_processes=world_size,
         token_files=val_files,
         window_size=args.window_size,
+        pad_token_id=args.pad_token_id,
+        eos_token_id=args.eos_token_id,
         split='val'
     )
 
-    # Create model
+    # Create model with special pad token handling
     model = HierarchicalEEGTransformer(
         codebook_size=args.codebook_size,
         window_size=args.window_size,
         d_model=args.d_model,
         n_heads=args.n_heads,
         n_layers=args.n_layers,
-        max_windows=args.max_windows
+        max_windows=args.max_windows,
+        pad_token_id=args.pad_token_id
     ).to(device)
 
     # Wrap model with DDP
@@ -457,7 +601,8 @@ def main():
             # Debug shapes
             if args.debug and rank == 0 and step == 0:
                 print(f"Batch shape: {batch.shape}")
-                print(f"Is divisible by window size: {batch.shape[1] % args.window_size == 0}")
+                pad_count = (batch == args.pad_token_id).sum().item()
+                print(f"Pad tokens in batch: {pad_count}")
 
             # Forward pass: input is all but last token, target is all but first token
             x = batch[:, :-1]
@@ -466,7 +611,6 @@ def main():
             # Debug shapes
             if args.debug and rank == 0 and step == 0:
                 print(f"Input shape: {x.shape}, Target shape: {target.shape}")
-                print(f"Is input divisible by window size: {x.shape[1] % args.window_size == 0}")
 
             # Get model predictions
             logits = model(x)
