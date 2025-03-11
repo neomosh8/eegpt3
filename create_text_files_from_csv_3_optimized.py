@@ -259,8 +259,12 @@ def process_csv_file_with_global_tokenizer(csv_key,
             # Encode the combined image with the global tokenizer
             token_indices = _GLOBAL_TOKENIZER.encode(combined_image)
 
+            # Add pad token to the end of this window's tokens
+            pad_token = torch.tensor([_GLOBAL_TOKENIZER.get_pad_token()], device=token_indices.device)
+            window_tokens_with_pad = torch.cat([token_indices.flatten(), pad_token])
+
             # Store the flattened token indices
-            # token_list.append(token_indices.flatten())
+            token_list.append(window_tokens_with_pad.flatten())
             print(np.shape(token_indices))
         # Check if we have any tokens
         if not token_list:
