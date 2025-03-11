@@ -323,7 +323,7 @@ def train_model():
         'epoch_length': 2034,  # Length of each EEG epoch
         'max_epochs': 10,  # Number of epochs in sequence for model
         'num_epochs': 4,  # Number of training epochs
-        'batch_size': 16,
+        'batch_size': 4,
         'learning_rate': 3e-4,
         'max_lr': 4e-3,
         'min_lr': 1e-4,
