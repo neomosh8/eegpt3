@@ -318,7 +318,7 @@ def train_model():
         'vocab_size': 129,  # From second document
         'd_model': 368,
         'n_head': 8,
-        'intra_layers': 4,
+        'intra_layers': 2,
         'inter_layers': 4,
         'epoch_length': 2304,  # Length of each EEG epoch
         'max_epochs': 10,  # Number of epochs in sequence for model
