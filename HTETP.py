@@ -598,29 +598,35 @@ def main():
 
             batch = batch.to(device)
 
-            # Debug shapes
+            # Debug info to check for invalid values
             if args.debug and rank == 0 and step == 0:
-                print(f"Batch shape: {batch.shape}")
-                pad_count = (batch == args.pad_token_id).sum().item()
-                print(f"Pad tokens in batch: {pad_count}")
+                print(f"Batch min: {batch.min().item()}, max: {batch.max().item()}")
+                print(f"Codebook size: {args.codebook_size}")
+
+            # Clamp values to valid range to avoid CUDA assertion
+            # This ensures no token ID is higher than codebook_size-1
+            batch = torch.clamp(batch, max=args.codebook_size - 1)
 
             # Forward pass: input is all but last token, target is all but first token
             x = batch[:, :-1]
             target = batch[:, 1:]
 
-            # Debug shapes
-            if args.debug and rank == 0 and step == 0:
-                print(f"Input shape: {x.shape}, Target shape: {target.shape}")
-
             # Get model predictions
             logits = model(x)
+
+            # Make sure logits and target have same batch size
             min_length = min(logits.size(1), target.size(1))
             logits = logits[:, :min_length, :]
             target = target[:, :min_length]
-            # Compute loss
+
+            # Create mask for padding tokens to exclude them from loss
+            pad_mask = (target != args.pad_token_id)
+
+            # Compute loss with padding token ignored
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
-                target.reshape(-1)
+                target.reshape(-1),
+                ignore_index=args.pad_token_id  # Ignore padding tokens in loss calculation
             )
 
             # Backward pass
