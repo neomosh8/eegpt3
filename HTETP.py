@@ -316,7 +316,7 @@ def train_model():
         'data_dir': 'training_data_shards',
         'log_dir': 'logs',
         'vocab_size': 129,  # From second document
-        'd_model': 512,
+        'd_model': 368,
         'n_head': 8,
         'intra_layers': 4,
         'inter_layers': 4,
