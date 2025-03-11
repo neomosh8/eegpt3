@@ -666,7 +666,7 @@ def train_model():
 
 def main():
     # Enable higher precision for matrix multiplications
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('low')
 
     # Train model
     model, best_val_loss = train_model()
