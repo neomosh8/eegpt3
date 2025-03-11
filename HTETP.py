@@ -38,14 +38,13 @@ class IntraEpochTransformer(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: [batch_size, epoch_length]
+        # x shape: [batch_size, epoch_length, d_model]
         x = self.embedding(x)  # [batch_size, epoch_length, d_model]
         x = x + self.pos_embedding  # Add learned positional encoding
         x = self.transformer(x)  # [batch_size, epoch_length, d_model]
 
-        # Create a fixed-size representation of the epoch
-        x_flat = x.reshape(x.size(0), -1)  # [batch_size, epoch_length*d_model]
-        epoch_embedding = self.pool(x_flat)  # [batch_size, d_model]
+        # Use global mean pooling instead of flattening
+        epoch_embedding = torch.mean(x, dim=1)  # [batch_size, d_model]
         return epoch_embedding, x
 
 
