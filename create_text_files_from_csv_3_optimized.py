@@ -260,8 +260,8 @@ def process_csv_file_with_global_tokenizer(csv_key,
             token_indices = _GLOBAL_TOKENIZER.encode(combined_image)
 
             # Store the flattened token indices
-            token_list.append(token_indices.flatten())
-
+            # token_list.append(token_indices.flatten())
+            print(np.shape(token_indices))
         # Check if we have any tokens
         if not token_list:
             if os.path.exists(local_csv):
