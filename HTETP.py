@@ -1,707 +1,511 @@
+import os
+import glob
+import random
+import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import os
-import glob
-import time
-import random
-import inspect
-import numpy as np
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
+import math
 
 
-class IntraEpochTransformer(nn.Module):
-    """Processes tokens within a single epoch to capture spatial patterns"""
-
-    def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=4):
+# Model definition
+class HierarchicalEEGTransformer(nn.Module):
+    def __init__(self,
+                 codebook_size,  # Size of your VQAE codebook
+                 window_size=2304,  # Flattened size (32x72)
+                 d_model=768,  # Hidden dimension
+                 n_heads=12,  # Attention heads
+                 n_layers=6,  # Transformer layers
+                 max_windows=50):  # Max sequence length in windows
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        # No or minimal positional encoding since tokens aren't sequential in time
-        self.pos_embedding = nn.Parameter(torch.zeros(1, 2304, d_model))
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.window_size = window_size
 
-        # # Global pooling to get epoch representation
-        # self.pool = nn.Sequential(
-        #     nn.Linear(d_model * 2304, d_model * 4),
-        #     nn.GELU(),
-        #     nn.Linear(d_model * 4, d_model)
-        # )
+        # Token embedding
+        self.token_embedding = nn.Embedding(codebook_size, d_model)
+
+        # Position encodings for both window-level and token-level
+        self.window_pos_embed = nn.Parameter(torch.zeros(1, max_windows, d_model))
+        self.token_pos_embed = nn.Parameter(torch.zeros(1, window_size, d_model))
+
+        # Initialize positional embeddings
+        nn.init.normal_(self.window_pos_embed, std=0.02)
+        nn.init.normal_(self.token_pos_embed, std=0.02)
+
+        # Transformer layers
+        self.layers = nn.ModuleList([
+            TransformerLayer(d_model, n_heads) for _ in range(n_layers)
+        ])
+
+        self.norm = nn.LayerNorm(d_model)
+        self.output_head = nn.Linear(d_model, codebook_size)
 
     def forward(self, x):
-        # x shape: [batch_size, epoch_length, d_model]
-        x = self.embedding(x)  # [batch_size, epoch_length, d_model]
-        x = x + self.pos_embedding  # Add learned positional encoding
-        x = self.transformer(x)  # [batch_size, epoch_length, d_model]
+        """
+        Args:
+            x: Tensor of token indices [batch_size, seq_length]
+               where seq_length = num_windows * window_size
+        """
+        batch_size, seq_length = x.shape
+        device = x.device
 
-        # Use global mean pooling
-        epoch_embedding = torch.mean(x, dim=1)  # [batch_size, d_model]
-        return epoch_embedding
+        # Check if sequence length is divisible by window size
+        assert seq_length % self.window_size == 0, "Sequence length must be divisible by window size"
+        num_windows = seq_length // self.window_size
+
+        # Get token embeddings
+        x = self.token_embedding(x)  # [B, S, D]
+
+        # Reshape to [batch, windows, tokens_per_window, dim]
+        x = x.view(batch_size, num_windows, self.window_size, -1)
+
+        # Add positional encodings
+        # 1. Window-level positions
+        x = x + self.window_pos_embed[:, :num_windows, :].unsqueeze(2)
+
+        # 2. Token-level positions
+        x = x + self.token_pos_embed[:, :self.window_size, :].unsqueeze(1)
+
+        # Reshape back to sequence
+        x = x.view(batch_size, seq_length, -1)
+
+        # Create hierarchical attention mask
+        mask = self._create_hierarchical_mask(num_windows, self.window_size, device)
+
+        # Apply transformer layers
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        x = self.norm(x)
+        return self.output_head(x)
+
+    def _create_hierarchical_mask(self, num_windows, window_size, device):
+        """
+        Create mask that allows:
+        1. Full attention within each window (bidirectional)
+        2. Causal attention between windows
+        """
+        seq_length = num_windows * window_size
+        mask = torch.ones(seq_length, seq_length, device=device) * float('-inf')
+
+        # Allow full attention within each window
+        for i in range(num_windows):
+            start_idx = i * window_size
+            end_idx = (i + 1) * window_size
+            mask[start_idx:end_idx, start_idx:end_idx] = 0
+
+        # Allow causal attention between windows
+        for i in range(num_windows):
+            for j in range(i):
+                i_start = i * window_size
+                i_end = (i + 1) * window_size
+                j_start = j * window_size
+                j_end = (j + 1) * window_size
+                mask[i_start:i_end, j_start:j_end] = 0
+
+        return mask
 
 
-class InterEpochTransformer(nn.Module):
-    """Processes sequence of epochs to capture temporal patterns - with causal masking"""
-
-    def __init__(self, d_model=512, nhead=8, num_layers=4, max_epochs=10):
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
-        self.pos_encoding = nn.Parameter(torch.zeros(1, max_epochs, d_model))
 
-        # Create a causal mask for the transformer
-        # This ensures each epoch only attends to itself and previous epochs
-        self.register_buffer(
-            "causal_mask",
-            torch.triu(torch.ones(max_epochs, max_epochs) * float('-inf'), diagonal=1)
+        # Self-attention block
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+
+        # Feed-forward block
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model),
+            nn.Dropout(dropout)
         )
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+    def forward(self, x, mask=None):
+        # Self-attention with residual connection
+        attn_output = self.attn(self.norm1(x), mask)
+        x = x + self.dropout(attn_output)
 
-    def forward(self, x):
-        # x shape: [batch_size, num_epochs, d_model]
-        x = x + self.pos_encoding[:, :x.size(1), :]  # Add positional encoding
+        # Feed-forward with residual connection
+        ff_output = self.ff(self.norm2(x))
+        x = x + self.dropout(ff_output)
 
-        # Apply causal mask to prevent attending to future epochs
-        # Only use the portion of the mask that matches the current sequence length
-        mask = self.causal_mask[:x.size(1), :x.size(1)]
-        x = self.transformer(x, mask=mask)  # [batch_size, num_epochs, d_model]
         return x
 
 
-class EpochPredictionHead(nn.Module):
-    """Predicts the next epoch of tokens"""
-
-    def __init__(self, d_model=512, vocab_size=1024, epoch_length=2400):
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
-        self.epoch_length = epoch_length
-        self.vocab_size = vocab_size
 
-        # Expand the embedding into token predictions
-        self.proj = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),
-            nn.GELU(),
-            nn.Linear(d_model * 4, epoch_length * vocab_size)
-        )
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
 
-    def forward(self, x):
-        # x shape: [batch_size, d_model]
-        logits = self.proj(x)  # [batch_size, epoch_length * vocab_size]
-        logits = logits.view(-1, self.epoch_length, self.vocab_size)  # [batch_size, epoch_length, vocab_size]
-        return logits
+        # Linear projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
 
-class HierarchicalEEGTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model=512, nhead=8,
-                 intra_layers=4, inter_layers=4, max_epochs=10, epoch_length=2400):
-        super().__init__()
-        self.intra_transformer = IntraEpochTransformer(
-            vocab_size, d_model, nhead, intra_layers
-        )
-        self.inter_transformer = InterEpochTransformer(
-            d_model, nhead, inter_layers, max_epochs
-        )
-        self.prediction_head = EpochPredictionHead(
-            d_model, vocab_size, epoch_length
-        )
-        self.epoch_length = epoch_length
-        self.vocab_size = vocab_size
-        self.max_epochs = max_epochs
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, targets=None):
-        # x shape: [batch_size, num_epochs * epoch_length]
-        # targets shape: [batch_size, epoch_length] - contains exactly the next epoch
-        batch_size, seq_length = x.shape
+    def forward(self, x, mask=None):
+        batch_size, seq_len, _ = x.shape
 
-        # Ensure we have enough data for all epochs
-        if seq_length < self.epoch_length * self.max_epochs:
-            raise ValueError(
-                f"Input sequence length {seq_length} is less than required {self.epoch_length * self.max_epochs}")
+        # Project and reshape to [batch, heads, seq_len, head_dim]
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # Reshape sequential tokens into epochs
-        epochs = []
-        for i in range(self.max_epochs):
-            start_idx = i * self.epoch_length
-            end_idx = start_idx + self.epoch_length
-            epochs.append(x[:, start_idx:end_idx])
+        # Scaled dot-product attention
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
 
-        x_epochs = torch.stack(epochs, dim=1)  # [batch_size, num_epochs, epoch_length]
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores + mask.unsqueeze(0).unsqueeze(1)
 
-        # Process each epoch to get embeddings
-        epoch_embeddings = []
-        for i in range(self.max_epochs):
-            emb = self.intra_transformer(x_epochs[:, i])
-            epoch_embeddings.append(emb)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
 
-        epoch_embeddings = torch.stack(epoch_embeddings, dim=1)  # [batch_size, num_epochs, d_model]
+        # Apply attention weights to values
+        context = torch.matmul(attn_weights, v)
 
-        # Process sequence of epochs with causal masking
-        temporal_embeddings = self.inter_transformer(epoch_embeddings)  # [batch_size, num_epochs, d_model]
+        # Reshape back to [batch, seq_len, d_model]
+        context = context.transpose(1, 2).reshape(batch_size, seq_len, self.d_model)
+        return self.out_proj(context)
 
-        # Predict next epoch from the last temporal embedding
-        next_epoch_pred = self.prediction_head(temporal_embeddings[:, -1])  # [batch_size, epoch_length, vocab_size]
 
-        loss = None
-        if targets is not None:
-            # With our new dataloader, targets already contains exactly the next epoch
-            # No need for complex indexing, we can use targets directly
-            loss = F.cross_entropy(
-                next_epoch_pred.reshape(-1, self.vocab_size),
-                targets.reshape(-1)
-            )
-
-        return next_epoch_pred, loss
-
-    def configure_optimizer(self, weight_decay, learning_rate, device):
-        """Configure optimizer with different learning rates for different components"""
-        # Group parameters by component type
-        embed_params = []
-        attn_params = []
-        other_params = []
-
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            # Apply weight decay to 2D+ parameters only
-            wd = weight_decay if param.dim() >= 2 else 0.0
-
-            if 'embedding' in name:
-                embed_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 0.5})
-            elif 'transformer' in name:
-                attn_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate * 5.0})
-            else:
-                other_params.append({'params': param, 'weight_decay': wd, 'lr': learning_rate})
-
-        # Combine all parameter groups
-        optim_groups = embed_params + attn_params + other_params
-
-        # Create optimizer
-        optimizer = torch.optim.AdamW(
-            optim_groups,
-            betas=(0.9, 0.95),
-            eps=1e-8,
-            fused='cuda' in device and 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        )
-
-        return optimizer
-
-# Dataloader from the second document
+# Custom DataLoader for EEG Tokens
 class EEGTokenDataLoader:
-    """
-    A data loader that loads EEG token files, concatenates them,
-    and provides properly aligned data for epoch-level prediction.
-    """
-
-    def __init__(self, B, epoch_length, max_epochs, process_rank, num_processes, token_files, split):
+    def __init__(self, B, T, process_rank, num_processes, token_files, split='train'):
+        """
+        Args:
+            B: Batch size
+            T: Sequence length
+            process_rank: Current process rank for DDP
+            num_processes: Total number of processes for DDP
+            token_files: List of token file paths
+            split: 'train' or 'val'
+        """
         self.B = B  # Batch size
-        self.epoch_length = epoch_length  # Number of tokens per epoch
-        self.max_epochs = max_epochs  # Number of epochs to process
-        self.process_rank = process_rank
-        self.num_processes = num_processes
+        self.T = T  # Sequence length
+        self.rank = process_rank
+        self.world_size = num_processes
         self.split = split
 
-        # Calculate total sequence length needed for input and target
-        # We need max_epochs epochs for input and 1 more epoch for target
-        self.T = epoch_length * (max_epochs + 1)
-
-        # Load tokens
+        # Load all tokens from files
         all_tokens = []
         for file_path in token_files:
-            try:
-                token_tensor = torch.load(file_path, map_location='cpu')
-                all_tokens.append(token_tensor)
-            except Exception as e:
-                if process_rank == 0:
-                    print(f"Error loading {file_path}: {e}")
-                continue
+            tokens = torch.load(file_path)
+            all_tokens.append(tokens)
+
+        # Concatenate all tokens
         self.tokens = torch.cat(all_tokens, dim=0)
-        print(f"Process {process_rank}: Loaded {len(self.tokens)} tokens for {split} split")
+        self.total_length = self.tokens.shape[0]
 
-        # Ensure all processes reach this point
-        if num_processes > 1:
-            dist.barrier()
-        print(f"Process {process_rank}: Post-barrier, tokens loaded successfully")
-
-        self.current_position = self.B * self.T * self.process_rank
-        self.total_len = len(self.tokens)
-        print(f"Process {process_rank}: current_position = {self.current_position}, total_len = {self.total_len}")
+        # Initialize position counter
+        self.pos = 0
 
     def next_batch(self):
-        """
-        Fetch next batch of tokens as (x, y) for training.
-        x contains max_epochs complete epochs
-        y contains the next complete epoch (aligned at epoch boundary)
-        """
-        B, T, epoch_length, max_epochs = self.B, self.T, self.epoch_length, self.max_epochs
+        """Get next batch of tokens for training or validation"""
+        # Each process gets a different section of data
+        process_data_size = self.total_length // self.world_size
+        process_start = self.rank * process_data_size
+        process_end = process_start + process_data_size if self.rank < self.world_size - 1 else self.total_length
 
-        # We need enough tokens for max_epochs epochs (input) + 1 epoch (target)
-        needed = B * T
+        # Check if we need to reset position
+        if self.pos + self.B * self.T >= process_data_size:
+            if self.split == 'train':
+                self.pos = 0  # Reset for training
+            else:
+                return None  # End of validation data
 
-        # Get tokens
-        if self.current_position + needed <= self.total_len:
-            buf_tokens = self.tokens[self.current_position: self.current_position + needed]
-            self.current_position += B * T * self.num_processes
-            if self.current_position + needed > self.total_len:
-                self.current_position = self.process_rank * B * T
-        else:
-            # Handle wrapping around the dataset
-            leftover = self.total_len - self.current_position
-            wrap_amount = needed - leftover
-            part1_tokens = self.tokens[self.current_position:]
-            part2_tokens = self.tokens[:wrap_amount]
-            buf_tokens = torch.cat([part1_tokens, part2_tokens], dim=0)
-            self.current_position = wrap_amount + (B * T * (self.num_processes - 1))
+        # Get batch starting positions (B different positions)
+        batch_pos = self.pos + process_start + torch.arange(0, self.B, device=self.tokens.device) * self.T
 
-        if len(buf_tokens) != needed:
-            raise RuntimeError(f"Unexpected token count. Expected {needed}, got {len(buf_tokens)}")
+        # Get sequences of length T from each position
+        batch = torch.stack([self.tokens[p:p + self.T] for p in batch_pos])
 
-        # Reshape to [B, T]
-        buf_tokens = buf_tokens.view(B, T)
+        # Update position
+        self.pos += self.B * self.T
 
-        # Input: first max_epochs epochs
-        input_length = epoch_length * max_epochs
-        x = buf_tokens[:, :input_length]
-
-        # Target: the next epoch
-        y = buf_tokens[:, input_length:input_length + epoch_length]
-
-        return x, y
+        return batch
 
     def reset(self):
-        self.current_position = self.B * self.T * self.process_rank
-
-    def __len__(self):
-        return self.total_len // (self.B * self.T)
-
-def moving_average(values, window_size=10):
-    """Compute the simple moving average of a list of values."""
-    if len(values) < window_size:
-        return values  # not enough data, just return as-is
-
-    averaged = []
-    for i in range(len(values)):
-        start = max(0, i - window_size + 1)
-        chunk = values[start: i + 1]
-        averaged.append(sum(chunk) / len(chunk))
-    return averaged
+        """Reset position counter (for new epochs or validation rounds)"""
+        self.pos = 0
 
 
-# Setup distributed training
-def setup_distributed():
-    ddp = int(os.environ.get('RANK', -1)) != -1  # is this a ddp run?
-    if ddp:
-        # use of DDP demands CUDA, set device according to rank
-        assert torch.cuda.is_available(), "CUDA is required for DDP"
-        init_process_group(backend='nccl')
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
-        master_process = ddp_rank == 0
-    else:
-        # non-DDP run
-        ddp_rank = 0
-        ddp_local_rank = 0
-        ddp_world_size = 1
-        master_process = True
-        # attempt to autodetect device
-        device = "cpu"
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-        print(f"Using device: {device}")
+def main():
+    parser = argparse.ArgumentParser(description="Train Hierarchical EEG Transformer")
 
-    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    # Data parameters
+    parser.add_argument("--data_dir", type=str, default="training_data_shards",
+                        help="Directory containing token files")
+    parser.add_argument("--train_val_split", type=float, default=0.9,
+                        help="Proportion of data to use for training")
+    parser.add_argument("--shuffle_files", action="store_true",
+                        help="Shuffle files before splitting")
 
-    return ddp, ddp_rank, ddp_local_rank, ddp_world_size, master_process, device, device_type
+    # Model parameters
+    parser.add_argument("--codebook_size", type=int, default=129,
+                        help="Size of the VQAE codebook")
+    parser.add_argument("--window_size", type=int, default=2304,
+                        help="Size of flattened EEG window (32x72)")
+    parser.add_argument("--d_model", type=int, default=768,
+                        help="Hidden dimension of the model")
+    parser.add_argument("--n_heads", type=int, default=12,
+                        help="Number of attention heads")
+    parser.add_argument("--n_layers", type=int, default=6,
+                        help="Number of transformer layers")
+    parser.add_argument("--max_windows", type=int, default=50,
+                        help="Maximum number of windows in sequence")
 
+    # Training parameters
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Batch size per GPU")
+    parser.add_argument("--seq_length", type=int, default=4608,
+                        help="Sequence length for training")
+    parser.add_argument("--learning_rate", type=float, default=5e-5,
+                        help="Learning rate")
+    parser.add_argument("--min_lr", type=float, default=1e-6,
+                        help="Minimum learning rate")
+    parser.add_argument("--weight_decay", type=float, default=0.01,
+                        help="Weight decay")
+    parser.add_argument("--grad_clip", type=float, default=1.0,
+                        help="Gradient clipping")
+    parser.add_argument("--epochs", type=int, default=10,
+                        help="Number of epochs")
+    parser.add_argument("--steps_per_epoch", type=int, default=1000,
+                        help="Steps per epoch")
 
-# Main training function
-def train_model():
-    # Configuration
-    config = {
-        'data_dir': 'training_data_shards',
-        'log_dir': 'logs',
-        'vocab_size': 129,  # From second document
-        'd_model': 348,
-        'n_head': 4,
-        'intra_layers': 4,
-        'inter_layers': 4,
-        'epoch_length': 2304,  # Length of each EEG epoch
-        'max_epochs': 4,  # Number of epochs in sequence for model
-        'num_epochs': 10,  # Number of training epochs
-        'batch_size': 1,
-        'learning_rate': 1e-3,
-        'max_lr': 4e-3,
-        'min_lr': 4e-4,
-        'weight_decay': 0.05,
-        'warmup_ratio': 0.01,
-        'clip_grad_norm': 1.0,
-        'train_val_split': 0.9,
-        'shuffle_files': True,
-        'seed': 9259,
-        'resume': False
-    }
+    # Saving parameters
+    parser.add_argument("--save_dir", type=str, default="checkpoints",
+                        help="Directory to save checkpoints")
+    parser.add_argument("--save_every", type=int, default=1,
+                        help="Save checkpoint every N epochs")
 
-    # Set up distributed training
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, master_process, device, device_type = setup_distributed()
+    # DDP parameters (for torchrun)
+    parser.add_argument("--local_rank", type=int, default=-1,
+                        help="Local rank for distributed training (set by torchrun)")
 
-    # Set random seed for reproducibility
-    torch.manual_seed(config['seed'])
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(config['seed'])
+    args = parser.parse_args()
 
-    # Create log directory
-    log_dir = config['log_dir']
-    if master_process:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "training.log")
-        with open(log_file, "w") as f:
-            pass  # Initialize empty log file
+    # Initialize the distributed environment
+    dist.init_process_group(backend="nccl")
 
-    # Load data files
-    if ddp_rank == 0:  # Master process
+    # Set the device
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+
+    # Get global rank and world size
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Create save directory if it doesn't exist
+    if rank == 0:
+        os.makedirs(args.save_dir, exist_ok=True)
+
+    # File list management
+    data_dir = args.data_dir
+    train_val_split = args.train_val_split
+    shuffle_files = args.shuffle_files
+
+    if rank == 0:  # Master process only
         # Find all token files
-        token_files = sorted(glob.glob(os.path.join(config['data_dir'], "*_tokens.pt")))
+        token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))
         if not token_files:
-            raise ValueError(f"No token files found in {config['data_dir']}")
+            raise ValueError(f"No token files found in {data_dir}")
 
         # Shuffle files with a fixed seed for consistency
-        if config['shuffle_files']:
-            rng = random.Random(config['seed'])
+        if shuffle_files:
+            rng = random.Random(42)  # Fixed seed for determinism
             rng.shuffle(token_files)
 
         # Split into train and val
-        split_idx = int(len(token_files) * config['train_val_split'])
+        split_idx = int(len(token_files) * train_val_split)
         train_files = token_files[:split_idx]
         val_files = token_files[split_idx:]
-
-        if master_process:
-            print(f"Found {len(token_files)} token files")
-            print(f"Train files: {len(train_files)}, Val files: {len(val_files)}")
     else:
         train_files = None
         val_files = None
 
-    # Broadcast file lists for distributed training
-    if ddp:
-        objects = [train_files, val_files] if ddp_rank == 0 else [None, None]
+    # Broadcast file lists from master to all workers
+    if rank == 0:
+        objects = [train_files, val_files]
+        dist.broadcast_object_list(objects, src=0)
+    else:
+        objects = [None, None]
         dist.broadcast_object_list(objects, src=0)
         train_files, val_files = objects[0], objects[1]
-        dist.barrier()
 
-    # Calculate required sequence length for model input
-    # We need at least (max_epochs + 1) * epoch_length tokens
-    required_seq_length = (config['max_epochs'] + 1) * config['epoch_length']
+    # Synchronize processes
+    dist.barrier()
 
-    # Initialize data loaders
+    # Create data loaders
     train_loader = EEGTokenDataLoader(
-        B=config['batch_size'],
-        epoch_length=config['epoch_length'],
-        max_epochs=config['max_epochs'],
-        process_rank=ddp_rank,
-        num_processes=ddp_world_size,
+        B=args.batch_size,
+        T=args.seq_length,
+        process_rank=rank,
+        num_processes=world_size,
         token_files=train_files,
         split='train'
     )
 
     val_loader = EEGTokenDataLoader(
-        B=config['batch_size'],
-        epoch_length=config['epoch_length'],
-        max_epochs=config['max_epochs'],
-        process_rank=ddp_rank,
-        num_processes=ddp_world_size,
+        B=args.batch_size,
+        T=args.seq_length,
+        process_rank=rank,
+        num_processes=world_size,
         token_files=val_files,
         split='val'
     )
 
     # Create model
     model = HierarchicalEEGTransformer(
-        vocab_size=config['vocab_size'],
-        d_model=config['d_model'],
-        nhead=config['n_head'],
-        intra_layers=config['intra_layers'],
-        inter_layers=config['inter_layers'],
-        max_epochs=config['max_epochs'],
-        epoch_length=config['epoch_length']
-    )
-    model.to(device)
+        codebook_size=args.codebook_size,
+        window_size=args.window_size,
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        max_windows=args.max_windows
+    ).to(device)
 
-    # For distributed training, wrap model with DDP
-    if ddp:
-        # model = DDP(model, device_ids=[ddp_local_rank],find_unused_parameters=True)
-        model = DDP(model, device_ids=[ddp_local_rank])
-    raw_model = model.module if ddp else model
+    # Wrap model with DDP
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
-    # Set up optimizer
-    optimizer = raw_model.configure_optimizer(
-        weight_decay=config['weight_decay'],
-        learning_rate=config['learning_rate'],
-        device=device
+    # Create optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
     )
 
-    # Set up learning rate scheduler
-    steps_per_epoch = train_loader.total_len // (config['batch_size'] * required_seq_length * ddp_world_size)
-    max_steps = config['num_epochs'] * steps_per_epoch
-    warmup_steps = int(config['warmup_ratio'] * max_steps)
-
-    # Set up different learning rates for different parameter groups
-    max_lr_per_group = []
-    for group in optimizer.param_groups:
-        base_lr = group['lr']
-        lr_ratio = base_lr / config['learning_rate'] if config['learning_rate'] > 0 else 1.0
-        group_max_lr = config['max_lr'] * lr_ratio
-        max_lr_per_group.append(group_max_lr)
-
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # Create learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        max_lr=max_lr_per_group,
-        total_steps=max_steps,
-        pct_start=warmup_steps / max_steps,
-        anneal_strategy='cos',
-        cycle_momentum=False
+        T_max=args.epochs,
+        eta_min=args.min_lr
     )
 
-    if master_process:
-        print(f"Configured OneCycleLR with {len(max_lr_per_group)} learning rates")
-        print(f"LR ranges: Embeddings: {config['learning_rate'] * 0.5:.2e}-{config['max_lr'] * 0.5:.2e}, "
-              f"Attention: {config['learning_rate'] * 5.0:.2e}-{config['max_lr'] * 5.0:.2e}, "
-              f"Other: {config['learning_rate']:.2e}-{config['max_lr']:.2e}")
-    if master_process:
-        print("total_len =", train_loader.total_len)
-        print("batch_size =", config['batch_size'])
-        print("required_seq_length =", required_seq_length)
-        print("ddp_world_size =", ddp_world_size)
-        print("steps_per_epoch =", steps_per_epoch)
-
-    # Load checkpoint if resuming
-    start_epoch = 0
-    if config['resume']:
-        checkpoint_path = os.path.join(log_dir, "latest_checkpoint.pt")
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            raw_model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            scheduler.load_state_dict(checkpoint['scheduler'])
-            start_epoch = checkpoint['epoch'] + 1
-            if master_process:
-                print(f"Resuming from checkpoint at epoch {start_epoch}")
-
-    # Training metrics tracking
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
-
-    # Main training loop
-    for epoch in range(start_epoch, config['num_epochs']):
-        if master_process:
-            print(f"Starting epoch {epoch + 1}/{config['num_epochs']}")
-
-        # Training phase
+    # Training loop
+    for epoch in range(args.epochs):
         model.train()
         train_loss = 0.0
-        train_steps = 0
+        num_train_batches = 0
 
-        # Use tqdm for progress visualization
-        train_iter = range(steps_per_epoch)
-        if master_process:
-            train_iter = tqdm(train_iter, desc=f"Epoch {epoch + 1}/{config['num_epochs']} [Train]")
+        # Train for a number of steps per epoch
+        for step in range(args.steps_per_epoch):
+            # Get next batch
+            batch = train_loader.next_batch()
+            if batch is None:
+                break
 
-        for step in train_iter:
-            # Zero gradients
+            batch = batch.to(device)
+
+            # Forward pass: input is all but last token, target is all but first token
+            x = batch[:, :-1]
+            target = batch[:, 1:]
+
+            # Get model predictions
+            logits = model(x)
+
+            # Compute loss
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                target.reshape(-1)
+            )
+
+            # Backward pass
             optimizer.zero_grad()
+            loss.backward()
 
-            # Get batch
-            x, y = train_loader.next_batch()
-            x, y = x.to(device), y.to(device)
+            # Clip gradients
+            if args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-            # Forward pass with autocast for mixed precision if on CUDA
-            if device_type == 'cuda':
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    _, loss = model(x, y)
-            else:
-                _, loss = model(x, y)
+            optimizer.step()
 
-            if loss is not None:
-                # Backward pass
-                loss.backward()
-
-                # Gradient clipping
-                if config['clip_grad_norm'] > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), config['clip_grad_norm'])
-
-                # Update weights
-                optimizer.step()
-                scheduler.step()
-
-                # Collect statistics
-                train_loss += loss.item()
-                train_steps += 1
-
-                # Update progress bar
-                if master_process:
-                    current_lr = optimizer.param_groups[0]['lr']
-                    train_iter.set_postfix({
-                        'loss': f"{loss.item():.4f}",
-                        'avg_loss': f"{train_loss / train_steps:.4f}",
-                        'lr': f"{current_lr:.2e}"
-                    })
+            # Update statistics
+            train_loss += loss.item()
+            num_train_batches += 1
 
         # Average training loss
-        train_loss = train_loss / train_steps if train_steps > 0 else float('inf')
-        if ddp:
-            # Gather training loss from all processes
-            train_loss_tensor = torch.tensor([train_loss], device=device)
-            dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.AVG)
-            train_loss = train_loss_tensor.item()
+        train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0
 
-        train_losses.append(train_loss)
+        # All-reduce the training loss across processes
+        train_loss_tensor = torch.tensor(train_loss).to(device)
+        dist.all_reduce(train_loss_tensor)
+        train_loss = train_loss_tensor.item() / world_size
 
-        # Validation phase
+        # Validation
         model.eval()
         val_loss = 0.0
-        val_steps = 0
-
-        # Calculate validation steps (limited to reduce computation time)
-        val_steps_per_epoch = min(100,
-                                  val_loader.total_len // (config['batch_size'] * required_seq_length * ddp_world_size))
-
-        # Use tqdm for progress visualization
-        val_iter = range(val_steps_per_epoch)
-        if master_process:
-            val_iter = tqdm(val_iter, desc=f"Epoch {epoch + 1}/{config['num_epochs']} [Val]")
+        num_val_batches = 0
 
         with torch.no_grad():
-            for step in val_iter:
-                # Get batch
-                # Get batch
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
+            val_loader.reset()  # Reset validation data loader
+            while True:
+                # Get next batch
+                batch = val_loader.next_batch()
+                if batch is None:
+                    break
 
-                # Forward pass with autocast for mixed precision if on CUDA
-                if device_type == 'cuda':
-                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                        _, loss = model(x, y)
-                else:
-                    _, loss = model(x, y)
+                batch = batch.to(device)
 
-                if loss is not None:
-                    # Collect statistics
-                    val_loss += loss.item()
-                    val_steps += 1
+                # Forward pass
+                x = batch[:, :-1]
+                target = batch[:, 1:]
 
-                    # Update progress bar
-                    if master_process:
-                        val_iter.set_postfix({'loss': f"{loss.item():.4f}", 'avg_loss': f"{val_loss / val_steps:.4f}"})
+                logits = model(x)
 
-                # Average validation loss
-            val_loss = val_loss / val_steps if val_steps > 0 else float('inf')
-            if ddp:
-                # Gather validation loss from all processes
-                val_loss_tensor = torch.tensor([val_loss], device=device)
-                dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
-                val_loss = val_loss_tensor.item()
+                # Compute loss
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    target.reshape(-1)
+                )
 
-            val_losses.append(val_loss)
+                # Update statistics
+                val_loss += loss.item()
+                num_val_batches += 1
 
-            # Log results for this epoch
-            if master_process:
-                print(
-                    f"Epoch {epoch + 1}/{config['num_epochs']} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        # Average validation loss
+        val_loss = val_loss / num_val_batches if num_val_batches > 0 else float('inf')
 
-                # Write to log file
-                with open(os.path.join(log_dir, "training.log"), "a") as f:
-                    f.write(f"Epoch {epoch + 1} - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}\n")
+        # All-reduce the validation loss across processes
+        val_loss_tensor = torch.tensor(val_loss).to(device)
+        dist.all_reduce(val_loss_tensor)
+        val_loss = val_loss_tensor.item() / world_size
 
-                # # Check if this is the best model
-                # is_best = val_loss < best_val_loss
-                # if is_best:
-                #     best_val_loss = val_loss
-                #     # Save best model
-                #     torch.save({
-                #         'epoch': epoch,
-                #         'model': raw_model.state_dict(),
-                #         'optimizer': optimizer.state_dict(),
-                #         'scheduler': scheduler.state_dict(),
-                #         'train_loss': train_loss,
-                #         'val_loss': val_loss,
-                #         'config': config,
-                #     }, os.path.join(log_dir, "best_model.pt"))
-                #
-                # # Save checkpoint
-                # torch.save({
-                #     'epoch': epoch,
-                #     'model': raw_model.state_dict(),
-                #     'optimizer': optimizer.state_dict(),
-                #     'scheduler': scheduler.state_dict(),
-                #     'train_loss': train_loss,
-                #     'val_loss': val_loss,
-                #     'config': config,
-                # }, os.path.join(log_dir, "latest_checkpoint.pt"))
+        # Update learning rate
+        scheduler.step()
 
-                # Save checkpoint every 5 epochs
-                if (epoch + 1) % 5 == 0:
-                    torch.save({
-                        'epoch': epoch,
-                        'model': raw_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'scheduler': scheduler.state_dict(),
-                        'train_loss': train_loss,
-                        'val_loss': val_loss,
-                        'config': config,
-                    }, os.path.join(log_dir, f"checkpoint_epoch_{epoch + 1}.pt"))
+        # Print progress and save checkpoint (only on rank 0)
+        if rank == 0:
+            print(
+                f"Epoch {epoch + 1}/{args.epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-                # Plot training and validation loss curves
-                plt.figure(figsize=(10, 6))
-                epochs_range = list(range(1, len(train_losses) + 1))
-                plt.plot(epochs_range, train_losses, label='Train Loss', color='#63B8FF', alpha=0.6)
-                plt.plot(epochs_range, val_losses, label='Val Loss', color='#1E56A0')
+            # Save checkpoint
+            if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                }
+                torch.save(checkpoint, os.path.join(args.save_dir, f"checkpoint_epoch_{epoch + 1}.pt"))
+                print(f"Saved checkpoint at epoch {epoch + 1}")
 
-                # Add moving average for train loss
-                if len(train_losses) >= 3:  # Need at least 3 points for meaningful moving average
-                    ma_train_losses = moving_average(train_losses, window_size=3)
-                    plt.plot(epochs_range, ma_train_losses, label='Train Loss (MA)', color='black', linestyle='--')
+    # Clean up
+    dist.destroy_process_group()
 
-                plt.xlabel('Epochs')
-                plt.ylabel('Loss')
-                plt.title('Training and Validation Loss')
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(log_dir, "loss_plot.png"))
-                plt.close()
-
-        # End of training
-    if master_process:
-        print(f"Training completed. Best validation loss: {best_val_loss:.4f}")
-
-        # Clean up distributed training
-    if ddp:
-        destroy_process_group()
-
-    return raw_model, best_val_loss
-
-def main():
-    # Enable higher precision for matrix multiplications
-    torch.set_float32_matmul_precision('medium')
-
-    # Train model
-    model, best_val_loss = train_model()
-
-    # Additional code for model evaluation, inference, etc. can be added here
-
-    return model
 
 if __name__ == "__main__":
     main()
