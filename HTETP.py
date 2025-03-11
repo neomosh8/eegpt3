@@ -431,7 +431,7 @@ def main():
                         help="Hidden dimension of the model")
     parser.add_argument("--n_heads", type=int, default=6,
                         help="Number of attention heads")
-    parser.add_argument("--n_layers", type=int, default=6,
+    parser.add_argument("--n_layers", type=int, default=4,
                         help="Number of transformer layers")
     parser.add_argument("--max_windows", type=int, default=4,
                         help="Maximum number of windows in sequence")
