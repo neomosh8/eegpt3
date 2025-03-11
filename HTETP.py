@@ -427,13 +427,13 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=768,
+    parser.add_argument("--d_model", type=int, default=360,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=12,
+    parser.add_argument("--n_heads", type=int, default=6,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=6,
                         help="Number of transformer layers")
-    parser.add_argument("--max_windows", type=int, default=10,
+    parser.add_argument("--max_windows", type=int, default=4,
                         help="Maximum number of windows in sequence")
     parser.add_argument("--pad_token_id", type=int, default=129,
                         help="ID of padding token")
