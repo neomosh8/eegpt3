@@ -321,11 +321,11 @@ def train_model():
         'inter_layers': 4,
         'epoch_length': 2304,  # Length of each EEG epoch
         'max_epochs': 4,  # Number of epochs in sequence for model
-        'num_epochs': 1,  # Number of training epochs
+        'num_epochs': 10,  # Number of training epochs
         'batch_size': 1,
-        'learning_rate': 3e-4,
+        'learning_rate': 1e-3,
         'max_lr': 4e-3,
-        'min_lr': 1e-4,
+        'min_lr': 4e-4,
         'weight_decay': 0.05,
         'warmup_ratio': 0.01,
         'clip_grad_norm': 1.0,
