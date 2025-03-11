@@ -74,10 +74,8 @@ class HierarchicalEEGTransformer(nn.Module):
                     windows.append(x[b, :self.window_size])
                 else:
                     # Not enough tokens for a window, pad to window_size
-                    padded_window = torch.cat([
-                        x[b, :],
-                        torch.zeros(self.window_size - seq_length, dtype=x.dtype, device=device)
-                    ])
+                    padded_window = torch.cat([window, torch.full((self.window_size - len(window),), self.pad_token_id,
+                                                                  dtype=x.dtype, device=device)])
                     windows.append(padded_window)
             else:
                 # Extract windows based on pad positions
@@ -94,10 +92,9 @@ class HierarchicalEEGTransformer(nn.Module):
                             b_windows.append(window)
                         elif len(window) < self.window_size:
                             # Pad short window
-                            padded_window = torch.cat([
-                                window,
-                                torch.zeros(self.window_size - len(window), dtype=x.dtype, device=device)
-                            ])
+                            padded_window = torch.cat([window,
+                                                       torch.full((self.window_size - len(window),), self.pad_token_id,
+                                                                  dtype=x.dtype, device=device)])
                             b_windows.append(padded_window)
                         else:
                             # Truncate long window
@@ -114,10 +111,9 @@ class HierarchicalEEGTransformer(nn.Module):
                             b_windows.append(window)
                         elif len(window) < self.window_size:
                             # Pad short window
-                            padded_window = torch.cat([
-                                window,
-                                torch.zeros(self.window_size - len(window), dtype=x.dtype, device=device)
-                            ])
+                            padded_window = torch.cat([window,
+                                                       torch.full((self.window_size - len(window),), self.pad_token_id,
+                                                                  dtype=x.dtype, device=device)])
                             b_windows.append(padded_window)
                         else:
                             # Truncate long window
@@ -395,10 +391,9 @@ class EEGTokenDataLoader:
             else:
                 # If we would go out of bounds, pad with zeros
                 seq_len = process_end - p
-                seq = torch.cat([
-                    self.tokens[p:process_end],
-                    torch.zeros(self.T - seq_len, dtype=self.tokens.dtype, device=self.tokens.device)
-                ])
+                seq = torch.cat([self.tokens[p:process_end],
+                                 torch.full((self.T - seq_len,), self.pad_token_id, dtype=self.tokens.dtype,
+                                            device=self.tokens.device)])
             batch_seqs.append(seq)
 
         batch = torch.stack(batch_seqs)
