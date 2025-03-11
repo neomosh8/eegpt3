@@ -204,16 +204,21 @@ class HierarchicalEEGTransformer(nn.Module):
 # Dataloader from the second document
 class EEGTokenDataLoader:
     """
-    A data loader that loads EEG token files from a provided list, concatenates them,
-    and iterates through the tokens for training/validation.
+    A data loader that loads EEG token files, concatenates them,
+    and provides properly aligned data for epoch-level prediction.
     """
 
-    def __init__(self, B, T, process_rank, num_processes, token_files, split):
-        self.B = B
-        self.T = T
+    def __init__(self, B, epoch_length, max_epochs, process_rank, num_processes, token_files, split):
+        self.B = B  # Batch size
+        self.epoch_length = epoch_length  # Number of tokens per epoch
+        self.max_epochs = max_epochs  # Number of epochs to process
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.split = split
+
+        # Calculate total sequence length needed for input and target
+        # We need max_epochs epochs for input and 1 more epoch for target
+        self.T = epoch_length * (max_epochs + 1)
 
         # Load tokens
         all_tokens = []
@@ -238,16 +243,24 @@ class EEGTokenDataLoader:
         print(f"Process {process_rank}: current_position = {self.current_position}, total_len = {self.total_len}")
 
     def next_batch(self):
-        """Fetch next batch of tokens as (x, y) for training"""
-        B, T = self.B, self.T
-        needed = B * T + 1
+        """
+        Fetch next batch of tokens as (x, y) for training.
+        x contains max_epochs complete epochs
+        y contains the next complete epoch (aligned at epoch boundary)
+        """
+        B, T, epoch_length, max_epochs = self.B, self.T, self.epoch_length, self.max_epochs
 
+        # We need enough tokens for max_epochs epochs (input) + 1 epoch (target)
+        needed = B * T
+
+        # Get tokens
         if self.current_position + needed <= self.total_len:
             buf_tokens = self.tokens[self.current_position: self.current_position + needed]
             self.current_position += B * T * self.num_processes
             if self.current_position + needed > self.total_len:
                 self.current_position = self.process_rank * B * T
         else:
+            # Handle wrapping around the dataset
             leftover = self.total_len - self.current_position
             wrap_amount = needed - leftover
             part1_tokens = self.tokens[self.current_position:]
@@ -258,8 +271,16 @@ class EEGTokenDataLoader:
         if len(buf_tokens) != needed:
             raise RuntimeError(f"Unexpected token count. Expected {needed}, got {len(buf_tokens)}")
 
-        x = buf_tokens[:-1].view(B, T)
-        y = buf_tokens[1:].view(B, T)
+        # Reshape to [B, T]
+        buf_tokens = buf_tokens.view(B, T)
+
+        # Input: first max_epochs epochs
+        input_length = epoch_length * max_epochs
+        x = buf_tokens[:, :input_length]
+
+        # Target: the next epoch
+        y = buf_tokens[:, input_length:input_length + epoch_length]
+
         return x, y
 
     def reset(self):
@@ -267,7 +288,6 @@ class EEGTokenDataLoader:
 
     def __len__(self):
         return self.total_len // (self.B * self.T)
-
 
 def moving_average(values, window_size=10):
     """Compute the simple moving average of a list of values."""
@@ -395,7 +415,8 @@ def train_model():
     # Initialize data loaders
     train_loader = EEGTokenDataLoader(
         B=config['batch_size'],
-        T=required_seq_length,
+        epoch_length=config['epoch_length'],
+        max_epochs=config['max_epochs'],
         process_rank=ddp_rank,
         num_processes=ddp_world_size,
         token_files=train_files,
@@ -404,7 +425,8 @@ def train_model():
 
     val_loader = EEGTokenDataLoader(
         B=config['batch_size'],
-        T=required_seq_length,
+        epoch_length=config['epoch_length'],
+        max_epochs=config['max_epochs'],
         process_rank=ddp_rank,
         num_processes=ddp_world_size,
         token_files=val_files,
