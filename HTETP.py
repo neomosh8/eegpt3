@@ -9,11 +9,11 @@ import torch.distributed as dist
 import math
 
 
-# Model definition
+# Model definition with handling for non-divisible sequence lengths
 class HierarchicalEEGTransformer(nn.Module):
     def __init__(self,
                  codebook_size,  # Size of your VQAE codebook
-                 window_size=2304,  # Flattened size (32x72)
+                 window_size=2304,  # Flattened size (72x32)
                  d_model=768,  # Hidden dimension
                  n_heads=12,  # Attention heads
                  n_layers=6,  # Transformer layers
@@ -45,13 +45,28 @@ class HierarchicalEEGTransformer(nn.Module):
         """
         Args:
             x: Tensor of token indices [batch_size, seq_length]
-               where seq_length = num_windows * window_size
         """
         batch_size, seq_length = x.shape
         device = x.device
 
-        # Check if sequence length is divisible by window size
-        assert seq_length % self.window_size == 0, "Sequence length must be divisible by window size"
+        # Handle case where sequence length is not divisible by window size
+        num_full_windows = seq_length // self.window_size
+        remainder = seq_length % self.window_size
+
+        if remainder > 0:
+            # Either pad the sequence or truncate it to multiple of window_size
+            if remainder < self.window_size // 2:
+                # Truncate - remove the remainder tokens
+                x = x[:, :num_full_windows * self.window_size]
+                seq_length = x.shape[1]
+            else:
+                # Pad - add zero padding to complete the window
+                padding_size = self.window_size - remainder
+                padding = torch.zeros((batch_size, padding_size), dtype=x.dtype, device=device)
+                x = torch.cat([x, padding], dim=1)
+                seq_length = x.shape[1]
+
+        # Now we know seq_length is divisible by window_size
         num_windows = seq_length // self.window_size
 
         # Get token embeddings
@@ -179,9 +194,9 @@ class MultiHeadAttention(nn.Module):
         return self.out_proj(context)
 
 
-# Custom DataLoader for EEG Tokens
+# Modified DataLoader for EEG Tokens that ensures window divisibility
 class EEGTokenDataLoader:
-    def __init__(self, B, T, process_rank, num_processes, token_files, split='train'):
+    def __init__(self, B, T, process_rank, num_processes, token_files, window_size=2304, split='train'):
         """
         Args:
             B: Batch size
@@ -189,6 +204,7 @@ class EEGTokenDataLoader:
             process_rank: Current process rank for DDP
             num_processes: Total number of processes for DDP
             token_files: List of token file paths
+            window_size: Size of each EEG window (should be 2304 for 72x32)
             split: 'train' or 'val'
         """
         self.B = B  # Batch size
@@ -196,6 +212,7 @@ class EEGTokenDataLoader:
         self.rank = process_rank
         self.world_size = num_processes
         self.split = split
+        self.window_size = window_size
 
         # Load all tokens from files
         all_tokens = []
@@ -228,7 +245,26 @@ class EEGTokenDataLoader:
         batch_pos = self.pos + process_start + torch.arange(0, self.B, device=self.tokens.device) * self.T
 
         # Get sequences of length T from each position
-        batch = torch.stack([self.tokens[p:p + self.T] for p in batch_pos])
+        batch_seqs = []
+        for p in batch_pos:
+            # Make sure we don't go out of bounds
+            if p + self.T < process_end:
+                seq = self.tokens[p:p + self.T]
+            else:
+                # If we would go out of bounds, pad with zeros
+                seq_len = process_end - p
+                seq = torch.cat([
+                    self.tokens[p:process_end],
+                    torch.zeros(self.T - seq_len, dtype=self.tokens.dtype, device=self.tokens.device)
+                ])
+            batch_seqs.append(seq)
+
+        batch = torch.stack(batch_seqs)
+
+        # Ensure sequence length is divisible by window_size
+        T_adjusted = (self.T // self.window_size) * self.window_size
+        if T_adjusted < self.T:
+            batch = batch[:, :T_adjusted]
 
         # Update position
         self.pos += self.B * self.T
@@ -254,8 +290,8 @@ def main():
     # Model parameters
     parser.add_argument("--codebook_size", type=int, default=129,
                         help="Size of the VQAE codebook")
-    parser.add_argument("--window_size", type=int, default=2305,
-                        help="Size of flattened EEG window (32x72)")
+    parser.add_argument("--window_size", type=int, default=2304,
+                        help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=768,
                         help="Hidden dimension of the model")
     parser.add_argument("--n_heads", type=int, default=12,
@@ -268,7 +304,7 @@ def main():
     # Training parameters
     parser.add_argument("--batch_size", type=int, default=16,
                         help="Batch size per GPU")
-    parser.add_argument("--seq_length", type=int, default=2305*2,
+    parser.add_argument("--seq_length", type=int, default=4608,
                         help="Sequence length for training")
     parser.add_argument("--learning_rate", type=float, default=5e-5,
                         help="Learning rate")
@@ -292,6 +328,10 @@ def main():
     # DDP parameters (for torchrun)
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="Local rank for distributed training (set by torchrun)")
+
+    # Debug mode - print shapes
+    parser.add_argument("--debug", action="store_true",
+                        help="Print debug information")
 
     args = parser.parse_args()
 
@@ -331,6 +371,10 @@ def main():
         split_idx = int(len(token_files) * train_val_split)
         train_files = token_files[:split_idx]
         val_files = token_files[split_idx:]
+
+        if args.debug:
+            print(f"Found {len(token_files)} token files")
+            print(f"Using {len(train_files)} for training and {len(val_files)} for validation")
     else:
         train_files = None
         val_files = None
@@ -347,13 +391,14 @@ def main():
     # Synchronize processes
     dist.barrier()
 
-    # Create data loaders
+    # Create data loaders with correct window size
     train_loader = EEGTokenDataLoader(
         B=args.batch_size,
         T=args.seq_length,
         process_rank=rank,
         num_processes=world_size,
         token_files=train_files,
+        window_size=args.window_size,
         split='train'
     )
 
@@ -363,6 +408,7 @@ def main():
         process_rank=rank,
         num_processes=world_size,
         token_files=val_files,
+        window_size=args.window_size,
         split='val'
     )
 
@@ -408,9 +454,19 @@ def main():
 
             batch = batch.to(device)
 
+            # Debug shapes
+            if args.debug and rank == 0 and step == 0:
+                print(f"Batch shape: {batch.shape}")
+                print(f"Is divisible by window size: {batch.shape[1] % args.window_size == 0}")
+
             # Forward pass: input is all but last token, target is all but first token
             x = batch[:, :-1]
             target = batch[:, 1:]
+
+            # Debug shapes
+            if args.debug and rank == 0 and step == 0:
+                print(f"Input shape: {x.shape}, Target shape: {target.shape}")
+                print(f"Is input divisible by window size: {x.shape[1] % args.window_size == 0}")
 
             # Get model predictions
             logits = model(x)
