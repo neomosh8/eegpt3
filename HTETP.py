@@ -614,7 +614,9 @@ def main():
 
             # Get model predictions
             logits = model(x)
-
+            min_length = min(logits.size(1), target.size(1))
+            logits = logits[:, :min_length, :]
+            target = target[:, :min_length]
             # Compute loss
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
