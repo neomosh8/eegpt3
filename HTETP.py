@@ -413,6 +413,31 @@ class EEGTokenDataLoader:
         self.pos = 0
 
 
+def calculate_steps_per_epoch(dataloader, world_size):
+    """
+    Calculate actual steps needed for one epoch based on the total data and DDP setup.
+
+    Args:
+        dataloader: The EEGTokenDataLoader instance
+        world_size: Number of processes/GPUs
+
+    Returns:
+        int: Number of steps needed for one epoch
+    """
+    # Total tokens across all processes
+    total_tokens = dataloader.total_length
+
+    # Tokens per batch across all processes
+    tokens_per_step = dataloader.B * dataloader.T * world_size
+
+    # Steps needed to process all tokens once
+    steps_per_epoch = total_tokens // tokens_per_step
+
+    # Add one more step if there's a remainder
+    if total_tokens % tokens_per_step > 0:
+        steps_per_epoch += 1
+
+    return steps_per_epoch
 def main():
     parser = argparse.ArgumentParser(description="Train Hierarchical EEG Transformer")
 
@@ -557,6 +582,11 @@ def main():
         split='val'
     )
 
+    # Calculate actual steps needed for one epoch
+    steps_per_epoch = calculate_steps_per_epoch(train_loader, world_size)
+    if rank == 0:
+        print(f"Calculated steps per epoch: {steps_per_epoch} (based on dataset size)")
+
     # Create model with special pad token handling
     model = HierarchicalEEGTransformer(
         codebook_size=args.codebook_size,
@@ -597,20 +627,25 @@ def main():
         train_loss = 0.0
         num_train_batches = 0
 
+        # Reset training data loader for each epoch
+        train_loader.reset()
+
         # Create step progress bar (only on rank 0)
         if rank == 0:
-            step_bar = tqdm(range(args.steps_per_epoch),
+            step_bar = tqdm(range(steps_per_epoch),
                             desc=f"Epoch {epoch + 1}/{args.epochs}",
                             position=1,
                             leave=False)
         else:
-            step_bar = range(args.steps_per_epoch)
+            step_bar = range(steps_per_epoch)
 
-        # Train for a number of steps per epoch
+        # Train for calculated number of steps per epoch
         for step in step_bar:
             # Get next batch
             batch = train_loader.next_batch()
             if batch is None:
+                if rank == 0:
+                    tqdm.write(f"Warning: Ran out of data at step {step}/{steps_per_epoch}")
                 break
 
             batch = batch.to(device)
@@ -676,29 +711,15 @@ def main():
         # Reset validation data loader
         val_loader.reset()
 
+        # Calculate validation steps
+        val_steps = calculate_steps_per_epoch(val_loader, world_size)
+
         # Create validation progress bar (only on rank 0)
         if rank == 0:
-            # First, we need to count the validation batches
-            val_count = 0
-            temp_loader = EEGTokenDataLoader(
-                B=args.batch_size,
-                T=args.seq_length,
-                process_rank=rank,
-                num_processes=world_size,
-                token_files=val_files,
-                window_size=args.window_size,
-                pad_token_id=args.pad_token_id,
-                eos_token_id=args.eos_token_id,
-                split='val'
-            )
-
-            while temp_loader.next_batch() is not None:
-                val_count += 1
-
-            val_bar = tqdm(total=val_count, desc="Validation", position=1, leave=False)
+            val_bar = tqdm(range(val_steps), desc="Validation", position=1, leave=False)
 
         with torch.no_grad():
-            while True:
+            for val_step in range(val_steps) if rank != 0 else val_bar:
                 # Get next batch
                 batch = val_loader.next_batch()
                 if batch is None:
@@ -733,7 +754,6 @@ def main():
 
                 # Update validation progress bar (only on rank 0)
                 if rank == 0:
-                    val_bar.update(1)
                     val_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
 
         # Average validation loss
@@ -755,10 +775,6 @@ def main():
                 "val_loss": f"{val_loss:.4f}",
                 "lr": f"{scheduler.get_last_lr()[0]:.6f}"
             })
-
-            # Close validation progress bar
-            if 'val_bar' in locals():
-                val_bar.close()
 
             # Save checkpoint
             if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
