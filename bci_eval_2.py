@@ -903,14 +903,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
                                include_random_model=True):
     """
     Creates a bar plot with error bars for evaluation metrics with multiple trials.
-    Can compare trained model, random model (no pretrained weights), and baseline.
-
-    Args:
-        evaluator: EEGSimpleEvaluator instance
-        output_dir: Directory to save the plot
-        n_shots: Number of shots for few-shot evaluation
-        n_trials: Number of trials to run for each evaluation
-        include_random_model: If True, also evaluate with randomly initialized model
+    Compares trained model against a proper random baseline and random chance.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -929,7 +922,6 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
 
     # Use the latest checkpoint
     latest_checkpoint = evaluator.checkpoint_files[-1]
-    print(latest_checkpoint)
     print(f"Using latest checkpoint: {latest_checkpoint}")
 
     # Load the checkpoint
@@ -946,7 +938,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
     evaluator.model.eval()
     evaluator.token_embedding = evaluator.model.token_embedding
 
-    # Run multiple trials for sequence-level few-shot evaluation
+    # Run trials for trained model evaluations
     print(f"Running sequence-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
     for trial in range(n_trials):
         print(f"  Trial {trial + 1}/{n_trials}")
@@ -954,7 +946,6 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         if acc is not None:
             results['trained']['seq'].append(acc)
 
-    # Run multiple trials for window-level few-shot evaluation
     print(f"Running window-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
     for trial in range(n_trials):
         print(f"  Trial {trial + 1}/{n_trials}")
@@ -962,14 +953,14 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         if acc is not None:
             results['trained']['win'].append(acc)
 
-    # If requested, also evaluate with random weights (no pretraining)
+    # If requested, also evaluate with random weights model
     if include_random_model:
         print("\nEvaluating randomly initialized model (no pretraining)...")
 
-        # Import the model class from the same module as the evaluator's model
+        # Import the model class from the same module
         from HTETP import HierarchicalEEGTransformer
 
-        # Create a new model with same architecture but random weights
+        # Create a new model with the same architecture
         random_model = HierarchicalEEGTransformer(
             codebook_size=evaluator.codebook_size,
             window_size=evaluator.window_size,
@@ -980,6 +971,15 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             pad_token_id=evaluator.pad_token_id
         ).to(evaluator.device)
 
+        # Explicitly reinitialize all weights randomly
+        def init_weights(m):
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                nn.init.xavier_uniform_(m.weight)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        random_model.apply(init_weights)
+
         # Save the original model
         original_model = evaluator.model
 
@@ -988,7 +988,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         evaluator.token_embedding = random_model.token_embedding
         evaluator.model.eval()
 
-        # Run multiple trials for sequence-level few-shot evaluation
+        # Run trials for random model evaluation
         print(f"Running sequence-level few-shot evaluation with random model...")
         for trial in range(n_trials):
             print(f"  Trial {trial + 1}/{n_trials}")
@@ -996,7 +996,6 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             if acc is not None:
                 results['random']['seq'].append(acc)
 
-        # Run multiple trials for window-level few-shot evaluation
         print(f"Running window-level few-shot evaluation with random model...")
         for trial in range(n_trials):
             print(f"  Trial {trial + 1}/{n_trials}")
@@ -1008,13 +1007,13 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         evaluator.model = original_model
         evaluator.token_embedding = original_model.token_embedding
 
-    # Calculate statistics for plotting
+    # Create plotting elements
     metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
 
     # Create figure
     plt.figure(figsize=(12, 7))
     x_pos = np.arange(len(metrics))
-    width = 0.25 if include_random_model else 0.35  # Narrower bars if we have 3 groups
+    width = 0.25 if include_random_model else 0.35
 
     fig, ax = plt.subplots(figsize=(12, 7))
 
@@ -1067,7 +1066,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             alpha=0.8,
             ecolor='black',
             color='orange',
-            label='Random Model (No Pretraining)'
+            label='Random Initialization'
         )
 
         # Add values above random model bars
@@ -1076,14 +1075,14 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
                 ax.text(x_pos[i], mean + error + 0.01, f"{mean:.3f}",
                         ha='center', va='bottom', fontsize=9)
 
-    # Plot baseline bars
+    # Plot baseline bars (true random chance)
     baseline_bars = ax.bar(
         baseline_pos,
         [results['baseline']['seq'], results['baseline']['win']],
         width,
         alpha=0.5,
         color='lightgray',
-        label='Baseline (Random Chance)'
+        label='Random Chance'
     )
 
     # Add values above trained model bars
@@ -1095,15 +1094,13 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
     # Add labels and legend
     ax.set_xlabel('Evaluation Method', fontsize=12)
     ax.set_ylabel('Accuracy', fontsize=12)
-    title = f'Model Performance with Error Bars ({n_shots}-shot, {n_trials} trials)'
-    if include_random_model:
-        title += ' - With Random Initialization Comparison'
+    title = f'Model Performance Comparison ({n_shots}-shot, {n_trials} trials)'
     ax.set_title(title, fontsize=14)
     ax.set_xticks(x_pos)
     ax.set_xticklabels(metrics)
     ax.legend(loc='best')
 
-    # Set y-axis limits
+    # Set y-axis limits with appropriate scale
     all_means = trained_means
     all_errors = trained_errors
     if include_random_model:
@@ -1118,19 +1115,14 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
 
     plt.tight_layout()
 
-    # Output filename depends on whether random model is included
-    file_name = f'performance_error_bars_{n_shots}shot'
-    if include_random_model:
-        file_name += '_with_random'
-    file_name += '.png'
-
+    # Output filename
+    file_name = f'performance_comparison_{n_shots}shot.png'
     plt.savefig(os.path.join(output_dir, file_name), dpi=300)
     plt.close()
 
     print(f"Plot saved to {os.path.join(output_dir, file_name)}")
 
     return results
-
 
 
 def main():
