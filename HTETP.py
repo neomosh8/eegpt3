@@ -468,9 +468,9 @@ def main():
                         help="Batch size per GPU")
     parser.add_argument("--seq_length", type=int, default=4608,
                         help="Sequence length for training")
-    parser.add_argument("--learning_rate", type=float, default=5e-4,
+    parser.add_argument("--learning_rate", type=float, default=1e-3,
                         help="Learning rate")
-    parser.add_argument("--min_lr", type=float, default=1e-6,
+    parser.add_argument("--min_lr", type=float, default=1e-4,
                         help="Minimum learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="Weight decay")
