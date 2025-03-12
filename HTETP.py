@@ -628,7 +628,7 @@ def main():
                         help="ID of end-of-sequence token")
 
     # Training parameters
-    parser.add_argument("--batch_size", type=int, default=2,
+    parser.add_argument("--batch_size", type=int, default=3,
                         help="Batch size per GPU")
     parser.add_argument("--seq_length", type=int, default=4608,
                         help="Sequence length for training")
