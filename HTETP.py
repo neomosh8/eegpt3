@@ -498,6 +498,106 @@ def plot_and_save_losses(train_losses, val_losses, epoch, log_dir):
     plt.close(fig)  # Close figure to free memory
 
     return plot_path
+
+
+def plot_training_progress(all_train_losses, all_val_losses, log_dir):
+    """
+    Create a single plot showing training and validation losses across all epochs.
+
+    Args:
+        all_train_losses: List of lists containing training losses for each epoch
+        all_val_losses: List of lists containing validation losses for each epoch
+        log_dir: Directory to save the plot
+    """
+    plt.figure(figsize=(15, 10))
+
+    # Plot mean losses per epoch
+    epochs = range(1, len(all_train_losses) + 1)
+    train_means = [np.mean(losses) for losses in all_train_losses]
+    val_means = [np.mean(losses) for losses in all_val_losses]
+
+    plt.subplot(2, 1, 1)
+    plt.plot(epochs, train_means, 'bo-', label='Training Loss')
+    plt.plot(epochs, val_means, 'ro-', label='Validation Loss')
+    plt.title('Mean Loss per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.grid(True)
+    plt.legend()
+
+    # Plot all step losses as continuous line with epoch boundaries
+    plt.subplot(2, 1, 2)
+
+    # Prepare continuous step axis
+    all_train_steps = []
+    all_val_steps = []
+    train_step_losses = []
+    val_step_losses = []
+
+    # Mark epoch boundaries
+    epoch_boundaries = [0]
+    step_count = 0
+
+    for epoch_idx, (train_losses, val_losses) in enumerate(zip(all_train_losses, all_val_losses)):
+        # Add train loss points
+        epoch_steps = range(step_count, step_count + len(train_losses))
+        all_train_steps.extend(epoch_steps)
+        train_step_losses.extend(train_losses)
+
+        step_count += len(train_losses)
+        epoch_boundaries.append(step_count)
+
+        # Add validation loss points at the end of each epoch
+        # We'll offset these slightly for visualization
+        val_steps = [step_count + i * 0.5 for i in range(len(val_losses))]
+        all_val_steps.extend(val_steps)
+        val_step_losses.extend(val_losses)
+
+        step_count += len(val_losses)  # Move step count past validation
+
+    # Plot step losses
+    plt.plot(all_train_steps, train_step_losses, 'b-', alpha=0.3, label='Training Steps')
+    plt.plot(all_val_steps, val_step_losses, 'r-', alpha=0.3, label='Validation Steps')
+
+    # Calculate and plot moving averages
+    window_size = 100
+    if len(train_step_losses) >= window_size:
+        weights = np.ones(window_size) / window_size
+        train_ma = np.convolve(train_step_losses, weights, 'valid')
+        plt.plot(all_train_steps[window_size - 1:], train_ma, 'g-', label=f'Train Moving Avg ({window_size} steps)')
+
+    if len(val_step_losses) >= window_size // 2:
+        val_window = min(window_size // 2, len(val_step_losses) // 2)
+        if val_window > 0:
+            weights = np.ones(val_window) / val_window
+            val_ma = np.convolve(val_step_losses, weights, 'valid')
+            plt.plot(all_val_steps[val_window - 1:], val_ma, 'm-', label=f'Val Moving Avg ({val_window} steps)')
+
+    # Add epoch boundary lines
+    for boundary in epoch_boundaries:
+        plt.axvline(x=boundary, color='gray', linestyle='--', alpha=0.7)
+
+    # Add epoch numbers
+    for i in range(len(epoch_boundaries) - 1):
+        mid = (epoch_boundaries[i] + epoch_boundaries[i + 1]) / 2
+        plt.text(mid, plt.ylim()[1] * 0.9, f'Epoch {i + 1}',
+                 horizontalalignment='center', verticalalignment='center',
+                 bbox=dict(facecolor='white', alpha=0.7))
+
+    plt.title('All Training Steps')
+    plt.xlabel('Step')
+    plt.ylabel('Loss')
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    plot_path = os.path.join(log_dir, 'full_training_progress.png')
+    plt.savefig(plot_path)
+    plt.close()
+
+    return plot_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Hierarchical EEG Transformer")
 
@@ -514,7 +614,7 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=360,
+    parser.add_argument("--d_model", type=int, default=128,
                         help="Hidden dimension of the model")
     parser.add_argument("--n_heads", type=int, default=4,
                         help="Number of attention heads")
@@ -677,8 +777,11 @@ def main():
         T_max=args.epochs,
         eta_min=args.min_lr
     )
+    # Initialize storage for all epoch losses (right before the epoch loop)
+    # Initialize storage for all epoch losses (right before the epoch loop)
+    all_train_losses = []
+    all_val_losses = []
 
-    # Training loop
     # Training loop with tqdm progress bars
     if rank == 0:
         epoch_bar = tqdm(range(args.epochs), desc="Training", position=0)
@@ -692,8 +795,10 @@ def main():
 
         # Reset training data loader for each epoch
         train_loader.reset()
+
         # Initialize step loss trackers
         step_train_losses = []
+
         # Create step progress bar (only on rank 0)
         if rank == 0:
             step_bar = tqdm(range(steps_per_epoch),
@@ -754,13 +859,14 @@ def main():
             # Update statistics
             train_loss += loss.item()
             num_train_batches += 1
+
             # Track step losses for plotting (only on rank 0)
             if rank == 0:
                 step_train_losses.append(loss.item())
+
             # Update step progress bar with current loss (only on rank 0)
             if rank == 0:
                 step_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-
 
         # Average training loss
         train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0
@@ -777,6 +883,7 @@ def main():
 
         # Reset validation data loader
         val_loader.reset()
+
         # Initialize validation step loss trackers
         step_val_losses = []
 
@@ -820,9 +927,11 @@ def main():
                 # Update statistics
                 val_loss += loss.item()
                 num_val_batches += 1
+
                 # Track step losses for plotting (only on rank 0)
                 if rank == 0:
                     step_val_losses.append(loss.item())
+
                 # Update validation progress bar (only on rank 0)
                 if rank == 0:
                     val_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
@@ -838,8 +947,12 @@ def main():
         # Update learning rate
         scheduler.step()
 
-        # Print progress and save checkpoint (only on rank 0)
+        # Store the losses for this epoch (only after completing the entire epoch)
         if rank == 0:
+            all_train_losses.append(step_train_losses)
+            all_val_losses.append(step_val_losses)
+
+            # Plot per-epoch losses
             plot_path = plot_and_save_losses(step_train_losses, step_val_losses, epoch, args.log_dir)
             tqdm.write(f"Saved loss plot to {plot_path}")
 
@@ -865,6 +978,10 @@ def main():
                 tqdm.write(f"Saved checkpoint at epoch {epoch + 1}")
 
     # Clean up
+    if rank == 0:
+        # Create comprehensive training plot
+        plot_path = plot_training_progress(all_train_losses, all_val_losses, args.log_dir)
+        print(f"Saved full training progress plot to {plot_path}")
     dist.destroy_process_group()
 
 
