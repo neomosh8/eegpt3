@@ -7,7 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import math
-
+import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
 
 
@@ -439,6 +440,64 @@ def calculate_steps_per_epoch(dataloader, world_size):
         steps_per_epoch += 1
 
     return steps_per_epoch
+
+
+def plot_and_save_losses(train_losses, val_losses, epoch, log_dir):
+    """
+    Plot training and validation losses for the current epoch and save to log directory.
+
+    Args:
+        train_losses: List of training losses for each step
+        val_losses: List of validation losses for each step
+        epoch: Current epoch number
+        log_dir: Directory to save plots
+    """
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+
+    # Plot training losses
+    steps = np.arange(1, len(train_losses) + 1)
+    ax1.plot(steps, train_losses, 'b-', alpha=0.3, label='Step Loss')
+
+    # Calculate and plot moving average (window of 20 steps)
+    if len(train_losses) >= 20:
+        window_size = 20
+        weights = np.ones(window_size) / window_size
+        train_ma = np.convolve(train_losses, weights, 'valid')
+        ax1.plot(steps[window_size - 1:], train_ma, 'r-', label='Moving Avg (20 steps)')
+
+    ax1.set_title(f'Training Loss - Epoch {epoch + 1}')
+    ax1.set_xlabel('Step')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(True)
+
+    # Plot validation losses
+    val_steps = np.arange(1, len(val_losses) + 1)
+    ax2.plot(val_steps, val_losses, 'g-', alpha=0.3, label='Step Loss')
+
+    # Calculate and plot moving average (window of 20 steps or fewer if not enough points)
+    if len(val_losses) >= 10:
+        window_size = min(20, len(val_losses) // 2)
+        weights = np.ones(window_size) / window_size
+        val_ma = np.convolve(val_losses, weights, 'valid')
+        ax2.plot(val_steps[window_size - 1:], val_ma, 'm-', label=f'Moving Avg ({window_size} steps)')
+
+    ax2.set_title(f'Validation Loss - Epoch {epoch + 1}')
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('Loss')
+    ax2.legend()
+    ax2.grid(True)
+
+    # Tight layout
+    plt.tight_layout()
+
+    # Save figure
+    plot_path = os.path.join(log_dir, f'loss_plot_epoch_{epoch + 1}.png')
+    plt.savefig(plot_path)
+    plt.close(fig)  # Close figure to free memory
+
+    return plot_path
 def main():
     parser = argparse.ArgumentParser(description="Train Hierarchical EEG Transformer")
 
@@ -499,7 +558,8 @@ def main():
     # Debug mode - print shapes
     parser.add_argument("--debug", action="store_true",
                         help="Print debug information")
-
+    parser.add_argument("--log_dir", type=str, default="logs",
+                        help="Directory to save loss plots")
     args = parser.parse_args()
 
     # Initialize the distributed environment
@@ -517,6 +577,8 @@ def main():
     # Create save directory if it doesn't exist
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
+        os.makedirs(args.log_dir, exist_ok=True)
+
 
     # File list management
     data_dir = args.data_dir
@@ -630,7 +692,8 @@ def main():
 
         # Reset training data loader for each epoch
         train_loader.reset()
-
+        # Initialize step loss trackers
+        step_train_losses = []
         # Create step progress bar (only on rank 0)
         if rank == 0:
             step_bar = tqdm(range(steps_per_epoch),
@@ -691,10 +754,13 @@ def main():
             # Update statistics
             train_loss += loss.item()
             num_train_batches += 1
-
+            # Track step losses for plotting (only on rank 0)
+            if rank == 0:
+                step_train_losses.append(loss.item())
             # Update step progress bar with current loss (only on rank 0)
             if rank == 0:
                 step_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+
 
         # Average training loss
         train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0
@@ -711,6 +777,8 @@ def main():
 
         # Reset validation data loader
         val_loader.reset()
+        # Initialize validation step loss trackers
+        step_val_losses = []
 
         # Calculate validation steps
         val_steps = calculate_steps_per_epoch(val_loader, world_size)
@@ -752,7 +820,9 @@ def main():
                 # Update statistics
                 val_loss += loss.item()
                 num_val_batches += 1
-
+                # Track step losses for plotting (only on rank 0)
+                if rank == 0:
+                    step_val_losses.append(loss.item())
                 # Update validation progress bar (only on rank 0)
                 if rank == 0:
                     val_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
@@ -770,6 +840,9 @@ def main():
 
         # Print progress and save checkpoint (only on rank 0)
         if rank == 0:
+            plot_path = plot_and_save_losses(step_train_losses, step_val_losses, epoch, args.log_dir)
+            tqdm.write(f"Saved loss plot to {plot_path}")
+
             # Update epoch progress bar
             epoch_bar.set_postfix({
                 "train_loss": f"{train_loss:.4f}",
