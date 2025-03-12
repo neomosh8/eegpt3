@@ -510,7 +510,7 @@ def plot_losses(train_losses, val_losses, step, epoch, save_path, plot_every=100
 
     # Save the plot
     os.makedirs(save_path, exist_ok=True)
-    plot_filename = os.path.join(save_path, f'loss_epoch{epoch + 1}_step{step}.png')
+    plot_filename = os.path.join(save_path, f'loss_epoch{epoch + 1}.png')
     plt.savefig(plot_filename)
     plt.close()
 

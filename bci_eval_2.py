@@ -1144,7 +1144,7 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=36,
+    parser.add_argument("--d_model", type=int, default=360,
                         help="Hidden dimension size")
     parser.add_argument("--skip_random_model", action="store_true",
                         help="Skip evaluation with randomly initialized model")
