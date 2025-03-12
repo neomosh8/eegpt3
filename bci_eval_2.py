@@ -899,20 +899,33 @@ import numpy as np
 import os
 
 
-def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_shots=1, n_trials=20):
+def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_shots=1, n_trials=20,
+                               include_random_model=True):
     """
     Creates a bar plot with error bars for evaluation metrics with multiple trials.
+    Can compare trained model, random model (no pretrained weights), and baseline.
 
     Args:
         evaluator: EEGSimpleEvaluator instance
         output_dir: Directory to save the plot
         n_shots: Number of shots for few-shot evaluation
         n_trials: Number of trials to run for each evaluation
-
-    Returns:
-        Dictionary containing the evaluation results
+        include_random_model: If True, also evaluate with randomly initialized model
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    # Get baseline for reference
+    baseline_results = evaluator.evaluate_baseline()
+
+    results = {
+        'trained': {'seq': [], 'win': []},
+        'random': {'seq': [], 'win': []} if include_random_model else None,
+        'baseline': {'seq': baseline_results['few_shot_accuracy'], 'win': 0.25}
+        # Assuming 4 classes for window baseline
+    }
+
+    # First evaluate with trained model
+    print("\nEvaluating trained model...")
 
     # Use the latest checkpoint
     latest_checkpoint = evaluator.checkpoint_files[-1]
@@ -932,118 +945,190 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
     evaluator.model.eval()
     evaluator.token_embedding = evaluator.model.token_embedding
 
-    # Get baseline for reference
-    baseline_results = evaluator.evaluate_baseline()
-
     # Run multiple trials for sequence-level few-shot evaluation
-    print(f"\nRunning sequence-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
-    seq_accuracies = []
+    print(f"Running sequence-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
     for trial in range(n_trials):
         print(f"  Trial {trial + 1}/{n_trials}")
         acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
         if acc is not None:
-            seq_accuracies.append(acc)
+            results['trained']['seq'].append(acc)
 
     # Run multiple trials for window-level few-shot evaluation
-    print(f"\nRunning window-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
-    win_accuracies = []
+    print(f"Running window-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
     for trial in range(n_trials):
         print(f"  Trial {trial + 1}/{n_trials}")
         acc = evaluator._run_single_window_few_shot_trial(n_shots=n_shots, n_queries=1)
         if acc is not None:
-            win_accuracies.append(acc)
+            results['trained']['win'].append(acc)
 
-    # Calculate statistics
+    # If requested, also evaluate with random weights (no pretraining)
+    if include_random_model:
+        print("\nEvaluating randomly initialized model (no pretraining)...")
+
+        # Import the model class from the same module as the evaluator's model
+        from HTETP import HierarchicalEEGTransformer
+
+        # Create a new model with same architecture but random weights
+        random_model = HierarchicalEEGTransformer(
+            codebook_size=evaluator.codebook_size,
+            window_size=evaluator.window_size,
+            d_model=evaluator.d_model,
+            n_heads=evaluator.n_heads,
+            n_layers=evaluator.n_layers,
+            max_windows=evaluator.max_windows,
+            pad_token_id=evaluator.pad_token_id
+        ).to(evaluator.device)
+
+        # Save the original model
+        original_model = evaluator.model
+
+        # Temporarily use the random model
+        evaluator.model = random_model
+        evaluator.token_embedding = random_model.token_embedding
+        evaluator.model.eval()
+
+        # Run multiple trials for sequence-level few-shot evaluation
+        print(f"Running sequence-level few-shot evaluation with random model...")
+        for trial in range(n_trials):
+            print(f"  Trial {trial + 1}/{n_trials}")
+            acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+            if acc is not None:
+                results['random']['seq'].append(acc)
+
+        # Run multiple trials for window-level few-shot evaluation
+        print(f"Running window-level few-shot evaluation with random model...")
+        for trial in range(n_trials):
+            print(f"  Trial {trial + 1}/{n_trials}")
+            acc = evaluator._run_single_window_few_shot_trial(n_shots=n_shots, n_queries=1)
+            if acc is not None:
+                results['random']['win'].append(acc)
+
+        # Restore the original model
+        evaluator.model = original_model
+        evaluator.token_embedding = original_model.token_embedding
+
+    # Calculate statistics for plotting
     metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
-    means = []
-    errors = []
-    baselines = []
 
-    if seq_accuracies:
-        seq_mean = np.mean(seq_accuracies)
-        seq_std = np.std(seq_accuracies)
-        means.append(seq_mean)
-        errors.append(seq_std)
-        baselines.append(baseline_results['few_shot_accuracy'])
-        print(f"Sequence-level few-shot: {seq_mean:.4f} ± {seq_std:.4f}")
-    else:
-        means.append(0)
-        errors.append(0)
-        baselines.append(0)
-
-    if win_accuracies:
-        win_mean = np.mean(win_accuracies)
-        win_std = np.std(win_accuracies)
-        means.append(win_mean)
-        errors.append(win_std)
-        baselines.append(0.25)  # Random chance for 4 classes (typical in BCI)
-        print(f"Window-level few-shot: {win_mean:.4f} ± {win_std:.4f}")
-    else:
-        means.append(0)
-        errors.append(0)
-        baselines.append(0)
-
-    # Create plot
-    plt.figure(figsize=(10, 6))
+    # Create figure
+    plt.figure(figsize=(12, 7))
     x_pos = np.arange(len(metrics))
-    width = 0.35
+    width = 0.25 if include_random_model else 0.35  # Narrower bars if we have 3 groups
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Plot model performance bars with error bars
-    bars = ax.bar(x_pos, means, width, yerr=errors, capsize=10,
-                  alpha=0.7, ecolor='black', color='steelblue',
-                  label='Model Performance')
+    # Calculate stats for trained model
+    trained_means = [
+        np.mean(results['trained']['seq']) if results['trained']['seq'] else 0,
+        np.mean(results['trained']['win']) if results['trained']['win'] else 0
+    ]
+
+    trained_errors = [
+        np.std(results['trained']['seq']) if results['trained']['seq'] else 0,
+        np.std(results['trained']['win']) if results['trained']['win'] else 0
+    ]
+
+    # Position of bars
+    trained_pos = x_pos - width if include_random_model else x_pos
+    baseline_pos = x_pos + width if include_random_model else x_pos + width
+
+    # Plot trained model bars
+    trained_bars = ax.bar(
+        trained_pos,
+        trained_means,
+        width,
+        yerr=trained_errors,
+        capsize=10,
+        alpha=0.8,
+        ecolor='black',
+        color='steelblue',
+        label='Trained Model'
+    )
+
+    # Plot random model if enabled
+    if include_random_model:
+        random_means = [
+            np.mean(results['random']['seq']) if results['random']['seq'] else 0,
+            np.mean(results['random']['win']) if results['random']['win'] else 0
+        ]
+
+        random_errors = [
+            np.std(results['random']['seq']) if results['random']['seq'] else 0,
+            np.std(results['random']['win']) if results['random']['win'] else 0
+        ]
+
+        random_bars = ax.bar(
+            x_pos,
+            random_means,
+            width,
+            yerr=random_errors,
+            capsize=10,
+            alpha=0.8,
+            ecolor='black',
+            color='orange',
+            label='Random Model (No Pretraining)'
+        )
+
+        # Add values above random model bars
+        for i, (mean, error) in enumerate(zip(random_means, random_errors)):
+            if mean > 0:
+                ax.text(x_pos[i], mean + error + 0.01, f"{mean:.3f}",
+                        ha='center', va='bottom', fontsize=9)
 
     # Plot baseline bars
-    ax.bar(x_pos + width, baselines, width, alpha=0.5, color='lightgray',
-           label='Baseline (Random Chance)')
+    baseline_bars = ax.bar(
+        baseline_pos,
+        [results['baseline']['seq'], results['baseline']['win']],
+        width,
+        alpha=0.5,
+        color='lightgray',
+        label='Baseline (Random Chance)'
+    )
 
-    # Add value labels on top of bars
-    for i, (mean, error) in enumerate(zip(means, errors)):
+    # Add values above trained model bars
+    for i, (mean, error) in enumerate(zip(trained_means, trained_errors)):
         if mean > 0:
-            ax.text(i, mean + error + 0.01, f"{mean:.3f} ± {error:.3f}",
-                    ha='center', va='bottom', fontsize=10)
+            ax.text(trained_pos[i], mean + error + 0.01, f"{mean:.3f}",
+                    ha='center', va='bottom', fontsize=9)
 
     # Add labels and legend
     ax.set_xlabel('Evaluation Method', fontsize=12)
     ax.set_ylabel('Accuracy', fontsize=12)
-    ax.set_title(f'Model Performance with Error Bars ({n_shots}-shot, {n_trials} trials)', fontsize=14)
-    ax.set_xticks(x_pos + width / 2)
+    title = f'Model Performance with Error Bars ({n_shots}-shot, {n_trials} trials)'
+    if include_random_model:
+        title += ' - With Random Initialization Comparison'
+    ax.set_title(title, fontsize=14)
+    ax.set_xticks(x_pos)
     ax.set_xticklabels(metrics)
-    ax.legend()
+    ax.legend(loc='best')
 
     # Set y-axis limits
-    ax.set_ylim(0, min(1.0, max(means) + max(errors) + 0.1))
+    all_means = trained_means
+    all_errors = trained_errors
+    if include_random_model:
+        all_means = all_means + random_means
+        all_errors = all_errors + random_errors
+
+    max_y = max([m + e for m, e in zip(all_means, all_errors) if m > 0] or [0.4])
+    ax.set_ylim(0, min(1.0, max_y + 0.1))
 
     # Add grid
     ax.yaxis.grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'performance_error_bars_{n_shots}shot.png'), dpi=300)
+
+    # Output filename depends on whether random model is included
+    file_name = f'performance_error_bars_{n_shots}shot'
+    if include_random_model:
+        file_name += '_with_random'
+    file_name += '.png'
+
+    plt.savefig(os.path.join(output_dir, file_name), dpi=300)
     plt.close()
 
-    print(f"Plot saved to {os.path.join(output_dir, f'performance_error_bars_{n_shots}shot.png')}")
-
-    # Save raw results
-    results = {
-        'sequence_level': {
-            'accuracies': seq_accuracies,
-            'mean': np.mean(seq_accuracies) if seq_accuracies else 0,
-            'std': np.std(seq_accuracies) if seq_accuracies else 0,
-            'baseline': baseline_results['few_shot_accuracy']
-        },
-        'window_level': {
-            'accuracies': win_accuracies,
-            'mean': np.mean(win_accuracies) if win_accuracies else 0,
-            'std': np.std(win_accuracies) if win_accuracies else 0,
-            'baseline': 0.25  # Assuming 4 classes
-        }
-    }
+    print(f"Plot saved to {os.path.join(output_dir, file_name)}")
 
     return results
-
-
 
 
 
@@ -1068,7 +1153,8 @@ def main():
                         help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=36,
                         help="Hidden dimension size")
-
+    parser.add_argument("--skip_random_model", action="store_true",
+                        help="Skip evaluation with randomly initialized model")
     args = parser.parse_args()
 
     # Check CUDA availability
@@ -1096,7 +1182,8 @@ def main():
         evaluator,
         output_dir=args.output_dir,
         n_shots=args.n_shots,
-        n_trials=20  # You can adjust the number of trials
+        n_trials=20,  # You can adjust the number of trials
+        include_random_model=not args.skip_random_model  # Notice the "not" here
     )
     print("Evaluation complete!")
 
