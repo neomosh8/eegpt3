@@ -66,6 +66,56 @@ class EEGSimpleEvaluator:
         # Initialize model with first checkpoint to get structure
         self._initialize_model(self.checkpoint_files[0])
 
+    def evaluate_baseline(self):
+        """
+        Evaluate using a randomly initialized model (baseline)
+
+        Returns:
+            Dictionary with baseline few-shot and classifier accuracies
+        """
+        print("\nEvaluating baseline model (random weights)...")
+
+        # Store the current token_embedding
+        original_embedding = self.token_embedding
+
+        try:
+            # Create a new model with random weights
+            from HTETP import HierarchicalEEGTransformer
+
+            baseline_model = HierarchicalEEGTransformer(
+                codebook_size=self.codebook_size,
+                window_size=self.window_size,
+                d_model=self.d_model,
+                n_heads=self.n_heads,
+                n_layers=self.n_layers,
+                max_windows=self.max_windows,
+                pad_token_id=self.pad_token_id
+            ).to(self.device)
+
+            # Use the randomly initialized embedding
+            self.token_embedding = baseline_model.token_embedding
+
+            # Run evaluations
+            baseline_few_shot = self.evaluate_few_shot(n_shots=1)
+            baseline_classifier = self.evaluate_classifier()
+
+            baseline_results = {
+                'few_shot_accuracy': baseline_few_shot,
+                'classifier_accuracy': baseline_classifier
+            }
+
+        except Exception as e:
+            print(f"Error evaluating baseline model: {str(e)}")
+            traceback.print_exc()
+            baseline_results = {
+                'few_shot_accuracy': 0.0,
+                'classifier_accuracy': 0.0
+            }
+
+        # Restore the original embedding
+        self.token_embedding = original_embedding
+
+        return baseline_results
     def _load_data(self):
         """Load all tokenized data files into RAM and organize by class"""
         print("Loading tokenized data files into RAM...")
@@ -391,6 +441,14 @@ class EEGSimpleEvaluator:
         class_sizes = {cls: len(self.class_data[cls]) for cls in class_names}
         print(f"Class sizes: {class_sizes}")
 
+        # Evaluate baseline model with random weights
+        baseline_results = self.evaluate_baseline()
+
+        # Use epoch 0 for baseline in the plot
+        results['epoch'].append(0)
+        results['few_shot_accuracy'].append(baseline_results['few_shot_accuracy'])
+        results['classifier_accuracy'].append(baseline_results['classifier_accuracy'])
+
         # Evaluate each checkpoint
         for ckpt_file in self.checkpoint_files:
             # Extract epoch number
@@ -455,15 +513,29 @@ class EEGSimpleEvaluator:
         """Create and save accuracy plot from results"""
         plt.figure(figsize=(12, 8))
 
-        epochs = results['epoch']
+        # Convert to DataFrame for easier filtering
+        df = pd.DataFrame(results)
 
-        # Plot few-shot accuracy
-        plt.plot(epochs, results['few_shot_accuracy'], 'b-o',
-                 label='Few-shot Learning Accuracy', linewidth=2)
+        # Separate baseline from trained models
+        baseline = df[df['epoch'] == 0]
+        trained = df[df['epoch'] > 0]
 
-        # Plot classifier accuracy
-        plt.plot(epochs, results['classifier_accuracy'], 'r-o',
-                 label='Classifier Head Accuracy', linewidth=2)
+        # Plot trained model results
+        if not trained.empty:
+            plt.plot(trained['epoch'], trained['few_shot_accuracy'], 'b-o',
+                     label='Few-shot Learning Accuracy', linewidth=2)
+            plt.plot(trained['epoch'], trained['classifier_accuracy'], 'r-o',
+                     label='Classifier Head Accuracy', linewidth=2)
+
+        # Add baseline lines if available
+        if not baseline.empty:
+            baseline_few_shot = baseline['few_shot_accuracy'].iloc[0]
+            baseline_clf = baseline['classifier_accuracy'].iloc[0]
+
+            plt.axhline(y=baseline_few_shot, color='b', linestyle='--',
+                        label=f'Baseline Few-shot ({baseline_few_shot:.4f})')
+            plt.axhline(y=baseline_clf, color='r', linestyle='--',
+                        label=f'Baseline Classifier ({baseline_clf:.4f})')
 
         # Add labels and legend
         plt.title('EEG Transformer Evaluation Across Epochs', fontsize=16)
@@ -473,11 +545,10 @@ class EEGSimpleEvaluator:
         plt.legend(fontsize=12)
 
         # Set y-axis limits with some padding
-        max_acc = max(
-            max(results['few_shot_accuracy']) if results['few_shot_accuracy'] else 0,
-            max(results['classifier_accuracy']) if results['classifier_accuracy'] else 0
-        )
-        plt.ylim(0, min(1.0, max_acc + 0.1))
+        all_accs = list(df['few_shot_accuracy']) + list(df['classifier_accuracy'])
+        if all_accs:
+            max_acc = max(all_accs)
+            plt.ylim(0, min(1.0, max_acc + 0.1))
 
         # Save plot
         plt.tight_layout()
