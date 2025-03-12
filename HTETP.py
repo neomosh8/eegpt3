@@ -22,6 +22,7 @@ class HierarchicalEEGTransformer(nn.Module):
                  max_windows=50,  # Max sequence length in windows
                  pad_token_id=0):  # ID of the pad token
         super().__init__()
+        self.d_model = d_model  # <--- Add this line
 
         self.window_size = window_size
         self.pad_token_id = pad_token_id
@@ -497,7 +498,7 @@ def main():
                         help="Batch size per GPU")
     parser.add_argument("--seq_length", type=int, default=4608,
                         help="Sequence length for training")
-    parser.add_argument("--learning_rate", type=float, default=5e-5,
+    parser.add_argument("--learning_rate", type=float, default=5e-4,
                         help="Learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-6,
                         help="Minimum learning rate")
