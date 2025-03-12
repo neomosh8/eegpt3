@@ -786,36 +786,7 @@ def main():
 
     # Add this code right after your argument parser setup but before the main training loop
     # (around line 637, after creating log_dir and before initializing DDP)
-    if rank == 0:
-        # Initialize evaluator only on the main process
-        # Only evaluate every N epochs to save time
-        eval_every = args.save_every  # Or set a custom value
-        eval_output_dir = os.path.join(args.log_dir, "evaluations")
-        os.makedirs(eval_output_dir, exist_ok=True)
 
-        # Path to your tokenized data
-        tokenized_data_dir = "tokenized_bci_data"  # Update this to your data path
-
-        evaluator = EEGSimpleEvaluator(
-            checkpoint_dir=args.save_dir,
-            data_dir=tokenized_data_dir,
-            device=f"cuda:{local_rank}",
-            codebook_size=args.codebook_size,
-            window_size=args.window_size,
-            d_model=args.d_model,
-            n_heads=args.n_heads,
-            n_layers=args.n_layers,
-            max_windows=args.max_windows,
-            pad_token_id=args.pad_token_id,
-            eos_token_id=args.eos_token_id
-        )
-
-        # Track evaluation results
-        eval_results = {
-            'epoch': [],
-            'few_shot_accuracy': [],
-            'classifier_accuracy': []
-        }
 
 
     # Initialize storage for all epoch losses (right before the epoch loop)
@@ -1022,6 +993,36 @@ def main():
                 ###EVAL
                 # Load the current checkpoint
                 if step > 0:
+                    if rank == 0:
+                        # Initialize evaluator only on the main process
+                        # Only evaluate every N epochs to save time
+                        eval_every = args.save_every  # Or set a custom value
+                        eval_output_dir = os.path.join(args.log_dir, "evaluations")
+                        os.makedirs(eval_output_dir, exist_ok=True)
+
+                        # Path to your tokenized data
+                        tokenized_data_dir = "tokenized_bci_data"  # Update this to your data path
+
+                        evaluator = EEGSimpleEvaluator(
+                            checkpoint_dir=args.save_dir,
+                            data_dir=tokenized_data_dir,
+                            device=f"cuda:{local_rank}",
+                            codebook_size=args.codebook_size,
+                            window_size=args.window_size,
+                            d_model=args.d_model,
+                            n_heads=args.n_heads,
+                            n_layers=args.n_layers,
+                            max_windows=args.max_windows,
+                            pad_token_id=args.pad_token_id,
+                            eos_token_id=args.eos_token_id
+                        )
+
+                        # Track evaluation results
+                        eval_results = {
+                            'epoch': [],
+                            'few_shot_accuracy': [],
+                            'classifier_accuracy': []
+                        }
                     checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}",weights_only=False)
                     evaluator.model.load_state_dict(checkpoint['model_state_dict'])
                     evaluator.model.eval()
