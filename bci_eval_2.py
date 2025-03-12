@@ -610,22 +610,23 @@ class EEGSimpleEvaluator:
         results = {
             'epoch': [],
             'few_shot_accuracy': [],
-            'classifier_accuracy': []
+            'classifier_accuracy': [],
+            'few_shot_window_accuracy': []  # Add this line to initialize the new metric
         }
-        results['few_shot_window_accuracy'] = []
 
         # Check data size and print warning if needed
         class_names = list(self.class_data.keys())
         class_sizes = {cls: len(self.class_data[cls]) for cls in class_names}
         print(f"Class sizes: {class_sizes}")
 
-        # Evaluate baseline model with random weights
+        # Evaluate baseline model with random chance
         baseline_results = self.evaluate_baseline()
 
         # Use epoch 0 for baseline in the plot
         results['epoch'].append(0)
         results['few_shot_accuracy'].append(baseline_results['few_shot_accuracy'])
         results['classifier_accuracy'].append(baseline_results['classifier_accuracy'])
+        results['few_shot_window_accuracy'].append(0.25)  # Random guess for 4 classes
 
         # Evaluate each checkpoint
         for ckpt_file in self.checkpoint_files:
@@ -639,7 +640,7 @@ class EEGSimpleEvaluator:
 
             try:
                 # Load checkpoint
-                checkpoint = torch.load(ckpt_file, map_location=self.device,weights_only=False)
+                checkpoint = torch.load(ckpt_file, map_location=self.device)
 
                 # Update model weights
                 state_dict = checkpoint['model_state_dict']
@@ -659,14 +660,13 @@ class EEGSimpleEvaluator:
                 # Run evaluations
                 few_shot_acc = self.evaluate_few_shot(n_shots=n_shots)
                 classifier_acc = self.evaluate_classifier(classifier_type="logistic")
-                few_shot_acc_windows = self.evaluate_few_shot_windows(n_shots=n_shots)
+                window_acc = self.evaluate_few_shot_windows(n_shots=n_shots)
 
-                # Add to your results dictionary:
-                results['few_shot_window_accuracy'].append(few_shot_acc_windows)
-                # Store results
+                # Store results - make sure to update all arrays
                 results['epoch'].append(epoch)
                 results['few_shot_accuracy'].append(few_shot_acc)
                 results['classifier_accuracy'].append(classifier_acc)
+                results['few_shot_window_accuracy'].append(window_acc)
 
                 # Create intermediate plot at each checkpoint
                 if len(results['epoch']) > 0:
@@ -704,29 +704,38 @@ class EEGSimpleEvaluator:
         # Plot trained model results
         if not trained.empty:
             plt.plot(trained['epoch'], trained['few_shot_accuracy'], 'b-o',
-                     label='Few-shot Learning Accuracy', linewidth=2)
+                     label='Sequence-Level Few-shot Accuracy', linewidth=2)
             plt.plot(trained['epoch'], trained['classifier_accuracy'], 'r-o',
-                     label='Classifier Head Accuracy', linewidth=2)
+                     label='Classifier Accuracy', linewidth=2)
+            plt.plot(trained['epoch'], trained['few_shot_window_accuracy'], 'g-o',
+                     label='Window-Level Few-shot Accuracy', linewidth=2)
 
         # Add baseline lines if available
         if not baseline.empty:
             baseline_few_shot = baseline['few_shot_accuracy'].iloc[0]
             baseline_clf = baseline['classifier_accuracy'].iloc[0]
+            baseline_window = baseline['few_shot_window_accuracy'].iloc[0]
 
             plt.axhline(y=baseline_few_shot, color='b', linestyle='--',
-                        label=f'Baseline Few-shot ({baseline_few_shot:.4f})')
+                        label=f'Baseline Sequence-Level ({baseline_few_shot:.4f})')
             plt.axhline(y=baseline_clf, color='r', linestyle='--',
                         label=f'Baseline Classifier ({baseline_clf:.4f})')
+            plt.axhline(y=baseline_window, color='g', linestyle='--',
+                        label=f'Baseline Window-Level ({baseline_window:.4f})')
 
         # Add labels and legend
         plt.title('EEG Transformer Evaluation Across Epochs', fontsize=16)
         plt.xlabel('Epoch', fontsize=14)
         plt.ylabel('Accuracy', fontsize=14)
         plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=12)
+        plt.legend(fontsize=10, loc='best')
 
         # Set y-axis limits with some padding
-        all_accs = list(df['few_shot_accuracy']) + list(df['classifier_accuracy'])
+        all_accs = []
+        for col in ['few_shot_accuracy', 'classifier_accuracy', 'few_shot_window_accuracy']:
+            if col in df.columns:
+                all_accs.extend(df[col].dropna().tolist())
+
         if all_accs:
             max_acc = max(all_accs)
             plt.ylim(0, min(1.0, max_acc + 0.1))
