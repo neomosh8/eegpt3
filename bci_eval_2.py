@@ -2,8 +2,6 @@ import os
 import glob
 import json
 import re
-import traceback
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,13 +13,14 @@ from collections import OrderedDict
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import traceback
 
 
 class EEGEvaluator:
     """
-    Evaluates an EEG Transformer model using few-shot learning and classifier head approaches.
-    Loads tokenized data samples into RAM for faster processing.
+    Evaluates an EEG Transformer model using the token embeddings directly
+    instead of running the full model forward pass.
     """
 
     def __init__(self, checkpoint_dir, data_dir, device="cuda", pad_token_id=129,
@@ -29,19 +28,6 @@ class EEGEvaluator:
                  d_model=32, n_heads=4, n_layers=2, max_windows=4):
         """
         Initialize the evaluator with directories and model parameters.
-
-        Args:
-            checkpoint_dir: Directory containing model checkpoints
-            data_dir: Directory containing tokenized data files
-            device: Device to run evaluation on (cuda/cpu)
-            pad_token_id: Padding token ID used in the model
-            eos_token_id: End of sequence token ID
-            codebook_size: Size of the model's codebook
-            window_size: Size of each EEG window
-            d_model: Hidden dimension size
-            n_heads: Number of attention heads
-            n_layers: Number of transformer layers
-            max_windows: Maximum number of windows per sequence
         """
         self.checkpoint_dir = checkpoint_dir
         self.data_dir = data_dir
@@ -59,6 +45,7 @@ class EEGEvaluator:
 
         # Will be populated during loading
         self.model = None
+        self.token_embedding = None  # We'll extract this from the model
         self.class_data = {}  # Dictionary mapping class names to token sequences
         self.class_to_idx = {}  # Class name to index mapping
 
@@ -127,7 +114,7 @@ class EEGEvaluator:
 
     def _initialize_model(self, checkpoint_path):
         """Initialize the model using the specified checkpoint"""
-        from HTETP import HierarchicalEEGTransformer  # Import from training code
+        from HTETP import HierarchicalEEGTransformer  # Import from your file
 
         print(f"Initializing model from {checkpoint_path}...")
 
@@ -157,42 +144,44 @@ class EEGEvaluator:
         self.model.load_state_dict(state_dict)
         self.model.eval()
 
-    def _extract_embeddings(self, tokens):
+        # Extract the token embedding layer
+        self.token_embedding = self.model.token_embedding
+
+    def _extract_embeddings_from_tokens(self, tokens):
         """
-        Extract embeddings from the model for the given tokens
+        Extract embeddings directly from token IDs using the embedding layer
 
         Args:
-            tokens: Token sequence [batch_size, seq_length]
+            tokens: Token sequence tensor
 
         Returns:
-            Embeddings tensor [batch_size, d_model]
+            Mean token embedding vectors
         """
-        embeddings = []
+        # Make sure tokens are on the right device
+        tokens = tokens.to(self.device)
 
-        def hook_fn(module, input, output):
-            # Capture normalized representation before final projection
-            embeddings.append(output.detach())
+        # Remove padding and EOS tokens for embedding extraction
+        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
+        filtered_tokens = tokens[mask]
 
-        # Register hook on normalization layer
-        hook = self.model.norm.register_forward_hook(hook_fn)
+        # Skip empty sequences
+        if filtered_tokens.numel() == 0:
+            # Return zero vector
+            return torch.zeros(self.d_model, device=self.device)
 
+        # Get embeddings using the embedding layer directly
         with torch.no_grad():
-            # Forward pass
-            self.model(tokens)
+            # Clamp token IDs to valid range
+            filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
+            embeddings = self.token_embedding(filtered_tokens)
 
-        # Remove hook
-        hook.remove()
+        # Average embeddings across sequence length
+        mean_embedding = embeddings.mean(dim=0)
+        return mean_embedding
 
-        if not embeddings:
-            raise RuntimeError("Failed to capture embeddings")
-
-        # Average over sequence length for a global representation
-        avg_embedding = embeddings[0].mean(dim=1)
-        return avg_embedding
-
-    def evaluate_few_shot(self, n_shots=5, n_queries=5, n_trials=10):
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=5):
         """
-        Evaluate few-shot learning performance, adaptively adjusting to small dataset sizes
+        Evaluate few-shot learning performance using token embeddings directly
 
         Args:
             n_shots: Number of examples per class for support set
@@ -254,15 +243,15 @@ class EEGEvaluator:
 
                 # Get embeddings for support set
                 for idx in support_indices:
-                    seq = sequences[idx].unsqueeze(0).to(self.device)
-                    emb = self._extract_embeddings(seq)
+                    seq = sequences[idx]
+                    emb = self._extract_embeddings_from_tokens(seq)
                     support_embeddings.append(emb)
                     support_labels.append(class_idx)
 
                 # Get embeddings for query set
                 for idx in query_indices:
-                    seq = sequences[idx].unsqueeze(0).to(self.device)
-                    emb = self._extract_embeddings(seq)
+                    seq = sequences[idx]
+                    emb = self._extract_embeddings_from_tokens(seq)
                     query_embeddings.append(emb)
                     query_labels.append(class_idx)
 
@@ -272,9 +261,9 @@ class EEGEvaluator:
                 continue
 
             # Stack embeddings and convert labels to tensors
-            support_embeddings = torch.cat(support_embeddings, dim=0)
+            support_embeddings = torch.stack(support_embeddings)
             support_labels = torch.tensor(support_labels, device=self.device)
-            query_embeddings = torch.cat(query_embeddings, dim=0)
+            query_embeddings = torch.stack(query_embeddings)
             query_labels = torch.tensor(query_labels, device=self.device)
 
             # Perform nearest neighbor classification
@@ -314,7 +303,7 @@ class EEGEvaluator:
 
     def evaluate_classifier(self, train_ratio=0.7, classifier_type="logistic"):
         """
-        Evaluate using embeddings as features for a classifier
+        Evaluate using token embeddings as features for a classifier
 
         Args:
             train_ratio: Ratio of data to use for training
@@ -334,8 +323,7 @@ class EEGEvaluator:
 
             for seq in tqdm(sequences, desc=f"Processing {class_name}", leave=False):
                 # Get embedding
-                seq_tensor = seq.unsqueeze(0).to(self.device)
-                emb = self._extract_embeddings(seq_tensor)
+                emb = self._extract_embeddings_from_tokens(seq)
                 X.append(emb.cpu().numpy())
                 y.append(class_idx)
 
@@ -365,12 +353,12 @@ class EEGEvaluator:
 
         # Train and evaluate
         clf.fit(X_train, y_train)
-        accuracy = clf.score(X_test, y_test)
+        y_pred = clf.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
 
         print(f"Classifier accuracy: {accuracy:.4f}")
 
         # Generate detailed classification report
-        y_pred = clf.predict(X_test)
         print(classification_report(
             y_test, y_pred,
             target_names=[f"{cls}" for cls in self.class_to_idx.keys()]
@@ -378,7 +366,7 @@ class EEGEvaluator:
 
         return accuracy
 
-    def run_full_evaluation(self, output_dir="evaluation_results", n_shots=5):
+    def run_full_evaluation(self, output_dir="evaluation_results", n_shots=1):
         """
         Run evaluation on all checkpoints and save results
 
@@ -402,10 +390,6 @@ class EEGEvaluator:
         class_names = list(self.class_data.keys())
         class_sizes = {cls: len(self.class_data[cls]) for cls in class_names}
         print(f"Class sizes: {class_sizes}")
-
-        min_examples = min([size for size in class_sizes.values()])
-        if min_examples < 2:
-            print(f"Warning: Some classes have very few examples. Few-shot evaluation may be unreliable.")
 
         # Evaluate each checkpoint
         for ckpt_file in self.checkpoint_files:
@@ -432,6 +416,9 @@ class EEGEvaluator:
 
                 self.model.load_state_dict(state_dict)
                 self.model.eval()
+
+                # Update token embedding reference
+                self.token_embedding = self.model.token_embedding
 
                 # Run evaluations
                 few_shot_acc = self.evaluate_few_shot(n_shots=n_shots)
@@ -463,6 +450,7 @@ class EEGEvaluator:
             print("No successful evaluations completed.")
 
         return pd.DataFrame(results)
+
     def _create_accuracy_plot(self, results, output_dir, suffix=""):
         """Create and save accuracy plot from results"""
         plt.figure(figsize=(12, 8))
@@ -502,13 +490,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate EEG Transformer model")
-    parser.add_argument("--checkpoint_dir", type=str, default='checkpoints',
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
                         help="Directory containing model checkpoints")
-    parser.add_argument("--data_dir", type=str, default='tokenized_bci_data',
+    parser.add_argument("--data_dir", type=str, default="tokenized_bci_data",
                         help="Directory containing tokenized data files")
     parser.add_argument("--output_dir", type=str, default="evaluation_results",
                         help="Directory to save evaluation results")
-    parser.add_argument("--n_shots", type=int, default=5,
+    parser.add_argument("--n_shots", type=int, default=1,
                         help="Number of shots for few-shot evaluation")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run evaluation on (cuda/cpu)")
@@ -518,16 +506,6 @@ def main():
                         help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=32,
                         help="Hidden dimension size")
-    parser.add_argument("--n_heads", type=int, default=4,
-                        help="Number of attention heads")
-    parser.add_argument("--n_layers", type=int, default=2,
-                        help="Number of transformer layers")
-    parser.add_argument("--max_windows", type=int, default=4,
-                        help="Maximum number of windows per sequence")
-    parser.add_argument("--pad_token_id", type=int, default=129,
-                        help="Padding token ID")
-    parser.add_argument("--eos_token_id", type=int, default=128,
-                        help="End of sequence token ID")
 
     args = parser.parse_args()
 
@@ -537,18 +515,13 @@ def main():
         args.device = "cpu"
 
     # Create evaluator
-    evaluator = EEGEvaluator(
+    evaluator = EEGSimpleEvaluator(
         checkpoint_dir=args.checkpoint_dir,
         data_dir=args.data_dir,
         device=args.device,
         codebook_size=args.codebook_size,
         window_size=args.window_size,
-        d_model=args.d_model,
-        n_heads=args.n_heads,
-        n_layers=args.n_layers,
-        max_windows=args.max_windows,
-        pad_token_id=args.pad_token_id,
-        eos_token_id=args.eos_token_id
+        d_model=args.d_model
     )
 
     # Run full evaluation
@@ -559,15 +532,21 @@ def main():
 
     print("Evaluation complete!")
 
-    # Print best results
-    best_few_shot_idx = np.argmax(results['few_shot_accuracy'])
-    best_classifier_idx = np.argmax(results['classifier_accuracy'])
+    if len(results) > 0:
+        # Print best results
+        best_few_shot_idx = np.argmax(results['few_shot_accuracy']) if len(results['few_shot_accuracy']) > 0 else -1
+        best_classifier_idx = np.argmax(results['classifier_accuracy']) if len(
+            results['classifier_accuracy']) > 0 else -1
 
-    print("\nBest Results:")
-    print(
-        f"Best Few-shot accuracy: {results['few_shot_accuracy'][best_few_shot_idx]:.4f} at epoch {results['epoch'][best_few_shot_idx]}")
-    print(
-        f"Best Classifier accuracy: {results['classifier_accuracy'][best_classifier_idx]:.4f} at epoch {results['epoch'][best_classifier_idx]}")
+        print("\nBest Results:")
+        if best_few_shot_idx >= 0:
+            print(
+                f"Best Few-shot accuracy: {results['few_shot_accuracy'][best_few_shot_idx]:.4f} at epoch {results['epoch'][best_few_shot_idx]}")
+        if best_classifier_idx >= 0:
+            print(
+                f"Best Classifier accuracy: {results['classifier_accuracy'][best_classifier_idx]:.4f} at epoch {results['epoch'][best_classifier_idx]}")
+    else:
+        print("No successful evaluations completed.")
 
 
 if __name__ == "__main__":
