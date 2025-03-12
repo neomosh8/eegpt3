@@ -10,6 +10,7 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
+from bci_eval_2 import EEGEvaluator
 
 
 # Model definition with special handling for pad tokens between windows
@@ -777,7 +778,45 @@ def main():
         T_max=args.epochs,
         eta_min=args.min_lr
     )
-    # Initialize storage for all epoch losses (right before the epoch loop)
+
+
+########### eval
+    # Add this import at the top of your file
+
+    # Add this code right after your argument parser setup but before the main training loop
+    # (around line 637, after creating log_dir and before initializing DDP)
+    if rank == 0:
+        # Initialize evaluator only on the main process
+        # Only evaluate every N epochs to save time
+        eval_every = args.save_every  # Or set a custom value
+        eval_output_dir = os.path.join(args.log_dir, "evaluations")
+        os.makedirs(eval_output_dir, exist_ok=True)
+
+        # Path to your tokenized data
+        tokenized_data_dir = "tokenized_bci_data"  # Update this to your data path
+
+        evaluator = EEGEvaluator(
+            checkpoint_dir=args.save_dir,
+            data_dir=tokenized_data_dir,
+            device=f"cuda:{local_rank}",
+            codebook_size=args.codebook_size,
+            window_size=args.window_size,
+            d_model=args.d_model,
+            n_heads=args.n_heads,
+            n_layers=args.n_layers,
+            max_windows=args.max_windows,
+            pad_token_id=args.pad_token_id,
+            eos_token_id=args.eos_token_id
+        )
+
+        # Track evaluation results
+        eval_results = {
+            'epoch': [],
+            'few_shot_accuracy': [],
+            'classifier_accuracy': []
+        }
+
+
     # Initialize storage for all epoch losses (right before the epoch loop)
     all_train_losses = []
     all_val_losses = []
@@ -976,6 +1015,60 @@ def main():
                 torch.save(checkpoint, os.path.join(args.save_dir, f"checkpoint_epoch_{epoch + 1}.pt"))
                 # Print outside the progress bar
                 tqdm.write(f"Saved checkpoint at epoch {epoch + 1}")
+
+                checkpoint_path = os.path.join(args.save_dir, f"checkpoint_epoch_{epoch + 1}.pt")
+
+                ###EVAL
+                # Load the current checkpoint
+                checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}")
+                evaluator.model.load_state_dict(checkpoint['model_state_dict'])
+                evaluator.model.eval()
+
+                # Run evaluations
+                try:
+                    # Use fewer shots for faster evaluation during training
+                    few_shot_acc = evaluator.evaluate_few_shot(n_shots=3, n_trials=5)
+                    classifier_acc = evaluator.evaluate_classifier()
+
+                    # Store results
+                    eval_results['epoch'].append(epoch + 1)
+                    eval_results['few_shot_accuracy'].append(few_shot_acc)
+                    eval_results['classifier_accuracy'].append(classifier_acc)
+
+                    # Create plot showing progress so far
+                    plt.figure(figsize=(12, 8))
+
+                    plt.plot(eval_results['epoch'], eval_results['few_shot_accuracy'], 'b-o',
+                             label='Few-shot Learning Accuracy', linewidth=2)
+                    plt.plot(eval_results['epoch'], eval_results['classifier_accuracy'], 'r-o',
+                             label='Classifier Head Accuracy', linewidth=2)
+
+                    plt.title('EEG Transformer Evaluation During Training', fontsize=16)
+                    plt.xlabel('Epoch', fontsize=14)
+                    plt.ylabel('Accuracy', fontsize=14)
+                    plt.grid(True, alpha=0.3)
+                    plt.legend(fontsize=12)
+
+                    # Set y-axis limits with some padding
+                    max_acc = max(
+                        max(eval_results['few_shot_accuracy']) if eval_results['few_shot_accuracy'] else 0,
+                        max(eval_results['classifier_accuracy']) if eval_results['classifier_accuracy'] else 0
+                    )
+                    plt.ylim(0, min(1.0, max_acc + 0.1))
+
+                    # Save plot and results
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(eval_output_dir, 'ongoing_evaluation.png'), dpi=300)
+                    plt.close()
+
+                    # Save results to CSV
+                    pd.DataFrame(eval_results).to_csv(
+                        os.path.join(eval_output_dir, 'evaluation_results.csv'), index=False)
+
+                    tqdm.write(f"Evaluation complete - Few-shot: {few_shot_acc:.4f}, Classifier: {classifier_acc:.4f}")
+
+                except Exception as e:
+                    tqdm.write(f"Error during evaluation: {str(e)}")
 
     # Clean up
     if rank == 0:
