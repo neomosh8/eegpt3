@@ -642,7 +642,7 @@ def main():
                         help="Weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0,
                         help="Gradient clipping")
-    parser.add_argument("--epochs", type=int, default=10,
+    parser.add_argument("--epochs", type=int, default=50,
                         help="Number of epochs")
     parser.add_argument("--steps_per_epoch", type=int, default=1000,
                         help="Steps per epoch")
