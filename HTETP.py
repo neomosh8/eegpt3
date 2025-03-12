@@ -180,8 +180,8 @@ class HierarchicalEEGTransformer(nn.Module):
         # Reshape back to sequence for transformer processing
         embedded = embedded.reshape(batch_size, num_windows * window_size, -1)
 
-        # Create hierarchical attention mask
-        mask = self._create_hierarchical_mask(num_windows, window_size, device)
+        # Create batch-specific hierarchical attention mask
+        mask = self._create_hierarchical_mask(batch_size, num_windows, window_size, device)
 
         # Apply transformer layers
         x = embedded
@@ -195,20 +195,23 @@ class HierarchicalEEGTransformer(nn.Module):
 
         return logits
 
-    def _create_hierarchical_mask(self, num_windows, window_size, device):
+    def _create_hierarchical_mask(self, batch_size, num_windows, window_size, device):
         """
         Create mask that allows:
         1. Full attention within each window (bidirectional)
         2. Causal attention between windows
+
+        Now creates a separate mask for each batch element
         """
         seq_length = num_windows * window_size
-        mask = torch.ones(seq_length, seq_length, device=device) * float('-inf')
+        # Create batch-specific masks [B, seq_len, seq_len]
+        mask = torch.ones(batch_size, seq_length, seq_length, device=device) * float('-inf')
 
         # Allow full attention within each window
         for i in range(num_windows):
             start_idx = i * window_size
             end_idx = (i + 1) * window_size
-            mask[start_idx:end_idx, start_idx:end_idx] = 0
+            mask[:, start_idx:end_idx, start_idx:end_idx] = 0
 
         # Allow causal attention between windows
         for i in range(num_windows):
@@ -217,7 +220,7 @@ class HierarchicalEEGTransformer(nn.Module):
                 i_end = (i + 1) * window_size
                 j_start = j * window_size
                 j_end = (j + 1) * window_size
-                mask[i_start:i_end, j_start:j_end] = 0
+                mask[:, i_start:i_end, j_start:j_end] = 0
 
         return mask
 
@@ -279,9 +282,11 @@ class MultiHeadAttention(nn.Module):
         # Scaled dot-product attention
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
 
-        # Apply mask if provided
+        # Apply mask if provided - now handling batch-specific masks
         if mask is not None:
-            scores = scores + mask.unsqueeze(0).unsqueeze(1)
+            # mask is now [batch_size, seq_len, seq_len]
+            # we need to add a dimension for heads
+            scores = scores + mask.unsqueeze(1)
 
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
