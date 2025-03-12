@@ -380,7 +380,7 @@ shuffle_files = True
 
 if ddp_rank == 0:  # Master process
     # Find all token files
-    token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))
+    token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))[0:500]
     if not token_files:
         raise ValueError(f"No token files found in {data_dir}")
 
