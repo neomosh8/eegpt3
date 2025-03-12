@@ -17,7 +17,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 import traceback
 
 
-class EEGEvaluator:
+class EEGSimpleEvaluator:
     """
     Evaluates an EEG Transformer model using the token embeddings directly
     instead of running the full model forward pass.
