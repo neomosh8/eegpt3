@@ -43,7 +43,7 @@ class HierarchicalEEGTransformer(nn.Module):
 
         # Transformer layers
         self.layers = nn.ModuleList([
-            TransformerLayer(d_model, n_heads) for _ in range(n_layers)
+            TransformerLayer(d_model, n_heads,window_size=2304) for _ in range(n_layers)
         ])
 
         self.norm = nn.LayerNorm(d_model)
@@ -229,11 +229,13 @@ class HierarchicalEEGTransformer(nn.Module):
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, d_model, n_heads, dropout=0.1):
+    def __init__(self, d_model, n_heads,window_size, dropout=0.1):
         super().__init__()
 
-        # Self-attention block
-        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        # Use hierarchical memory-efficient attention
+        self.attn = HierarchicalMemoryEfficientAttention(
+            d_model, n_heads, window_size, dropout
+        )
         self.norm1 = nn.LayerNorm(d_model)
 
         # Feed-forward block
@@ -247,15 +249,138 @@ class TransformerLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
-        # Self-attention with residual connection
-        attn_output = self.attn(self.norm1(x), mask)
+        # The mask parameter is no longer needed as the pattern is built in
+        attn_output = self.attn(self.norm1(x))
         x = x + self.dropout(attn_output)
-
-        # Feed-forward with residual connection
         ff_output = self.ff(self.norm2(x))
         x = x + self.dropout(ff_output)
-
         return x
+
+
+class HierarchicalMemoryEfficientAttention(nn.Module):
+    """
+    Memory-efficient attention that preserves hierarchical attention patterns:
+    - Full bidirectional attention within windows
+    - Causal attention between windows
+    """
+
+    def __init__(self, d_model, n_heads, window_size, dropout=0.1):
+        super().__init__()
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.window_size = window_size  # Size of semantic windows (not computation chunks)
+
+        # Linear projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        batch_size, seq_len, _ = x.shape
+        device = x.device
+
+        # Project inputs to queries, keys, values
+        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+
+        # Calculate number of windows in the sequence
+        num_windows = (seq_len + self.window_size - 1) // self.window_size
+
+        # Initialize output tensor
+        context = torch.zeros_like(q)
+
+        # Process each window separately for memory efficiency
+        for i in range(num_windows):
+            # Define current window's range
+            q_start = i * self.window_size
+            q_end = min((i + 1) * self.window_size, seq_len)
+
+            if q_start >= seq_len:
+                break
+
+            # Get query for current window
+            q_window = q[:, q_start:q_end]  # [B, window_size, H, D]
+
+            # This window can attend to itself (bidirectional) and all previous windows (causal)
+            context_window = torch.zeros_like(q_window)
+
+            # 1. WITHIN-WINDOW ATTENTION (bidirectional)
+            # Process current window attending to itself (full bidirectional)
+            scores = torch.matmul(
+                q_window.transpose(1, 2),  # [B, H, window_size, D]
+                k[:, q_start:q_end].transpose(1, 2).transpose(-1, -2)  # [B, H, D, window_size]
+            ) / math.sqrt(self.head_dim)
+
+            # Apply attention
+            attn_weights = F.softmax(scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+
+            # Apply attention to values
+            context_window += torch.matmul(
+                attn_weights,
+                v[:, q_start:q_end].transpose(1, 2)  # [B, H, window_size, D]
+            ).transpose(1, 2)  # [B, window_size, H, D]
+
+            # 2. CROSS-WINDOW ATTENTION (causal only)
+            # For each previous window (causal attention)
+            for j in range(i):
+                k_start = j * self.window_size
+                k_end = min((j + 1) * self.window_size, seq_len)
+
+                # Compute attention scores with previous window
+                scores = torch.matmul(
+                    q_window.transpose(1, 2),  # [B, H, window_size, D]
+                    k[:, k_start:k_end].transpose(1, 2).transpose(-1, -2)  # [B, H, D, window_size]
+                ) / math.sqrt(self.head_dim)
+
+                # Apply attention
+                attn_weights = F.softmax(scores, dim=-1)
+                attn_weights = self.dropout(attn_weights)
+
+                # Apply attention to values and accumulate
+                context_window += torch.matmul(
+                    attn_weights,
+                    v[:, k_start:k_end].transpose(1, 2)  # [B, H, window_size, D]
+                ).transpose(1, 2)  # [B, window_size, H, D]
+
+            # Place result in output tensor
+            context[:, q_start:q_end] = context_window
+
+        # Reshape back to [batch, seq_len, d_model]
+        context = context.reshape(batch_size, seq_len, self.d_model)
+
+        return self.out_proj(context)
+
+    def _create_hierarchical_mask(self, batch_size, num_windows, device):
+        """
+        Alternative approach: explicitly create the hierarchical attention mask
+        for full bidirectional within windows and causal between windows.
+        """
+        seq_length = num_windows * self.window_size
+        mask = torch.ones(batch_size, seq_length, seq_length, device=device) * float('-inf')
+
+        # Allow full attention within each window
+        for i in range(num_windows):
+            start_idx = i * self.window_size
+            end_idx = min((i + 1) * self.window_size, seq_length)
+            mask[:, start_idx:end_idx, start_idx:end_idx] = 0
+
+        # Allow causal attention between windows
+        for i in range(num_windows):
+            for j in range(i):
+                i_start = i * self.window_size
+                i_end = min((i + 1) * self.window_size, seq_length)
+                j_start = j * self.window_size
+                j_end = min((j + 1) * self.window_size, seq_length)
+                mask[:, i_start:i_end, j_start:j_end] = 0
+
+        return mask
 
 
 class MultiHeadAttention(nn.Module):
