@@ -795,7 +795,7 @@ def main():
         # Path to your tokenized data
         tokenized_data_dir = "tokenized_bci_data"  # Update this to your data path
 
-        evaluator = EEGEvaluator(
+        evaluator = EEGSimpleEvaluator(
             checkpoint_dir=args.save_dir,
             data_dir=tokenized_data_dir,
             device=f"cuda:{local_rank}",
