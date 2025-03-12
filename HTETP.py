@@ -616,7 +616,7 @@ def main():
                         help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=128,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=4,
+    parser.add_argument("--n_heads", type=int, default=2,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=2,
                         help="Number of transformer layers")
