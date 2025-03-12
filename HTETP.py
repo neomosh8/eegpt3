@@ -1030,9 +1030,8 @@ def main():
                 # Run evaluations
                 try:
                     # Use fewer shots for faster evaluation during training
-                    few_shot_acc = evaluator.evaluate_few_shot(n_shots=3, n_trials=5)
-                    classifier_acc = evaluator.evaluate_classifier()
-
+                    few_shot_acc = evaluator.evaluate_few_shot(n_shots=3, n_trials=10)
+                    classifier_acc = 0
                     # Store results
                     eval_results['epoch'].append(epoch + 1)
                     eval_results['few_shot_accuracy'].append(few_shot_acc)
