@@ -614,9 +614,9 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=128,
+    parser.add_argument("--d_model", type=int, default=63,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=2,
+    parser.add_argument("--n_heads", type=int, default=4,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=2,
                         help="Number of transformer layers")
@@ -628,7 +628,7 @@ def main():
                         help="ID of end-of-sequence token")
 
     # Training parameters
-    parser.add_argument("--batch_size", type=int, default=4,
+    parser.add_argument("--batch_size", type=int, default=3,
                         help="Batch size per GPU")
     parser.add_argument("--seq_length", type=int, default=4608,
                         help="Sequence length for training")
