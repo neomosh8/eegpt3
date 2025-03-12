@@ -330,7 +330,7 @@ class EEGTokenDataLoader:
         all_tokens = []
 
         for file_path in token_files:
-            tokens = torch.load(file_path)
+            tokens = torch.load(file_path,weights_only=False)
 
             # Verify the tokens contain expected pad tokens
             pad_mask = (tokens == pad_token_id)
@@ -617,7 +617,7 @@ def main():
                         help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=32,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=4,
+    parser.add_argument("--n_heads", type=int, default=8,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=2,
                         help="Number of transformer layers")
@@ -1020,7 +1020,7 @@ def main():
 
                 ###EVAL
                 # Load the current checkpoint
-                checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}")
+                checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}",weights_only=False)
                 evaluator.model.load_state_dict(checkpoint['model_state_dict'])
                 evaluator.model.eval()
 

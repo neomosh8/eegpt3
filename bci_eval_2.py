@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import pandas as pd
+from PIL.FontFile import WIDTH
 from tqdm import tqdm
 from collections import OrderedDict
 from sklearn.linear_model import LogisticRegression
@@ -156,7 +157,7 @@ class EEGSimpleEvaluator:
             class_name = parts[-2]
 
             # Load token tensor
-            tokens = torch.load(file_path, map_location="cpu")
+            tokens = torch.load(file_path, map_location="cpu",weights_only=False)
 
             # Store by class
             if class_name not in self.class_data:
@@ -180,7 +181,7 @@ class EEGSimpleEvaluator:
         print(f"Initializing model from {checkpoint_path}...")
 
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
 
         # Create model
         self.model = HierarchicalEEGTransformer(
@@ -472,7 +473,7 @@ class EEGSimpleEvaluator:
 
             try:
                 # Load checkpoint
-                checkpoint = torch.load(ckpt_file, map_location=self.device)
+                checkpoint = torch.load(ckpt_file, map_location=self.device,weights_only=False)
 
                 # Update model weights
                 state_dict = checkpoint['model_state_dict']
