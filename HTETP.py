@@ -9,7 +9,6 @@ import torch.distributed as dist
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-from torch.xpu import device
 from tqdm import tqdm
 from bci_eval_2 import EEGSimpleEvaluator
 import pandas as pd
@@ -332,7 +331,7 @@ class EEGTokenDataLoader:
         all_tokens = []
 
         for file_path in token_files:
-            tokens = torch.load(file_path,weights_only=False,device='cpu')
+            tokens = torch.load(file_path,weights_only=False).to('cpu')
 
             # Verify the tokens contain expected pad tokens
             pad_mask = (tokens == pad_token_id)
