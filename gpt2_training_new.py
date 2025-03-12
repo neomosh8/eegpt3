@@ -228,7 +228,7 @@ class GPT(nn.Module):
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1)
-            )
+            ,ignore_index=129)
         return logits, loss
 
     def configure_optimizer(self, weight_decay, learning_rate, device):
