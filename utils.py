@@ -575,12 +575,12 @@ def filter_band_pass_windows(ndarray, sps,plot=False):
     filtered_data = signal.filtfilt(f_b, f_a, ndarray, axis=1)
     # Define notch filter parameters
     quality_factor = 30  # Adjust this Q-factor for a "strong" (narrow) notch
-    # notch_freqs = [50, 60]  # Frequencies to notch out (in Hz)
+    notch_freqs = [50, 60]  # Frequencies to notch out (in Hz)
     # notch_freqs = [50]  #for bci val
     # # Apply each notch filter in series
-    # for f0 in notch_freqs:
-    #     b_notch, a_notch = signal.iirnotch(w0=f0, Q=quality_factor, fs=sps)
-    #     filtered_data = signal.filtfilt(b_notch, a_notch, filtered_data, axis=1)
+    for f0 in notch_freqs:
+        b_notch, a_notch = signal.iirnotch(w0=f0, Q=quality_factor, fs=sps)
+        filtered_data = signal.filtfilt(b_notch, a_notch, filtered_data, axis=1)
 
     if plot:
         # Compute PSD after filtering for the first channel
