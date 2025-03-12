@@ -68,52 +68,63 @@ class EEGSimpleEvaluator:
 
     def evaluate_baseline(self):
         """
-        Evaluate using a randomly initialized model (baseline)
+        Evaluate baseline accuracies based on class distribution
 
         Returns:
             Dictionary with baseline few-shot and classifier accuracies
         """
-        print("\nEvaluating baseline model (random weights)...")
+        print("\nEvaluating baseline model (random chance)...")
 
-        # Store the current token_embedding
-        original_embedding = self.token_embedding
+        # Calculate class distribution
+        class_counts = {cls: len(seqs) for cls, seqs in self.class_data.items()}
+        total_samples = sum(class_counts.values())
+        class_distribution = {cls: count / total_samples for cls, count in class_counts.items()}
 
-        try:
-            # Create a new model with random weights
-            from HTETP import HierarchicalEEGTransformer
+        print(f"Class distribution: {class_distribution}")
 
-            baseline_model = HierarchicalEEGTransformer(
-                codebook_size=self.codebook_size,
-                window_size=self.window_size,
-                d_model=self.d_model,
-                n_heads=self.n_heads,
-                n_layers=self.n_layers,
-                max_windows=self.max_windows,
-                pad_token_id=self.pad_token_id
-            ).to(self.device)
+        # 1. Few-shot baseline: Random guessing based on class distribution
+        # For few-shot learning, we'll simulate random guessing with proper class probabilities
+        n_trials = 100
+        np.random.seed(42)  # For reproducibility
 
-            # Use the randomly initialized embedding
-            self.token_embedding = baseline_model.token_embedding
+        few_shot_accs = []
+        for _ in range(n_trials):
+            # Generate random predictions based on class distribution
+            true_labels = []
+            for cls, count in class_counts.items():
+                # Use half the samples as "queries"
+                true_labels.extend([self.class_to_idx[cls]] * (count // 2))
 
-            # Run evaluations
-            baseline_few_shot = self.evaluate_few_shot(n_shots=1)
-            baseline_classifier = self.evaluate_classifier()
+            if not true_labels:
+                continue
 
-            baseline_results = {
-                'few_shot_accuracy': baseline_few_shot,
-                'classifier_accuracy': baseline_classifier
-            }
+            # Generate random predictions based on class distribution
+            pred_labels = np.random.choice(
+                list(self.class_to_idx.values()),
+                size=len(true_labels),
+                p=[class_counts[cls] / total_samples for cls in self.class_to_idx.keys()]
+            )
 
-        except Exception as e:
-            print(f"Error evaluating baseline model: {str(e)}")
-            traceback.print_exc()
-            baseline_results = {
-                'few_shot_accuracy': 0.0,
-                'classifier_accuracy': 0.0
-            }
+            # Calculate accuracy
+            correct = sum(p == t for p, t in zip(pred_labels, true_labels))
+            acc = correct / len(true_labels) if true_labels else 0
+            few_shot_accs.append(acc)
 
-        # Restore the original embedding
-        self.token_embedding = original_embedding
+        baseline_few_shot = np.mean(few_shot_accs) if few_shot_accs else 0
+
+        # 2. Classifier baseline: Accuracy when always predicting the most common class
+        most_common_class = max(class_counts.items(), key=lambda x: x[1])[0]
+        most_common_class_idx = self.class_to_idx[most_common_class]
+        most_common_class_count = class_counts[most_common_class]
+        baseline_classifier = most_common_class_count / total_samples
+
+        print(f"Baseline few-shot accuracy (random guessing): {baseline_few_shot:.4f}")
+        print(f"Baseline classifier accuracy (most common class: {most_common_class}): {baseline_classifier:.4f}")
+
+        baseline_results = {
+            'few_shot_accuracy': baseline_few_shot,
+            'classifier_accuracy': baseline_classifier
+        }
 
         return baseline_results
     def _load_data(self):
