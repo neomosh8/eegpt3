@@ -746,6 +746,306 @@ class EEGSimpleEvaluator:
         plt.close()
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+
+def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_shots=1, n_trials=20):
+    """
+    Creates a bar plot with error bars for evaluation metrics with multiple trials.
+
+    Args:
+        evaluator: EEGSimpleEvaluator instance
+        output_dir: Directory to save the plot
+        n_shots: Number of shots for few-shot evaluation
+        n_trials: Number of trials to run for each evaluation
+
+    Returns:
+        Dictionary containing the evaluation results
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Use the latest checkpoint
+    latest_checkpoint = evaluator.checkpoint_files[-1]
+    print(f"Using latest checkpoint: {latest_checkpoint}")
+
+    # Load the checkpoint
+    checkpoint = torch.load(latest_checkpoint, map_location=evaluator.device)
+    state_dict = checkpoint['model_state_dict']
+    if list(state_dict.keys())[0].startswith('module.'):
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k[7:] if k.startswith('module.') else k
+            new_state_dict[name] = v
+        state_dict = new_state_dict
+
+    evaluator.model.load_state_dict(state_dict)
+    evaluator.model.eval()
+    evaluator.token_embedding = evaluator.model.token_embedding
+
+    # Get baseline for reference
+    baseline_results = evaluator.evaluate_baseline()
+
+    # Run multiple trials for sequence-level few-shot evaluation
+    print(f"\nRunning sequence-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
+    seq_accuracies = []
+    for trial in range(n_trials):
+        print(f"  Trial {trial + 1}/{n_trials}")
+        acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+        if acc is not None:
+            seq_accuracies.append(acc)
+
+    # Run multiple trials for window-level few-shot evaluation
+    print(f"\nRunning window-level few-shot evaluation ({n_shots}-shot, {n_trials} trials)...")
+    win_accuracies = []
+    for trial in range(n_trials):
+        print(f"  Trial {trial + 1}/{n_trials}")
+        acc = evaluator._run_single_window_few_shot_trial(n_shots=n_shots, n_queries=1)
+        if acc is not None:
+            win_accuracies.append(acc)
+
+    # Calculate statistics
+    metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
+    means = []
+    errors = []
+    baselines = []
+
+    if seq_accuracies:
+        seq_mean = np.mean(seq_accuracies)
+        seq_std = np.std(seq_accuracies)
+        means.append(seq_mean)
+        errors.append(seq_std)
+        baselines.append(baseline_results['few_shot_accuracy'])
+        print(f"Sequence-level few-shot: {seq_mean:.4f} ± {seq_std:.4f}")
+    else:
+        means.append(0)
+        errors.append(0)
+        baselines.append(0)
+
+    if win_accuracies:
+        win_mean = np.mean(win_accuracies)
+        win_std = np.std(win_accuracies)
+        means.append(win_mean)
+        errors.append(win_std)
+        baselines.append(0.25)  # Random chance for 4 classes (typical in BCI)
+        print(f"Window-level few-shot: {win_mean:.4f} ± {win_std:.4f}")
+    else:
+        means.append(0)
+        errors.append(0)
+        baselines.append(0)
+
+    # Create plot
+    plt.figure(figsize=(10, 6))
+    x_pos = np.arange(len(metrics))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot model performance bars with error bars
+    bars = ax.bar(x_pos, means, width, yerr=errors, capsize=10,
+                  alpha=0.7, ecolor='black', color='steelblue',
+                  label='Model Performance')
+
+    # Plot baseline bars
+    ax.bar(x_pos + width, baselines, width, alpha=0.5, color='lightgray',
+           label='Baseline (Random Chance)')
+
+    # Add value labels on top of bars
+    for i, (mean, error) in enumerate(zip(means, errors)):
+        if mean > 0:
+            ax.text(i, mean + error + 0.01, f"{mean:.3f} ± {error:.3f}",
+                    ha='center', va='bottom', fontsize=10)
+
+    # Add labels and legend
+    ax.set_xlabel('Evaluation Method', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_title(f'Model Performance with Error Bars ({n_shots}-shot, {n_trials} trials)', fontsize=14)
+    ax.set_xticks(x_pos + width / 2)
+    ax.set_xticklabels(metrics)
+    ax.legend()
+
+    # Set y-axis limits
+    ax.set_ylim(0, min(1.0, max(means) + max(errors) + 0.1))
+
+    # Add grid
+    ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'performance_error_bars_{n_shots}shot.png'), dpi=300)
+    plt.close()
+
+    print(f"Plot saved to {os.path.join(output_dir, f'performance_error_bars_{n_shots}shot.png')}")
+
+    # Save raw results
+    results = {
+        'sequence_level': {
+            'accuracies': seq_accuracies,
+            'mean': np.mean(seq_accuracies) if seq_accuracies else 0,
+            'std': np.std(seq_accuracies) if seq_accuracies else 0,
+            'baseline': baseline_results['few_shot_accuracy']
+        },
+        'window_level': {
+            'accuracies': win_accuracies,
+            'mean': np.mean(win_accuracies) if win_accuracies else 0,
+            'std': np.std(win_accuracies) if win_accuracies else 0,
+            'baseline': 0.25  # Assuming 4 classes
+        }
+    }
+
+    return results
+
+
+# Helper methods to add to the EEGSimpleEvaluator class
+def _run_single_few_shot_trial(self, n_shots=1, n_queries=1):
+    """Run a single few-shot trial and return accuracy"""
+    # Prepare support and query sets
+    support_embeddings = []
+    support_labels = []
+    query_embeddings = []
+    query_labels = []
+
+    class_names = list(self.class_data.keys())
+    for class_idx, class_name in enumerate(class_names):
+        sequences = self.class_data[class_name]
+
+        # Skip classes with insufficient examples
+        if len(sequences) < n_shots + n_queries:
+            continue
+
+        # Randomly select support and query examples
+        indices = np.random.permutation(len(sequences))
+        support_indices = indices[:n_shots]
+        query_indices = indices[n_shots:n_shots + n_queries]
+
+        # Get embeddings for support set
+        for idx in support_indices:
+            seq = sequences[idx]
+            emb = self._extract_embeddings_from_tokens(seq)
+            support_embeddings.append(emb)
+            support_labels.append(class_idx)
+
+        # Get embeddings for query set
+        for idx in query_indices:
+            seq = sequences[idx]
+            emb = self._extract_embeddings_from_tokens(seq)
+            query_embeddings.append(emb)
+            query_labels.append(class_idx)
+
+    # Skip this trial if we don't have enough data
+    if not support_embeddings or not query_embeddings:
+        return None
+
+    # Stack embeddings and convert labels to tensors
+    support_embeddings = torch.stack(support_embeddings)
+    support_labels = torch.tensor(support_labels, device=self.device)
+    query_embeddings = torch.stack(query_embeddings)
+    query_labels = torch.tensor(query_labels, device=self.device)
+
+    # Perform nearest neighbor classification
+    correct = 0
+    total = len(query_labels)
+
+    for i, query_emb in enumerate(query_embeddings):
+        # Calculate distance to all support examples
+        distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+
+        # Find k nearest neighbors (up to n_shots)
+        k = min(n_shots, len(support_labels))
+        _, indices = torch.topk(distances, k=k, largest=False)
+        nearest_labels = support_labels[indices]
+
+        # Majority vote
+        votes = torch.bincount(nearest_labels, minlength=len(class_names))
+        predicted_label = torch.argmax(votes)
+
+        if predicted_label == query_labels[i]:
+            correct += 1
+
+    # Calculate accuracy
+    accuracy = correct / total if total > 0 else 0
+    return accuracy
+
+
+def _run_single_window_few_shot_trial(self, n_shots=1, n_queries=1):
+    """Run a single window-level few-shot trial and return accuracy"""
+    # Extract windows from all sequences (if not already done)
+    class_windows = {}
+    for class_name, sequences in self.class_data.items():
+        all_windows = []
+        for seq in sequences:
+            windows = self.extract_windows_from_sequence(seq)
+            all_windows.extend(windows)
+
+        class_windows[class_name] = all_windows
+
+    # Prepare support and query sets
+    support_embeddings = []
+    support_labels = []
+    query_embeddings = []
+    query_labels = []
+
+    for class_idx, class_name in enumerate(class_windows.keys()):
+        windows = class_windows[class_name]
+
+        # Skip classes with insufficient windows
+        if len(windows) < n_shots + n_queries:
+            continue
+
+        # Randomly select support and query windows
+        indices = np.random.permutation(len(windows))
+        support_indices = indices[:n_shots]
+        query_indices = indices[n_shots:n_shots + n_queries]
+
+        # Get embeddings for support set
+        for idx in support_indices:
+            window = windows[idx].to(self.device)
+            emb = self._extract_embeddings_from_tokens(window)
+            support_embeddings.append(emb)
+            support_labels.append(class_idx)
+
+        # Get embeddings for query set
+        for idx in query_indices:
+            window = windows[idx].to(self.device)
+            emb = self._extract_embeddings_from_tokens(window)
+            query_embeddings.append(emb)
+            query_labels.append(class_idx)
+
+    # Skip this trial if we don't have enough data
+    if not support_embeddings or not query_embeddings:
+        return None
+
+    # Stack embeddings and convert labels to tensors
+    support_embeddings = torch.stack(support_embeddings)
+    support_labels = torch.tensor(support_labels, device=self.device)
+    query_embeddings = torch.stack(query_embeddings)
+    query_labels = torch.tensor(query_labels, device=self.device)
+
+    # Perform nearest neighbor classification
+    correct = 0
+    total = len(query_labels)
+
+    for i, query_emb in enumerate(query_embeddings):
+        # Calculate distance to all support examples
+        distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+
+        # Find k nearest neighbors (up to n_shots)
+        k = min(n_shots, len(support_labels))
+        _, indices = torch.topk(distances, k=k, largest=False)
+        nearest_labels = support_labels[indices]
+
+        # Majority vote
+        votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+        predicted_label = torch.argmax(votes)
+
+        if predicted_label == query_labels[i]:
+            correct += 1
+
+    # Calculate accuracy
+    accuracy = correct / total if total > 0 else 0
+    return accuracy
+
+
 def main():
     """Main entry point for evaluation"""
     import argparse
@@ -790,7 +1090,13 @@ def main():
         output_dir=args.output_dir,
         n_shots=args.n_shots
     )
-
+    # Additionally, create the bar plot with error bars
+    create_evaluation_bar_plot(
+        evaluator,
+        output_dir=args.output_dir,
+        n_shots=args.n_shots,
+        n_trials=20  # You can adjust the number of trials
+    )
     print("Evaluation complete!")
 
     if len(results) > 0:
