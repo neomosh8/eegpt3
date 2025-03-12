@@ -614,7 +614,7 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=63,
+    parser.add_argument("--d_model", type=int, default=64,
                         help="Hidden dimension of the model")
     parser.add_argument("--n_heads", type=int, default=4,
                         help="Number of attention heads")
