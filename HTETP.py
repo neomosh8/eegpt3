@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from bci_eval_2 import EEGSimpleEvaluator
+import pandas as pd
 
 
 # Model definition with special handling for pad tokens between windows
