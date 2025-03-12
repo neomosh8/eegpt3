@@ -1021,9 +1021,10 @@ def main():
 
                 ###EVAL
                 # Load the current checkpoint
-                checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}",weights_only=False)
-                evaluator.model.load_state_dict(checkpoint['model_state_dict'])
-                evaluator.model.eval()
+                if step > 0
+                    checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{local_rank}",weights_only=False)
+                    evaluator.model.load_state_dict(checkpoint['model_state_dict'])
+                    evaluator.model.eval()
 
                 # Run evaluations
                 try:
