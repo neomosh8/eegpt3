@@ -149,74 +149,98 @@ class HierarchicalEEGTransformer(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: Tensor of token indices [batch_size, seq_length]
+            x: Tensor of token indices [batch_size, seq_length].
+                 Contains multiple windows separated/padded with `pad_token_id`.
+        Returns:
+            logits: [batch_size, total_tokens, codebook_size]
         """
-        batch_size, seq_length = x.shape
-        device = x.device
 
-        # Handle the special case of sequences with pad tokens between windows
-        windows, pad_mask = self._extract_windows_with_pad_tokens(x)
+        # 1) Extract windows from x.
+        #    - windows has shape [B, N, W],
+        #      where N = number of windows, W = window_size.
+        #    - This should be padded with self.pad_token_id (129), not zero!
+        windows, _ = self._extract_windows_with_pad_tokens(x)  # shape [B, N, W]
+        B, N, W = windows.shape
+        device = windows.device
 
-        # Get the shape after extracting windows
-        batch_size, num_windows, window_size = windows.shape
+        # 2) Flatten windows so we can embed tokens directly
+        seq_len = N * W  # total tokens per sample
+        flat_windows = windows.reshape(B, seq_len)  # [B, seq_len]
 
-        # Reshape for embedding lookup
-        flat_windows = windows.reshape(-1, window_size)
+        # 3) Token embedding
+        embedded = self.token_embedding(flat_windows)  # [B, seq_len, d_model]
 
-        # Get token embeddings
-        embedded = self.token_embedding(flat_windows)  # [B*N, W, D]
+        # 4) Add hierarchical positional embeddings
+        #    - Reshape to [B, N, W, d_model], so we can add window-level + token-level positions
+        embedded = embedded.view(B, N, W, self.d_model)
 
-        # Reshape to separate batch and window dimensions
-        embedded = embedded.reshape(batch_size, num_windows, window_size, -1)
+        # 4.1) Add window-level positions (shape [1, N, d_model])
+        #      We unsqueeze(2) so it can broadcast over the W dimension
+        embedded = embedded + self.window_pos_embed[:, :N, :].unsqueeze(2)  # => [B, N, W, d_model]
 
-        # Add positional encodings
-        # 1. Window-level positions
-        embedded = embedded + self.window_pos_embed[:, :num_windows, :].unsqueeze(2)
+        # 4.2) Add token-level positions (shape [1, W, d_model])
+        #      We unsqueeze(1) so it can broadcast over the N dimension
+        embedded = embedded + self.token_pos_embed[:, :W, :].unsqueeze(1)  # => [B, N, W, d_model]
 
-        # 2. Token-level positions
-        embedded = embedded + self.token_pos_embed[:, :window_size, :].unsqueeze(1)
+        # 5) Reshape back to a simple sequence per batch element: [B, seq_len, d_model]
+        embedded = embedded.view(B, seq_len, self.d_model)
 
-        # Reshape back to sequence for transformer processing
-        embedded = embedded.reshape(batch_size, num_windows * window_size, -1)
+        # 6) Build a [B, seq_len, seq_len] mask that encodes:
+        #    (a) Full bidirectional attention within each window
+        #    (b) Causal (one-direction) attention across windows
+        #    (c) Pad tokens (129) are blocked entirely
+        mask = self._create_hierarchical_mask(windows)  # => [B, seq_len, seq_len]
 
-        # Create hierarchical attention mask
-        mask = self._create_hierarchical_mask(num_windows, window_size, device)
-
-        # Apply transformer layers
+        # 7) Pass through the Transformer layers, each expecting [B, seq_len, d_model] plus mask
         x = embedded
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, mask=mask)  # [B, seq_len, d_model]
 
-        x = self.norm(x)
-
-        # Output projection
-        logits = self.output_head(x)
+        # 8) Final normalization + output projection
+        x = self.norm(x)  # [B, seq_len, d_model]
+        logits = self.output_head(x)  # [B, seq_len, codebook_size]
 
         return logits
 
-    def _create_hierarchical_mask(self, num_windows, window_size, device):
+    def _create_hierarchical_mask(self, windows):
         """
-        Create mask that allows:
-        1. Full attention within each window (bidirectional)
-        2. Causal attention between windows
+        windows: [B, N, W] (already padded with self.pad_token_id where needed).
+        Returns:
+            mask: [B, N*W, N*W] with float('-inf') where attention is disallowed,
+                  and 0.0 where it's allowed.
         """
-        seq_length = num_windows * window_size
-        mask = torch.ones(seq_length, seq_length, device=device) * float('-inf')
+        B, N, W = windows.shape
+        seq_len = N * W
+        device = windows.device
 
-        # Allow full attention within each window
-        for i in range(num_windows):
-            start_idx = i * window_size
-            end_idx = (i + 1) * window_size
-            mask[start_idx:end_idx, start_idx:end_idx] = 0
+        # 1) Build a single "hierarchical" mask for a sequence of length seq_len
+        #    We'll replicate it for each batch element.
+        base_mask = torch.full((seq_len, seq_len), float('-inf'), device=device)
 
-        # Allow causal attention between windows
-        for i in range(num_windows):
+        # "Full" attention inside the same window; "causal" across windows
+        for i in range(N):
+            start_i = i * W
+            end_i = start_i + W
+            # Full bidirectional inside window i
+            base_mask[start_i:end_i, start_i:end_i] = 0.0
+
+            # Allow causal from window j < i to window i
             for j in range(i):
-                i_start = i * window_size
-                i_end = (i + 1) * window_size
-                j_start = j * window_size
-                j_end = (j + 1) * window_size
-                mask[i_start:i_end, j_start:j_end] = 0
+                start_j = j * W
+                end_j = start_j + W
+                base_mask[start_i:end_i, start_j:end_j] = 0.0
+
+        # 2) Replicate for each item in the batch -> [B, seq_len, seq_len]
+        mask = base_mask.unsqueeze(0).expand(B, seq_len, seq_len).clone()
+
+        # 3) Block out pad tokens entirely by setting both rows & columns to -inf
+        #    Flatten windows to shape [B, seq_len]
+        flat_w = windows.view(B, seq_len)
+        for b in range(B):
+            pad_positions = (flat_w[b] == self.pad_token_id).nonzero(as_tuple=True)[0]
+            if len(pad_positions) > 0:
+                mask[b, pad_positions, :] = float('-inf')
+                mask[b, :, pad_positions] = float('-inf')
 
         return mask
 
@@ -268,28 +292,34 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
-        batch_size, seq_len, _ = x.shape
+        B, seq_len, _ = x.shape
 
-        # Project and reshape to [batch, heads, seq_len, head_dim]
-        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        # x has shape [B, seq_len, d_model]
+        q = self.q_proj(x)  # [B, seq_len, d_model]
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
-        # Scaled dot-product attention
+        # Then reshape for multi-heads: [B, seq_len, n_heads, head_dim]
+        q = q.view(B, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # -> [B, n_heads, seq_len, head_dim]
+        k = k.view(B, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Compute scores: shape [B, n_heads, seq_len, seq_len]
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
 
-        # Apply mask if provided
+        # Add the mask (with shape [B, seq_len, seq_len]) as scores += mask.unsqueeze(1)
         if mask is not None:
-            scores = scores + mask.unsqueeze(0).unsqueeze(1)
+            # IMPORTANT: Use mask.unsqueeze(1) instead of .unsqueeze(0).unsqueeze(1)
+            # so each batch item gets its own mask.
+            scores = scores + mask.unsqueeze(1)
 
+        # Softmax, drop, etc.
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
-
-        # Apply attention weights to values
         context = torch.matmul(attn_weights, v)
 
-        # Reshape back to [batch, seq_len, d_model]
-        context = context.transpose(1, 2).reshape(batch_size, seq_len, self.d_model)
+        # Reshape context back to [B, seq_len, d_model]
+        context = context.transpose(1, 2).reshape(B, seq_len, self.d_model)
         return self.out_proj(context)
 
 
