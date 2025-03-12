@@ -406,7 +406,6 @@ class EEGSimpleEvaluator:
         print(f"Window-level few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
-
     def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=5):
         """
         Evaluate few-shot learning performance using token embeddings directly
