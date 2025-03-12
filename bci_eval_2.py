@@ -929,6 +929,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
 
     # Use the latest checkpoint
     latest_checkpoint = evaluator.checkpoint_files[-1]
+    print(latest_checkpoint)
     print(f"Using latest checkpoint: {latest_checkpoint}")
 
     # Load the checkpoint
