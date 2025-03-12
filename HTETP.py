@@ -9,6 +9,7 @@ import torch.distributed as dist
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.xpu import device
 from tqdm import tqdm
 from bci_eval_2 import EEGSimpleEvaluator
 import pandas as pd
@@ -331,7 +332,7 @@ class EEGTokenDataLoader:
         all_tokens = []
 
         for file_path in token_files:
-            tokens = torch.load(file_path,weights_only=False)
+            tokens = torch.load(file_path,weights_only=False,device='cpu')
 
             # Verify the tokens contain expected pad tokens
             pad_mask = (tokens == pad_token_id)
@@ -618,7 +619,7 @@ def main():
                         help="Size of flattened EEG window (72x32)")
     parser.add_argument("--d_model", type=int, default=24,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=2,
+    parser.add_argument("--n_heads", type=int, default=4,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=2,
                         help="Number of transformer layers")
