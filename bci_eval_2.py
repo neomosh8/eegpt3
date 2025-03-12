@@ -745,6 +745,154 @@ class EEGSimpleEvaluator:
         plt.savefig(os.path.join(output_dir, f'accuracy_vs_epoch{suffix}.png'), dpi=300)
         plt.close()
 
+    # Helper methods to add to the EEGSimpleEvaluator class
+    def _run_single_few_shot_trial(self, n_shots=1, n_queries=1):
+        """Run a single few-shot trial and return accuracy"""
+        # Prepare support and query sets
+        support_embeddings = []
+        support_labels = []
+        query_embeddings = []
+        query_labels = []
+
+        class_names = list(self.class_data.keys())
+        for class_idx, class_name in enumerate(class_names):
+            sequences = self.class_data[class_name]
+
+            # Skip classes with insufficient examples
+            if len(sequences) < n_shots + n_queries:
+                continue
+
+            # Randomly select support and query examples
+            indices = np.random.permutation(len(sequences))
+            support_indices = indices[:n_shots]
+            query_indices = indices[n_shots:n_shots + n_queries]
+
+            # Get embeddings for support set
+            for idx in support_indices:
+                seq = sequences[idx]
+                emb = self._extract_embeddings_from_tokens(seq)
+                support_embeddings.append(emb)
+                support_labels.append(class_idx)
+
+            # Get embeddings for query set
+            for idx in query_indices:
+                seq = sequences[idx]
+                emb = self._extract_embeddings_from_tokens(seq)
+                query_embeddings.append(emb)
+                query_labels.append(class_idx)
+
+        # Skip this trial if we don't have enough data
+        if not support_embeddings or not query_embeddings:
+            return None
+
+        # Stack embeddings and convert labels to tensors
+        support_embeddings = torch.stack(support_embeddings)
+        support_labels = torch.tensor(support_labels, device=self.device)
+        query_embeddings = torch.stack(query_embeddings)
+        query_labels = torch.tensor(query_labels, device=self.device)
+
+        # Perform nearest neighbor classification
+        correct = 0
+        total = len(query_labels)
+
+        for i, query_emb in enumerate(query_embeddings):
+            # Calculate distance to all support examples
+            distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+
+            # Find k nearest neighbors (up to n_shots)
+            k = min(n_shots, len(support_labels))
+            _, indices = torch.topk(distances, k=k, largest=False)
+            nearest_labels = support_labels[indices]
+
+            # Majority vote
+            votes = torch.bincount(nearest_labels, minlength=len(class_names))
+            predicted_label = torch.argmax(votes)
+
+            if predicted_label == query_labels[i]:
+                correct += 1
+
+        # Calculate accuracy
+        accuracy = correct / total if total > 0 else 0
+        return accuracy
+
+    def _run_single_window_few_shot_trial(self, n_shots=1, n_queries=1):
+        """Run a single window-level few-shot trial and return accuracy"""
+        # Extract windows from all sequences (if not already done)
+        class_windows = {}
+        for class_name, sequences in self.class_data.items():
+            all_windows = []
+            for seq in sequences:
+                windows = self.extract_windows_from_sequence(seq)
+                all_windows.extend(windows)
+
+            class_windows[class_name] = all_windows
+
+        # Prepare support and query sets
+        support_embeddings = []
+        support_labels = []
+        query_embeddings = []
+        query_labels = []
+
+        for class_idx, class_name in enumerate(class_windows.keys()):
+            windows = class_windows[class_name]
+
+            # Skip classes with insufficient windows
+            if len(windows) < n_shots + n_queries:
+                continue
+
+            # Randomly select support and query windows
+            indices = np.random.permutation(len(windows))
+            support_indices = indices[:n_shots]
+            query_indices = indices[n_shots:n_shots + n_queries]
+
+            # Get embeddings for support set
+            for idx in support_indices:
+                window = windows[idx].to(self.device)
+                emb = self._extract_embeddings_from_tokens(window)
+                support_embeddings.append(emb)
+                support_labels.append(class_idx)
+
+            # Get embeddings for query set
+            for idx in query_indices:
+                window = windows[idx].to(self.device)
+                emb = self._extract_embeddings_from_tokens(window)
+                query_embeddings.append(emb)
+                query_labels.append(class_idx)
+
+        # Skip this trial if we don't have enough data
+        if not support_embeddings or not query_embeddings:
+            return None
+
+        # Stack embeddings and convert labels to tensors
+        support_embeddings = torch.stack(support_embeddings)
+        support_labels = torch.tensor(support_labels, device=self.device)
+        query_embeddings = torch.stack(query_embeddings)
+        query_labels = torch.tensor(query_labels, device=self.device)
+
+        # Perform nearest neighbor classification
+        correct = 0
+        total = len(query_labels)
+
+        for i, query_emb in enumerate(query_embeddings):
+            # Calculate distance to all support examples
+            distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+
+            # Find k nearest neighbors (up to n_shots)
+            k = min(n_shots, len(support_labels))
+            _, indices = torch.topk(distances, k=k, largest=False)
+            nearest_labels = support_labels[indices]
+
+            # Majority vote
+            votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+            predicted_label = torch.argmax(votes)
+
+            if predicted_label == query_labels[i]:
+                correct += 1
+
+        # Calculate accuracy
+        accuracy = correct / total if total > 0 else 0
+        return accuracy
+
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -896,154 +1044,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
     return results
 
 
-# Helper methods to add to the EEGSimpleEvaluator class
-def _run_single_few_shot_trial(self, n_shots=1, n_queries=1):
-    """Run a single few-shot trial and return accuracy"""
-    # Prepare support and query sets
-    support_embeddings = []
-    support_labels = []
-    query_embeddings = []
-    query_labels = []
 
-    class_names = list(self.class_data.keys())
-    for class_idx, class_name in enumerate(class_names):
-        sequences = self.class_data[class_name]
-
-        # Skip classes with insufficient examples
-        if len(sequences) < n_shots + n_queries:
-            continue
-
-        # Randomly select support and query examples
-        indices = np.random.permutation(len(sequences))
-        support_indices = indices[:n_shots]
-        query_indices = indices[n_shots:n_shots + n_queries]
-
-        # Get embeddings for support set
-        for idx in support_indices:
-            seq = sequences[idx]
-            emb = self._extract_embeddings_from_tokens(seq)
-            support_embeddings.append(emb)
-            support_labels.append(class_idx)
-
-        # Get embeddings for query set
-        for idx in query_indices:
-            seq = sequences[idx]
-            emb = self._extract_embeddings_from_tokens(seq)
-            query_embeddings.append(emb)
-            query_labels.append(class_idx)
-
-    # Skip this trial if we don't have enough data
-    if not support_embeddings or not query_embeddings:
-        return None
-
-    # Stack embeddings and convert labels to tensors
-    support_embeddings = torch.stack(support_embeddings)
-    support_labels = torch.tensor(support_labels, device=self.device)
-    query_embeddings = torch.stack(query_embeddings)
-    query_labels = torch.tensor(query_labels, device=self.device)
-
-    # Perform nearest neighbor classification
-    correct = 0
-    total = len(query_labels)
-
-    for i, query_emb in enumerate(query_embeddings):
-        # Calculate distance to all support examples
-        distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
-
-        # Find k nearest neighbors (up to n_shots)
-        k = min(n_shots, len(support_labels))
-        _, indices = torch.topk(distances, k=k, largest=False)
-        nearest_labels = support_labels[indices]
-
-        # Majority vote
-        votes = torch.bincount(nearest_labels, minlength=len(class_names))
-        predicted_label = torch.argmax(votes)
-
-        if predicted_label == query_labels[i]:
-            correct += 1
-
-    # Calculate accuracy
-    accuracy = correct / total if total > 0 else 0
-    return accuracy
-
-
-def _run_single_window_few_shot_trial(self, n_shots=1, n_queries=1):
-    """Run a single window-level few-shot trial and return accuracy"""
-    # Extract windows from all sequences (if not already done)
-    class_windows = {}
-    for class_name, sequences in self.class_data.items():
-        all_windows = []
-        for seq in sequences:
-            windows = self.extract_windows_from_sequence(seq)
-            all_windows.extend(windows)
-
-        class_windows[class_name] = all_windows
-
-    # Prepare support and query sets
-    support_embeddings = []
-    support_labels = []
-    query_embeddings = []
-    query_labels = []
-
-    for class_idx, class_name in enumerate(class_windows.keys()):
-        windows = class_windows[class_name]
-
-        # Skip classes with insufficient windows
-        if len(windows) < n_shots + n_queries:
-            continue
-
-        # Randomly select support and query windows
-        indices = np.random.permutation(len(windows))
-        support_indices = indices[:n_shots]
-        query_indices = indices[n_shots:n_shots + n_queries]
-
-        # Get embeddings for support set
-        for idx in support_indices:
-            window = windows[idx].to(self.device)
-            emb = self._extract_embeddings_from_tokens(window)
-            support_embeddings.append(emb)
-            support_labels.append(class_idx)
-
-        # Get embeddings for query set
-        for idx in query_indices:
-            window = windows[idx].to(self.device)
-            emb = self._extract_embeddings_from_tokens(window)
-            query_embeddings.append(emb)
-            query_labels.append(class_idx)
-
-    # Skip this trial if we don't have enough data
-    if not support_embeddings or not query_embeddings:
-        return None
-
-    # Stack embeddings and convert labels to tensors
-    support_embeddings = torch.stack(support_embeddings)
-    support_labels = torch.tensor(support_labels, device=self.device)
-    query_embeddings = torch.stack(query_embeddings)
-    query_labels = torch.tensor(query_labels, device=self.device)
-
-    # Perform nearest neighbor classification
-    correct = 0
-    total = len(query_labels)
-
-    for i, query_emb in enumerate(query_embeddings):
-        # Calculate distance to all support examples
-        distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
-
-        # Find k nearest neighbors (up to n_shots)
-        k = min(n_shots, len(support_labels))
-        _, indices = torch.topk(distances, k=k, largest=False)
-        nearest_labels = support_labels[indices]
-
-        # Majority vote
-        votes = torch.bincount(nearest_labels, minlength=len(class_windows))
-        predicted_label = torch.argmax(votes)
-
-        if predicted_label == query_labels[i]:
-            correct += 1
-
-    # Calculate accuracy
-    accuracy = correct / total if total > 0 else 0
-    return accuracy
 
 
 def main():
