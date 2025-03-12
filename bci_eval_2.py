@@ -593,7 +593,7 @@ class EEGSimpleEvaluator:
 
         return accuracy
 
-    def run_full_evaluation(self, output_dir="evaluation_results", n_shots=1):
+    def run_full_evaluation(self, output_dir="evaluation_results", n_shots=2):
         """
         Run evaluation on all checkpoints and save results
 
