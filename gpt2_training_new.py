@@ -134,11 +134,11 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 8192
-    vocab_size: int = 129  # Update this based on your VQCAE tokenizer vocab size
+    block_size: int = 9216
+    vocab_size: int = 130  # Update this based on your VQCAE tokenizer vocab size
     if small_model:
         n_layer: int = 12  # number of layers
-        n_head: int = 12  # number of heads
+        n_head: int = 6  # number of heads
         n_embd: int = 768  # embedding dimension
         # n_layer: int = 36
         # n_head: int = 20
@@ -348,7 +348,7 @@ def moving_average(values, window_size=10):
 
 if small_model:
     epoch_num = 4
-    B = 16
+    B = 4
     T = GPTConfig.block_size
     total_batch_size = B * T * 8
 
