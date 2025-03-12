@@ -2,6 +2,8 @@ import os
 import glob
 import json
 import re
+import traceback
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -190,20 +192,45 @@ class EEGEvaluator:
 
     def evaluate_few_shot(self, n_shots=5, n_queries=5, n_trials=10):
         """
-        Evaluate few-shot learning performance
+        Evaluate few-shot learning performance, adaptively adjusting to small dataset sizes
 
         Args:
             n_shots: Number of examples per class for support set
-            n_queries: Number of query examples per class
+            n_queries: Number of examples per class for query set
             n_trials: Number of random trials to average over
 
         Returns:
             Average accuracy across trials
         """
-        print(f"Running {n_shots}-shot evaluation ({n_trials} trials)...")
+        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+
+        # Check if we have enough data and adjust parameters if needed
+        class_names = list(self.class_data.keys())
+        min_examples = min([len(self.class_data[cls]) for cls in class_names])
+
+        # We need at least 2 examples per class (1 for support, 1 for query)
+        if min_examples < 2:
+            print(f"Warning: Not enough examples for few-shot (min={min_examples}). Skipping evaluation.")
+            return 0.0
+
+        # Adjust n_shots and n_queries to fit available data
+        max_per_class = min_examples // 2
+        adjusted_n_shots = min(n_shots, max_per_class)
+        adjusted_n_queries = min(n_queries, min_examples - adjusted_n_shots)
+
+        if adjusted_n_shots != n_shots or adjusted_n_queries != n_queries:
+            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
+            print(
+                f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries instead of requested {n_shots}-shot with {n_queries} queries")
+            n_shots = adjusted_n_shots
+            n_queries = adjusted_n_queries
+
+        # Ensure we're using at least 1 query example
+        if n_queries < 1:
+            n_queries = 1
+            n_shots = min_examples - 1
 
         accuracies = []
-        class_names = list(self.class_data.keys())
 
         # Run multiple trials
         for trial in range(n_trials):
@@ -239,6 +266,11 @@ class EEGEvaluator:
                     query_embeddings.append(emb)
                     query_labels.append(class_idx)
 
+            # Skip this trial if we don't have enough data
+            if not support_embeddings or not query_embeddings:
+                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
+                continue
+
             # Stack embeddings and convert labels to tensors
             support_embeddings = torch.cat(support_embeddings, dim=0)
             support_labels = torch.tensor(support_labels, device=self.device)
@@ -253,8 +285,9 @@ class EEGEvaluator:
                 # Calculate distance to all support examples
                 distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
 
-                # Find k nearest neighbors
-                _, indices = torch.topk(distances, k=n_shots, largest=False)
+                # Find k nearest neighbors (up to n_shots)
+                k = min(n_shots, len(support_labels))
+                _, indices = torch.topk(distances, k=k, largest=False)
                 nearest_labels = support_labels[indices]
 
                 # Majority vote
@@ -268,7 +301,12 @@ class EEGEvaluator:
             accuracy = correct / total if total > 0 else 0
             accuracies.append(accuracy)
 
-            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f}")
+            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+        # Handle case where all trials were skipped
+        if not accuracies:
+            print("No valid trials completed. Please check your dataset.")
+            return 0.0
 
         avg_accuracy = np.mean(accuracies)
         print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
@@ -360,6 +398,15 @@ class EEGEvaluator:
             'classifier_accuracy': []
         }
 
+        # Check data size and print warning if needed
+        class_names = list(self.class_data.keys())
+        class_sizes = {cls: len(self.class_data[cls]) for cls in class_names}
+        print(f"Class sizes: {class_sizes}")
+
+        min_examples = min([size for size in class_sizes.values()])
+        if min_examples < 2:
+            print(f"Warning: Some classes have very few examples. Few-shot evaluation may be unreliable.")
+
         # Evaluate each checkpoint
         for ckpt_file in self.checkpoint_files:
             # Extract epoch number
@@ -370,44 +417,52 @@ class EEGEvaluator:
             epoch = int(epoch_match.group(1))
             print(f"\nEvaluating checkpoint from epoch {epoch}")
 
-            # Load checkpoint
-            checkpoint = torch.load(ckpt_file, map_location=self.device)
+            try:
+                # Load checkpoint
+                checkpoint = torch.load(ckpt_file, map_location=self.device)
 
-            # Update model weights
-            state_dict = checkpoint['model_state_dict']
-            if list(state_dict.keys())[0].startswith('module.'):
-                new_state_dict = OrderedDict()
-                for k, v in state_dict.items():
-                    name = k[7:] if k.startswith('module.') else k
-                    new_state_dict[name] = v
-                state_dict = new_state_dict
+                # Update model weights
+                state_dict = checkpoint['model_state_dict']
+                if list(state_dict.keys())[0].startswith('module.'):
+                    new_state_dict = OrderedDict()
+                    for k, v in state_dict.items():
+                        name = k[7:] if k.startswith('module.') else k
+                        new_state_dict[name] = v
+                    state_dict = new_state_dict
 
-            self.model.load_state_dict(state_dict)
-            self.model.eval()
+                self.model.load_state_dict(state_dict)
+                self.model.eval()
 
-            # Run evaluations
-            few_shot_acc = self.evaluate_few_shot(n_shots=n_shots)
-            classifier_acc = self.evaluate_classifier(classifier_type="logistic")
+                # Run evaluations
+                few_shot_acc = self.evaluate_few_shot(n_shots=n_shots)
+                classifier_acc = self.evaluate_classifier(classifier_type="logistic")
 
-            # Store results
-            results['epoch'].append(epoch)
-            results['few_shot_accuracy'].append(few_shot_acc)
-            results['classifier_accuracy'].append(classifier_acc)
+                # Store results
+                results['epoch'].append(epoch)
+                results['few_shot_accuracy'].append(few_shot_acc)
+                results['classifier_accuracy'].append(classifier_acc)
 
-            # Create intermediate plot at each checkpoint
-            self._create_accuracy_plot(results, output_dir, suffix=f"_checkpoint_{epoch}")
+                # Create intermediate plot at each checkpoint
+                if len(results['epoch']) > 0:
+                    self._create_accuracy_plot(results, output_dir, suffix=f"_checkpoint_{epoch}")
 
-        # Create final combined plot
-        self._create_accuracy_plot(results, output_dir)
+            except Exception as e:
+                print(f"Error evaluating checkpoint {ckpt_file}: {str(e)}")
+                traceback.print_exc()
 
-        # Save results to CSV
-        results_df = pd.DataFrame(results)
-        csv_path = os.path.join(output_dir, 'evaluation_results.csv')
-        results_df.to_csv(csv_path, index=False)
-        print(f"Saved results to {csv_path}")
+        # Create final combined plot if we have any results
+        if len(results['epoch']) > 0:
+            self._create_accuracy_plot(results, output_dir)
 
-        return results_df
+            # Save results to CSV
+            results_df = pd.DataFrame(results)
+            csv_path = os.path.join(output_dir, 'evaluation_results.csv')
+            results_df.to_csv(csv_path, index=False)
+            print(f"Saved results to {csv_path}")
+        else:
+            print("No successful evaluations completed.")
 
+        return pd.DataFrame(results)
     def _create_accuracy_plot(self, results, output_dir, suffix=""):
         """Create and save accuracy plot from results"""
         plt.figure(figsize=(12, 8))
