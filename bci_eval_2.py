@@ -85,8 +85,8 @@ class EEGSimpleEvaluator:
 
         # 1. Few-shot baseline: Random guessing based on class distribution
         # For few-shot learning, we'll simulate random guessing with proper class probabilities
-        n_trials = 100
-        np.random.seed(42)  # For reproducibility
+        n_trials = 200
+        np.random.seed(88)  # For reproducibility
 
         few_shot_accs = []
         for _ in range(n_trials):
@@ -281,7 +281,7 @@ class EEGSimpleEvaluator:
 
         return windows
 
-    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=5):
+    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10):
         """
         Evaluate few-shot learning at the window level
 
@@ -406,7 +406,7 @@ class EEGSimpleEvaluator:
         print(f"Window-level few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=5):
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10):
         """
         Evaluate few-shot learning performance using token embeddings directly
 
