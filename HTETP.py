@@ -616,11 +616,11 @@ def main():
                         help="Size of the VQAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of flattened EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=24,
+    parser.add_argument("--d_model", type=int, default=360,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=4,
+    parser.add_argument("--n_heads", type=int, default=6,
                         help="Number of attention heads")
-    parser.add_argument("--n_layers", type=int, default=2,
+    parser.add_argument("--n_layers", type=int, default=6,
                         help="Number of transformer layers")
     parser.add_argument("--max_windows", type=int, default=4,
                         help="Maximum number of windows in sequence")
@@ -689,7 +689,7 @@ def main():
 
     if rank == 0:  # Master process only
         # Find all token files
-        token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))[0:500]
+        token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))[0:10]
         if not token_files:
             raise ValueError(f"No token files found in {data_dir}")
 
