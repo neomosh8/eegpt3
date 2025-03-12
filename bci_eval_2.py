@@ -447,9 +447,9 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate EEG Transformer model")
-    parser.add_argument("--checkpoint_dir", type=str, required=True,
+    parser.add_argument("--checkpoint_dir", type=str, required=True, default='checkpoints',
                         help="Directory containing model checkpoints")
-    parser.add_argument("--data_dir", type=str, required=True,
+    parser.add_argument("--data_dir", type=str, required=True, default='tokenized_bci_data',
                         help="Directory containing tokenized data files")
     parser.add_argument("--output_dir", type=str, default="evaluation_results",
                         help="Directory to save evaluation results")
