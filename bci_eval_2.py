@@ -241,6 +241,172 @@ class EEGSimpleEvaluator:
         mean_embedding = embeddings.mean(dim=0)
         return mean_embedding
 
+    def extract_windows_from_sequence(self, sequence, window_size=2304):
+        """
+        Split a tokenized sequence into individual windows
+
+        Args:
+            sequence: The full token sequence
+            window_size: Size of each window (default: 2304 tokens)
+
+        Returns:
+            List of window token sequences
+        """
+        # Remove EOS token if present
+        if sequence[-1] == self.eos_token_id:
+            sequence = sequence[:-1]
+
+        # Find all pad tokens (which separate windows)
+        pad_positions = (sequence == self.pad_token_id).nonzero(as_tuple=True)[0]
+
+        windows = []
+        start_idx = 0
+
+        # Extract windows based on pad positions
+        for pad_pos in pad_positions:
+            window = sequence[start_idx:pad_pos]
+
+            # Only add windows of reasonable size
+            if len(window) > 0:
+                windows.append(window)
+
+            # Next window starts after this pad
+            start_idx = pad_pos + 1
+
+        # Add the last window if there's data after the last pad
+        if start_idx < len(sequence):
+            window = sequence[start_idx:]
+            if len(window) > 0:
+                windows.append(window)
+
+        return windows
+
+    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=5):
+        """
+        Evaluate few-shot learning at the window level
+
+        Args:
+            n_shots: Number of windows per class for support set
+            n_queries: Number of windows per class for query set
+            n_trials: Number of random trials to average over
+
+        Returns:
+            Average accuracy across trials
+        """
+        print(f"Running window-level few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+
+        # Extract windows from all sequences
+        class_windows = {}
+        for class_name, sequences in self.class_data.items():
+            all_windows = []
+            for seq in sequences:
+                windows = self.extract_windows_from_sequence(seq)
+                all_windows.extend(windows)
+
+            class_windows[class_name] = all_windows
+            print(f"  - {class_name}: {len(all_windows)} windows extracted")
+
+        # Check if we have enough data and adjust parameters if needed
+        min_windows = min([len(windows) for windows in class_windows.values()])
+
+        if min_windows < n_shots + n_queries:
+            adjusted_n_shots = min(n_shots, min_windows // 2)
+            adjusted_n_queries = min(n_queries, min_windows - adjusted_n_shots)
+
+            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
+            print(f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
+
+            n_shots = adjusted_n_shots
+            n_queries = adjusted_n_queries
+
+        # Ensure we're using at least 1 query window
+        if n_queries < 1:
+            n_queries = 1
+            n_shots = min(n_shots, min_windows - 1)
+
+        accuracies = []
+
+        # Run multiple trials
+        for trial in range(n_trials):
+            # Prepare support and query sets
+            support_embeddings = []
+            support_labels = []
+            query_embeddings = []
+            query_labels = []
+
+            for class_idx, class_name in enumerate(class_windows.keys()):
+                windows = class_windows[class_name]
+
+                # Skip classes with insufficient windows
+                if len(windows) < n_shots + n_queries:
+                    continue
+
+                # Randomly select support and query windows
+                indices = np.random.permutation(len(windows))
+                support_indices = indices[:n_shots]
+                query_indices = indices[n_shots:n_shots + n_queries]
+
+                # Get embeddings for support set
+                for idx in support_indices:
+                    window = windows[idx].to(self.device)
+                    emb = self._extract_embeddings_from_tokens(window)
+                    support_embeddings.append(emb)
+                    support_labels.append(class_idx)
+
+                # Get embeddings for query set
+                for idx in query_indices:
+                    window = windows[idx].to(self.device)
+                    emb = self._extract_embeddings_from_tokens(window)
+                    query_embeddings.append(emb)
+                    query_labels.append(class_idx)
+
+            # Skip this trial if we don't have enough data
+            if not support_embeddings or not query_embeddings:
+                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
+                continue
+
+            # Stack embeddings and convert labels to tensors
+            support_embeddings = torch.stack(support_embeddings)
+            support_labels = torch.tensor(support_labels, device=self.device)
+            query_embeddings = torch.stack(query_embeddings)
+            query_labels = torch.tensor(query_labels, device=self.device)
+
+            # Perform nearest neighbor classification
+            correct = 0
+            total = len(query_labels)
+
+            for i, query_emb in enumerate(query_embeddings):
+                # Calculate distance to all support examples
+                distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+
+                # Find k nearest neighbors (up to n_shots)
+                k = min(n_shots, len(support_labels))
+                _, indices = torch.topk(distances, k=k, largest=False)
+                nearest_labels = support_labels[indices]
+
+                # Majority vote
+                votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+                predicted_label = torch.argmax(votes)
+
+                if predicted_label == query_labels[i]:
+                    correct += 1
+
+            # Calculate accuracy
+            accuracy = correct / total if total > 0 else 0
+            accuracies.append(accuracy)
+
+            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+        # Handle case where all trials were skipped
+        if not accuracies:
+            print("No valid trials completed. Please check your dataset.")
+            return 0.0
+
+        avg_accuracy = np.mean(accuracies)
+        print(f"Window-level few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
+        return avg_accuracy
+
+
     def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=5):
         """
         Evaluate few-shot learning performance using token embeddings directly
@@ -447,6 +613,7 @@ class EEGSimpleEvaluator:
             'few_shot_accuracy': [],
             'classifier_accuracy': []
         }
+        results['few_shot_window_accuracy'] = []
 
         # Check data size and print warning if needed
         class_names = list(self.class_data.keys())
@@ -493,7 +660,10 @@ class EEGSimpleEvaluator:
                 # Run evaluations
                 few_shot_acc = self.evaluate_few_shot(n_shots=n_shots)
                 classifier_acc = self.evaluate_classifier(classifier_type="logistic")
+                few_shot_acc_windows = self.evaluate_few_shot_windows(n_shots=n_shots)
 
+                # Add to your results dictionary:
+                results['few_shot_window_accuracy'].append(few_shot_acc_windows)
                 # Store results
                 results['epoch'].append(epoch)
                 results['few_shot_accuracy'].append(few_shot_acc)
