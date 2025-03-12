@@ -878,6 +878,10 @@ def main():
             # Update step progress bar with current loss (only on rank 0)
             if rank == 0:
                 step_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+            del batch, x, target, logits, loss
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()  # Clear any unused memory
 
         # Average training loss
         train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0
@@ -946,6 +950,10 @@ def main():
                 # Update validation progress bar (only on rank 0)
                 if rank == 0:
                     val_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
+        del batch, x, target, logits, loss
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()  # Clear any unused memory
 
         # Average validation loss
         val_loss = val_loss / num_val_batches if num_val_batches > 0 else float('inf')
