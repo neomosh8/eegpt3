@@ -348,7 +348,7 @@ def moving_average(values, window_size=10):
 
 if small_model:
     epoch_num = 4
-    B = 4
+    B = 2
     T = GPTConfig.block_size
     total_batch_size = B * T * 8
 
@@ -380,7 +380,7 @@ shuffle_files = True
 
 if ddp_rank == 0:  # Master process
     # Find all token files
-    token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))[0:500]
+    token_files = sorted(glob.glob(os.path.join(data_dir, "*_tokens.pt")))[0:50]
     if not token_files:
         raise ValueError(f"No token files found in {data_dir}")
 
