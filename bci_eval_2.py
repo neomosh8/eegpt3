@@ -1173,10 +1173,10 @@ def main():
     )
 
     # Run full evaluation
-    results = evaluator.run_full_evaluation(
-        output_dir=args.output_dir,
-        n_shots=args.n_shots
-    )
+    # results = evaluator.run_full_evaluation(
+    #     output_dir=args.output_dir,
+    #     n_shots=args.n_shots
+    # )
     # Additionally, create the bar plot with error bars
     create_evaluation_bar_plot(
         evaluator,
@@ -1187,21 +1187,21 @@ def main():
     )
     print("Evaluation complete!")
 
-    if len(results) > 0:
-        # Print best results
-        best_few_shot_idx = np.argmax(results['few_shot_accuracy']) if len(results['few_shot_accuracy']) > 0 else -1
-        best_classifier_idx = np.argmax(results['classifier_accuracy']) if len(
-            results['classifier_accuracy']) > 0 else -1
-
-        print("\nBest Results:")
-        if best_few_shot_idx >= 0:
-            print(
-                f"Best Few-shot accuracy: {results['few_shot_accuracy'][best_few_shot_idx]:.4f} at epoch {results['epoch'][best_few_shot_idx]}")
-        if best_classifier_idx >= 0:
-            print(
-                f"Best Classifier accuracy: {results['classifier_accuracy'][best_classifier_idx]:.4f} at epoch {results['epoch'][best_classifier_idx]}")
-    else:
-        print("No successful evaluations completed.")
+    # if len(results) > 0:
+    #     # Print best results
+    #     best_few_shot_idx = np.argmax(results['few_shot_accuracy']) if len(results['few_shot_accuracy']) > 0 else -1
+    #     best_classifier_idx = np.argmax(results['classifier_accuracy']) if len(
+    #         results['classifier_accuracy']) > 0 else -1
+    #
+    #     print("\nBest Results:")
+    #     if best_few_shot_idx >= 0:
+    #         print(
+    #             f"Best Few-shot accuracy: {results['few_shot_accuracy'][best_few_shot_idx]:.4f} at epoch {results['epoch'][best_few_shot_idx]}")
+    #     if best_classifier_idx >= 0:
+    #         print(
+    #             f"Best Classifier accuracy: {results['classifier_accuracy'][best_classifier_idx]:.4f} at epoch {results['epoch'][best_classifier_idx]}")
+    # else:
+    #     print("No successful evaluations completed.")
 
 
 if __name__ == "__main__":
