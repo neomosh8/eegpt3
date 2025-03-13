@@ -1099,19 +1099,31 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
 
     results = {}
 
+    # Check available number of classes
+    available_classes = len(evaluator.dataloader.class_names)
+    print(f"\nFound {available_classes} classes in dataset: {evaluator.dataloader.class_names}")
+
+    # Determine maximum ways for few-shot evaluation
+    max_ways = min(5, available_classes)
+    if max_ways < 5:
+        print(
+            f"Warning: Only {available_classes} classes available. Adjusting evaluation to use {max_ways}-way instead of 5-way.")
+
     # 1. Evaluate standard few-shot learning
     print("\nEvaluating standard few-shot learning...")
     standard_results = {}
 
-    # a. 2-way classification
-    for n_shot in [1, 5, 10]:
-        accuracy = evaluator.evaluate_few_shot(n_way=2, n_shot=n_shot, n_query=5, n_trials=10)
-        standard_results[f"2way_{n_shot}shot"] = accuracy
+    # a. 2-way classification (if at least 2 classes available)
+    if available_classes >= 2:
+        for n_shot in [1, 5, 10]:
+            accuracy = evaluator.evaluate_few_shot(n_way=2, n_shot=n_shot, n_query=5, n_trials=10)
+            standard_results[f"2way_{n_shot}shot"] = accuracy
 
-    # b. 5-way classification
-    for n_shot in [1, 5, 10]:
-        accuracy = evaluator.evaluate_few_shot(n_way=5, n_shot=n_shot, n_query=5, n_trials=10)
-        standard_results[f"5way_{n_shot}shot"] = accuracy
+    # b. max_ways-way classification
+    if max_ways > 2:
+        for n_shot in [1, 5, 10]:
+            accuracy = evaluator.evaluate_few_shot(n_way=max_ways, n_shot=n_shot, n_query=5, n_trials=10)
+            standard_results[f"{max_ways}way_{n_shot}shot"] = accuracy
 
     results["standard_few_shot"] = standard_results
 
@@ -1137,39 +1149,43 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
 
     # Group by n_way
     way2_results = {k: v for k, v in standard_results.items() if k.startswith("2way_")}
-    way5_results = {k: v for k, v in standard_results.items() if k.startswith("5way_")}
+    waymax_results = {k: v for k, v in standard_results.items() if k.startswith(f"{max_ways}way_")}
 
     # Extract shots
-    shots = [int(k.split("_")[1].replace("shot", "")) for k in way2_results.keys()]
+    shots = [int(k.split("_")[1].replace("shot", "")) for k in way2_results.keys()] if way2_results else []
 
     # Plot
-    plt.plot(shots, list(way2_results.values()), 'o-', label="2-way", linewidth=2, markersize=8)
-    plt.plot(shots, list(way5_results.values()), 'o-', label="5-way", linewidth=2, markersize=8)
+    if shots:  # Only plot if we have 2-way results
+        plt.plot(shots, list(way2_results.values()), 'o-', label="2-way", linewidth=2, markersize=8)
 
-    plt.xlabel("Number of shots", fontsize=14)
-    plt.ylabel("Accuracy", fontsize=14)
-    plt.title("Few-shot Learning Performance", fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.xticks(shots)
+        if waymax_results:  # Only plot max-way if we have results
+            plt.plot(shots, list(waymax_results.values()), 'o-', label=f"{max_ways}-way", linewidth=2, markersize=8)
 
-    # Add values on plot
-    for i, (shot, acc) in enumerate(zip(shots, list(way2_results.values()))):
-        plt.annotate(f'{acc:.4f}',
-                     (shot, acc),
-                     textcoords="offset points",
-                     xytext=(0, 10),
-                     ha='center')
+        plt.xlabel("Number of shots", fontsize=14)
+        plt.ylabel("Accuracy", fontsize=14)
+        plt.title("Few-shot Learning Performance", fontsize=16)
+        plt.legend(fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.xticks(shots)
 
-    for i, (shot, acc) in enumerate(zip(shots, list(way5_results.values()))):
-        plt.annotate(f'{acc:.4f}',
-                     (shot, acc),
-                     textcoords="offset points",
-                     xytext=(0, -15),
-                     ha='center')
+        # Add values on plot
+        for i, (shot, acc) in enumerate(zip(shots, list(way2_results.values()))):
+            plt.annotate(f'{acc:.4f}',
+                         (shot, acc),
+                         textcoords="offset points",
+                         xytext=(0, 10),
+                         ha='center')
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "few_shot_summary.png"), dpi=300)
+        if waymax_results:
+            for i, (shot, acc) in enumerate(zip(shots, list(waymax_results.values()))):
+                plt.annotate(f'{acc:.4f}',
+                             (shot, acc),
+                             textcoords="offset points",
+                             xytext=(0, -15),
+                             ha='center')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "few_shot_summary.png"), dpi=300)
 
     print(f"\nEvaluation complete. Results saved to {output_dir}")
     return results
@@ -1222,15 +1238,27 @@ if __name__ == "__main__":
     # Load checkpoint
     evaluator.load_checkpoint()
 
+    # Check available number of classes
+    available_classes = len(evaluator.dataloader.class_names)
+    print(f"Found {available_classes} classes in dataset: {evaluator.dataloader.class_names}")
+
     if args.full_suite:
         # Run full evaluation suite
         run_evaluation_suite(evaluator, output_dir=args.output_dir)
     else:
+        # Adjust n_way if needed
+        if args.n_way > available_classes:
+            print(f"Warning: Requested {args.n_way}-way task but only have {available_classes} classes")
+            print(f"Adjusting to {available_classes}-way task")
+            n_way = available_classes
+        else:
+            n_way = args.n_way
+
         # Run single evaluation
         accuracy = evaluator.evaluate_few_shot(
-            n_way=args.n_way,
+            n_way=n_way,
             n_shot=args.n_shot,
             n_query=args.n_shot,  # Use same number for query
             n_trials=args.n_trials
         )
-        print(f"\nFinal {args.n_way}-way {args.n_shot}-shot accuracy: {accuracy:.4f}")
+        print(f"\nFinal {n_way}-way {args.n_shot}-shot accuracy: {accuracy:.4f}")
