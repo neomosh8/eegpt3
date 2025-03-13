@@ -17,6 +17,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import traceback
 
+from HTETP import HierarchicalEEGTransformer
+
 
 class EEGSimpleEvaluator:
     """
@@ -176,9 +178,7 @@ class EEGSimpleEvaluator:
 
     def _initialize_model(self, checkpoint_path):
         """Initialize the model using the specified checkpoint"""
-        from HTETP import \
-            HierarchicalEEGTransformer  # Also ensure TransformerLayer and HierarchicalMemoryEfficientAttention are accessible
-
+        import math  # Make sure this is imported
         print(f"Initializing model from {checkpoint_path}...")
 
         # Load checkpoint
@@ -208,7 +208,6 @@ class EEGSimpleEvaluator:
         model_keys = set(self.model.state_dict().keys())
         checkpoint_keys = set(state_dict.keys())
 
-        # Handle potential mismatch due to structure changes
         if model_keys != checkpoint_keys:
             print("Warning: Structure mismatch between checkpoint and model.")
             print(f"Missing: {model_keys - checkpoint_keys}")
