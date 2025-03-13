@@ -1667,15 +1667,32 @@ class EEGSimpleEvaluator:
                 # Create attention mask if needed by the model
                 mask = None
                 if hasattr(self.model, '_create_hierarchical_mask'):
-                    mask = self.model._create_hierarchical_mask(batch_size, num_windows, self.device)
+                    try:
+                        # Check the function signature to handle different versions
+                        import inspect
+                        sig = inspect.signature(self.model._create_hierarchical_mask)
+                        if len(sig.parameters) == 4:  # (self, batch_size, num_windows, device)
+                            mask = self.model._create_hierarchical_mask(batch_size, num_windows, self.device)
+                        else:  # (self, batch_size, num_windows, window_size, device)
+                            mask = self.model._create_hierarchical_mask(batch_size, num_windows, window_size,
+                                                                        self.device)
+                    except Exception as e:
+                        print(f"Error creating mask: {str(e)}. Proceeding without mask.")
 
                 # Apply transformer layers up to layer_depth
                 x = embedded
                 for i in range(min(layer_depth, len(self.model.layers))):
-                    if mask is not None:
-                        x = self.model.layers[i](x, mask)
-                    else:
-                        x = self.model.layers[i](x)
+                    try:
+                        if mask is not None:
+                            x = self.model.layers[i](x, mask)
+                        else:
+                            x = self.model.layers[i](x)
+                    except TypeError as e:
+                        # If the layer doesn't accept a mask parameter, try without it
+                        if "got an unexpected keyword argument 'mask'" in str(e):
+                            x = self.model.layers[i](x)
+                        else:
+                            raise
 
                 # Apply normalization
                 if hasattr(self.model, 'norm'):
