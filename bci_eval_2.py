@@ -223,38 +223,6 @@ class EEGSimpleEvaluator:
         # Extract the token embedding layer
         self.token_embedding = self.model.token_embedding
 
-    def _extract_embeddings_from_tokens(self, tokens):
-        """
-        Extract embeddings directly from token IDs using the embedding layer
-
-        Args:
-            tokens: Token sequence tensor
-
-        Returns:
-            Mean token embedding vectors
-        """
-        # Make sure tokens are on the right device
-        tokens = tokens.to(self.device)
-
-        # Remove padding and EOS tokens for embedding extraction
-        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
-        filtered_tokens = tokens[mask]
-
-        # Skip empty sequences
-        if filtered_tokens.numel() == 0:
-            # Return zero vector
-            return torch.zeros(self.d_model, device=self.device)
-
-        # Get embeddings using the embedding layer directly
-        with torch.no_grad():
-            # Clamp token IDs to valid range
-            filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
-            embeddings = self.token_embedding(filtered_tokens)
-
-        # Average embeddings across sequence length
-        mean_embedding = embeddings.mean(dim=0)
-        return mean_embedding
-
     def extract_windows_from_sequence(self, sequence, window_size=2304):
         """
         Split a tokenized sequence into individual windows
@@ -294,253 +262,6 @@ class EEGSimpleEvaluator:
                 windows.append(window)
 
         return windows
-
-    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10):
-        """
-        Evaluate few-shot learning at the window level
-
-        Args:
-            n_shots: Number of windows per class for support set
-            n_queries: Number of windows per class for query set
-            n_trials: Number of random trials to average over
-
-        Returns:
-            Average accuracy across trials
-        """
-        print(f"Running window-level few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
-
-        # Extract windows from all sequences
-        class_windows = {}
-        for class_name, sequences in self.class_data.items():
-            all_windows = []
-            for seq in sequences:
-                windows = self.extract_windows_from_sequence(seq)
-                all_windows.extend(windows)
-
-            class_windows[class_name] = all_windows
-            print(f"  - {class_name}: {len(all_windows)} windows extracted")
-
-        # Check if we have enough data and adjust parameters if needed
-        min_windows = min([len(windows) for windows in class_windows.values()])
-
-        if min_windows < n_shots + n_queries:
-            adjusted_n_shots = min(n_shots, min_windows // 2)
-            adjusted_n_queries = min(n_queries, min_windows - adjusted_n_shots)
-
-            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
-            print(f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
-
-            n_shots = adjusted_n_shots
-            n_queries = adjusted_n_queries
-
-        # Ensure we're using at least 1 query window
-        if n_queries < 1:
-            n_queries = 1
-            n_shots = min(n_shots, min_windows - 1)
-
-        accuracies = []
-
-        # Run multiple trials
-        for trial in range(n_trials):
-            # Prepare support and query sets
-            support_embeddings = []
-            support_labels = []
-            query_embeddings = []
-            query_labels = []
-
-            for class_idx, class_name in enumerate(class_windows.keys()):
-                windows = class_windows[class_name]
-
-                # Skip classes with insufficient windows
-                if len(windows) < n_shots + n_queries:
-                    continue
-
-                # Randomly select support and query windows
-                indices = np.random.permutation(len(windows))
-                support_indices = indices[:n_shots]
-                query_indices = indices[n_shots:n_shots + n_queries]
-
-                # Get embeddings for support set
-                for idx in support_indices:
-                    window = windows[idx].to(self.device)
-                    emb = self._extract_embeddings_from_tokens(window)
-                    support_embeddings.append(emb)
-                    support_labels.append(class_idx)
-
-                # Get embeddings for query set
-                for idx in query_indices:
-                    window = windows[idx].to(self.device)
-                    emb = self._extract_embeddings_from_tokens(window)
-                    query_embeddings.append(emb)
-                    query_labels.append(class_idx)
-
-            # Skip this trial if we don't have enough data
-            if not support_embeddings or not query_embeddings:
-                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
-                continue
-
-            # Stack embeddings and convert labels to tensors
-            support_embeddings = torch.stack(support_embeddings)
-            support_labels = torch.tensor(support_labels, device=self.device)
-            query_embeddings = torch.stack(query_embeddings)
-            query_labels = torch.tensor(query_labels, device=self.device)
-
-            # Perform nearest neighbor classification
-            correct = 0
-            total = len(query_labels)
-
-            for i, query_emb in enumerate(query_embeddings):
-                # Calculate distance to all support examples
-                distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
-
-                # Find k nearest neighbors (up to n_shots)
-                k = min(n_shots, len(support_labels))
-                _, indices = torch.topk(distances, k=k, largest=False)
-                nearest_labels = support_labels[indices]
-
-                # Majority vote
-                votes = torch.bincount(nearest_labels, minlength=len(class_windows))
-                predicted_label = torch.argmax(votes)
-
-                if predicted_label == query_labels[i]:
-                    correct += 1
-
-            # Calculate accuracy
-            accuracy = correct / total if total > 0 else 0
-            accuracies.append(accuracy)
-
-            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
-
-        # Handle case where all trials were skipped
-        if not accuracies:
-            print("No valid trials completed. Please check your dataset.")
-            return 0.0
-
-        avg_accuracy = np.mean(accuracies)
-        print(f"Window-level few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
-        return avg_accuracy
-
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10):
-        """
-        Evaluate few-shot learning performance using token embeddings directly
-
-        Args:
-            n_shots: Number of examples per class for support set
-            n_queries: Number of examples per class for query set
-            n_trials: Number of random trials to average over
-
-        Returns:
-            Average accuracy across trials
-        """
-        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
-
-        # Check if we have enough data and adjust parameters if needed
-        class_names = list(self.class_data.keys())
-        min_examples = min([len(self.class_data[cls]) for cls in class_names])
-
-        # We need at least 2 examples per class (1 for support, 1 for query)
-        if min_examples < 2:
-            print(f"Warning: Not enough examples for few-shot (min={min_examples}). Skipping evaluation.")
-            return 0.0
-
-        # Adjust n_shots and n_queries to fit available data
-        max_per_class = min_examples // 2
-        adjusted_n_shots = min(n_shots, max_per_class)
-        adjusted_n_queries = min(n_queries, min_examples - adjusted_n_shots)
-
-        if adjusted_n_shots != n_shots or adjusted_n_queries != n_queries:
-            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
-            print(
-                f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries instead of requested {n_shots}-shot with {n_queries} queries")
-            n_shots = adjusted_n_shots
-            n_queries = adjusted_n_queries
-
-        # Ensure we're using at least 1 query example
-        if n_queries < 1:
-            n_queries = 1
-            n_shots = min_examples - 1
-
-        accuracies = []
-
-        # Run multiple trials
-        for trial in range(n_trials):
-            # Prepare support and query sets
-            support_embeddings = []
-            support_labels = []
-            query_embeddings = []
-            query_labels = []
-
-            for class_idx, class_name in enumerate(class_names):
-                sequences = self.class_data[class_name]
-
-                # Skip classes with insufficient examples
-                if len(sequences) < n_shots + n_queries:
-                    continue
-
-                # Randomly select support and query examples
-                indices = np.random.permutation(len(sequences))
-                support_indices = indices[:n_shots]
-                query_indices = indices[n_shots:n_shots + n_queries]
-
-                # Get embeddings for support set
-                for idx in support_indices:
-                    seq = sequences[idx]
-                    emb = self._extract_embeddings_from_tokens(seq).cpu()
-                    support_embeddings.append(emb)
-                    support_labels.append(class_idx)
-
-                # Get embeddings for query set
-                for idx in query_indices:
-                    seq = sequences[idx]
-                    emb = self._extract_embeddings_from_tokens(seq).cpu()
-                    query_embeddings.append(emb)
-                    query_labels.append(class_idx)
-
-            # Skip this trial if we don't have enough data
-            if not support_embeddings or not query_embeddings:
-                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
-                continue
-
-            # Stack embeddings and convert labels to tensors
-            support_embeddings = torch.stack(support_embeddings)
-            support_labels = torch.tensor(support_labels, device=self.device)
-            query_embeddings = torch.stack(query_embeddings)
-            query_labels = torch.tensor(query_labels, device=self.device)
-
-            # Perform nearest neighbor classification
-            correct = 0
-            total = len(query_labels)
-
-            for i, query_emb in enumerate(query_embeddings):
-                # Calculate distance to all support examples
-                distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
-
-                # Find k nearest neighbors (up to n_shots)
-                k = min(n_shots, len(support_labels))
-                _, indices = torch.topk(distances, k=k, largest=False)
-                nearest_labels = support_labels[indices]
-
-                # Majority vote
-                votes = torch.bincount(nearest_labels, minlength=len(class_names))
-                predicted_label = torch.argmax(votes)
-
-                if predicted_label == query_labels[i]:
-                    correct += 1
-
-            # Calculate accuracy
-            accuracy = correct / total if total > 0 else 0
-            accuracies.append(accuracy)
-
-            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
-
-        # Handle case where all trials were skipped
-        if not accuracies:
-            print("No valid trials completed. Please check your dataset.")
-            return 0.0
-
-        avg_accuracy = np.mean(accuracies)
-        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
-        return avg_accuracy
 
     def evaluate_classifier(self, train_ratio=0.7, classifier_type="logistic"):
         """
@@ -759,10 +480,369 @@ class EEGSimpleEvaluator:
         plt.savefig(os.path.join(output_dir, f'accuracy_vs_epoch{suffix}.png'), dpi=300)
         plt.close()
 
-    # Helper methods to add to the EEGSimpleEvaluator class
+    def _extract_embeddings_from_tokens(self, tokens):
+        """
+        Extract embeddings directly from token IDs using the embedding layer
+        and move result to CPU to save GPU memory.
+
+        Args:
+            tokens: Token sequence tensor
+
+        Returns:
+            Mean token embedding vectors (on CPU)
+        """
+        # Make sure tokens are on the right device
+        tokens = tokens.to(self.device)
+
+        # Remove padding and EOS tokens for embedding extraction
+        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
+        filtered_tokens = tokens[mask]
+
+        # Skip empty sequences
+        if filtered_tokens.numel() == 0:
+            # Return zero vector on CPU
+            return torch.zeros(self.d_model, device="cpu")
+
+        # Get embeddings using the embedding layer directly
+        with torch.no_grad():
+            # Clamp token IDs to valid range
+            filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
+            embeddings = self.token_embedding(filtered_tokens)
+
+            # Average embeddings across sequence length
+            mean_embedding = embeddings.mean(dim=0)
+
+            # Move to CPU immediately to free GPU memory
+            return mean_embedding.cpu()
+
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=8):
+        """
+        Memory-optimized few-shot learning evaluation using token embeddings
+
+        Args:
+            n_shots: Number of examples per class for support set
+            n_queries: Number of examples per class for query set
+            n_trials: Number of random trials to average over
+            batch_size: Number of queries to process at once to save memory
+
+        Returns:
+            Average accuracy across trials
+        """
+        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+
+        # Check if we have enough data and adjust parameters if needed
+        class_names = list(self.class_data.keys())
+        min_examples = min([len(self.class_data[cls]) for cls in class_names])
+
+        # We need at least 2 examples per class (1 for support, 1 for query)
+        if min_examples < 2:
+            print(f"Warning: Not enough examples for few-shot (min={min_examples}). Skipping evaluation.")
+            return 0.0
+
+        # Adjust n_shots and n_queries to fit available data
+        max_per_class = min_examples // 2
+        adjusted_n_shots = min(n_shots, max_per_class)
+        adjusted_n_queries = min(n_queries, min_examples - adjusted_n_shots)
+
+        if adjusted_n_shots != n_shots or adjusted_n_queries != n_queries:
+            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
+            print(
+                f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries instead of requested {n_shots}-shot with {n_queries} queries")
+            n_shots = adjusted_n_shots
+            n_queries = adjusted_n_queries
+
+        # Ensure we're using at least 1 query example
+        if n_queries < 1:
+            n_queries = 1
+            n_shots = min_examples - 1
+
+        accuracies = []
+
+        # Run multiple trials
+        for trial in range(n_trials):
+            print(f"  Trial {trial + 1}/{n_trials}")
+
+            # Prepare support and query sets (on CPU)
+            support_embeddings = []
+            support_labels = []
+            query_embeddings = []
+            query_labels = []
+
+            for class_idx, class_name in enumerate(class_names):
+                sequences = self.class_data[class_name]
+
+                # Skip classes with insufficient examples
+                if len(sequences) < n_shots + n_queries:
+                    continue
+
+                # Randomly select support and query examples
+                indices = np.random.permutation(len(sequences))
+                support_indices = indices[:n_shots]
+                query_indices = indices[n_shots:n_shots + n_queries]
+
+                # Get embeddings for support set (move to CPU)
+                for idx in support_indices:
+                    seq = sequences[idx]
+                    # Embedding already comes back on CPU from modified method
+                    emb = self._extract_embeddings_from_tokens(seq)
+                    support_embeddings.append(emb)
+                    support_labels.append(class_idx)
+
+                # Get embeddings for query set (move to CPU)
+                for idx in query_indices:
+                    seq = sequences[idx]
+                    # Embedding already comes back on CPU from modified method
+                    emb = self._extract_embeddings_from_tokens(seq)
+                    query_embeddings.append(emb)
+                    query_labels.append(class_idx)
+
+                # Clear CUDA cache periodically to free memory
+                if len(query_embeddings) % 50 == 0:
+                    torch.cuda.empty_cache()
+
+            # Skip this trial if we don't have enough data
+            if not support_embeddings or not query_embeddings:
+                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
+                continue
+
+            # Stack embeddings and convert labels to tensors (all on CPU)
+            support_tensor = torch.stack(support_embeddings)
+            support_labels_tensor = torch.tensor(support_labels)
+
+            # Process query samples in smaller batches to save memory
+            correct = 0
+            total = len(query_embeddings)
+
+            # Process in batches to save memory
+            for i in range(0, len(query_embeddings), batch_size):
+                batch_end = min(i + batch_size, len(query_embeddings))
+                batch_queries = query_embeddings[i:batch_end]
+                batch_labels = query_labels[i:batch_end]
+
+                batch_correct = 0
+
+                # Process one query at a time
+                for j, query_emb in enumerate(batch_queries):
+                    # Move single query to GPU for faster computation
+                    query_emb_gpu = query_emb.to(self.device)
+                    support_tensor_gpu = support_tensor.to(self.device)
+
+                    # Calculate distances
+                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
+
+                    # Find k nearest neighbors (up to n_shots)
+                    k = min(n_shots, len(support_labels))
+                    _, indices = torch.topk(distances, k=k, largest=False)
+
+                    # Calculate votes on CPU
+                    indices_cpu = indices.cpu()
+                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+
+                    votes = torch.bincount(nearest_labels, minlength=len(class_names))
+                    predicted_label = torch.argmax(votes).item()
+
+                    if predicted_label == batch_labels[j]:
+                        batch_correct += 1
+
+                    # Free GPU memory
+                    del query_emb_gpu, support_tensor_gpu, distances, indices
+                    torch.cuda.empty_cache()
+
+                correct += batch_correct
+
+            # Calculate accuracy
+            accuracy = correct / total if total > 0 else 0
+            accuracies.append(accuracy)
+
+            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+            # Clear all stored tensors to free memory
+            del support_embeddings, support_labels, query_embeddings, query_labels
+            del support_tensor, support_labels_tensor
+            torch.cuda.empty_cache()
+
+        # Handle case where all trials were skipped
+        if not accuracies:
+            print("No valid trials completed. Please check your dataset.")
+            return 0.0
+
+        avg_accuracy = np.mean(accuracies)
+        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
+        return avg_accuracy
+
+    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10, batch_size=8):
+        """
+        Memory-optimized window-level few-shot evaluation
+
+        Args:
+            n_shots: Number of windows per class for support set
+            n_queries: Number of windows per class for query set
+            n_trials: Number of random trials to average over
+            batch_size: Number of queries to process at once to save memory
+
+        Returns:
+            Average accuracy across trials
+        """
+        print(f"Running window-level few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+
+        # Extract windows from all sequences
+        class_windows = {}
+
+        # Process one class at a time to save memory
+        for class_name, sequences in self.class_data.items():
+            all_windows = []
+            for seq in sequences:
+                windows = self.extract_windows_from_sequence(seq)
+                all_windows.extend(windows)
+
+                # Periodically free memory
+                if len(all_windows) % 100 == 0:
+                    torch.cuda.empty_cache()
+
+            class_windows[class_name] = all_windows
+            print(f"  - {class_name}: {len(all_windows)} windows extracted")
+            torch.cuda.empty_cache()  # Clear cache after processing each class
+
+        # Check if we have enough data and adjust parameters if needed
+        min_windows = min([len(windows) for windows in class_windows.values()])
+
+        if min_windows < n_shots + n_queries:
+            adjusted_n_shots = min(n_shots, min_windows // 2)
+            adjusted_n_queries = min(n_queries, min_windows - adjusted_n_shots)
+
+            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
+            print(f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
+
+            n_shots = adjusted_n_shots
+            n_queries = adjusted_n_queries
+
+        # Ensure we're using at least 1 query window
+        if n_queries < 1:
+            n_queries = 1
+            n_shots = min(n_shots, min_windows - 1)
+
+        accuracies = []
+
+        # Run multiple trials
+        for trial in range(n_trials):
+            print(f"  Trial {trial + 1}/{n_trials}")
+
+            # Prepare support and query sets (on CPU)
+            support_embeddings = []
+            support_labels = []
+            query_embeddings = []
+            query_labels = []
+
+            for class_idx, class_name in enumerate(class_windows.keys()):
+                windows = class_windows[class_name]
+
+                # Skip classes with insufficient windows
+                if len(windows) < n_shots + n_queries:
+                    continue
+
+                # Randomly select support and query windows
+                indices = np.random.permutation(len(windows))
+                support_indices = indices[:n_shots]
+                query_indices = indices[n_shots:n_shots + n_queries]
+
+                # Get embeddings for support set
+                for idx in support_indices:
+                    window = windows[idx].to(self.device)
+                    # This returns CPU tensor with optimized method
+                    emb = self._extract_embeddings_from_tokens(window)
+                    support_embeddings.append(emb)
+                    support_labels.append(class_idx)
+                    # Free GPU memory
+                    del window
+
+                # Get embeddings for query set
+                for idx in query_indices:
+                    window = windows[idx].to(self.device)
+                    # This returns CPU tensor with optimized method
+                    emb = self._extract_embeddings_from_tokens(window)
+                    query_embeddings.append(emb)
+                    query_labels.append(class_idx)
+                    # Free GPU memory
+                    del window
+
+                # Periodically clear cache
+                torch.cuda.empty_cache()
+
+            # Skip this trial if we don't have enough data
+            if not support_embeddings or not query_embeddings:
+                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
+                continue
+
+            # Stack embeddings (on CPU)
+            support_tensor = torch.stack(support_embeddings)
+            support_labels_tensor = torch.tensor(support_labels)
+
+            # Process in batches
+            correct = 0
+            total = len(query_embeddings)
+
+            # Process query samples in batches
+            for i in range(0, len(query_embeddings), batch_size):
+                batch_end = min(i + batch_size, len(query_embeddings))
+                batch_queries = query_embeddings[i:batch_end]
+                batch_labels = query_labels[i:batch_end]
+
+                batch_correct = 0
+
+                # Process one query at a time
+                for j, query_emb in enumerate(batch_queries):
+                    # Move to GPU for computation
+                    query_emb_gpu = query_emb.to(self.device)
+                    support_tensor_gpu = support_tensor.to(self.device)
+
+                    # Calculate distance to all support examples
+                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
+
+                    # Find k nearest neighbors (up to n_shots)
+                    k = min(n_shots, len(support_labels))
+                    _, indices = torch.topk(distances, k=k, largest=False)
+
+                    # Get nearest labels (back on CPU)
+                    indices_cpu = indices.cpu()
+                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+
+                    # Majority vote
+                    votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+                    predicted_label = torch.argmax(votes).item()
+
+                    if predicted_label == batch_labels[j]:
+                        batch_correct += 1
+
+                    # Free GPU memory
+                    del query_emb_gpu, support_tensor_gpu, distances, indices
+                    torch.cuda.empty_cache()
+
+                correct += batch_correct
+
+            # Calculate accuracy
+            accuracy = correct / total if total > 0 else 0
+            accuracies.append(accuracy)
+
+            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+            # Clean up memory
+            del support_embeddings, support_labels, query_embeddings, query_labels
+            del support_tensor, support_labels_tensor
+            torch.cuda.empty_cache()
+
+        # Handle case where all trials were skipped
+        if not accuracies:
+            print("No valid trials completed. Please check your dataset.")
+            return 0.0
+
+        avg_accuracy = np.mean(accuracies)
+        print(f"Window-level few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
+        return avg_accuracy
+
+    # Also update these helper methods for consistency
     def _run_single_few_shot_trial(self, n_shots=1, n_queries=1):
-        """Run a single few-shot trial and return accuracy"""
-        # Prepare support and query sets
+        """Run a single few-shot trial and return accuracy (memory optimized)"""
+        # Prepare support and query sets (on CPU)
         support_embeddings = []
         support_labels = []
         query_embeddings = []
@@ -781,17 +861,17 @@ class EEGSimpleEvaluator:
             support_indices = indices[:n_shots]
             query_indices = indices[n_shots:n_shots + n_queries]
 
-            # Get embeddings for support set
+            # Get embeddings for support set (already on CPU from modified method)
             for idx in support_indices:
                 seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq).cpu()
+                emb = self._extract_embeddings_from_tokens(seq)
                 support_embeddings.append(emb)
                 support_labels.append(class_idx)
 
-            # Get embeddings for query set
+            # Get embeddings for query set (already on CPU from modified method)
             for idx in query_indices:
                 seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq).cpu()
+                emb = self._extract_embeddings_from_tokens(seq)
                 query_embeddings.append(emb)
                 query_labels.append(class_idx)
 
@@ -799,38 +879,50 @@ class EEGSimpleEvaluator:
         if not support_embeddings or not query_embeddings:
             return None
 
-        # Stack embeddings and convert labels to tensors
-        support_embeddings = torch.stack(support_embeddings)
-        support_labels = torch.tensor(support_labels, device=self.device)
-        query_embeddings = torch.stack(query_embeddings)
-        query_labels = torch.tensor(query_labels, device=self.device)
+        # Stack embeddings on CPU
+        support_tensor = torch.stack(support_embeddings)
+        support_labels_tensor = torch.tensor(support_labels)
 
-        # Perform nearest neighbor classification
+        # Process one query at a time to save memory
         correct = 0
-        total = len(query_labels)
+        total = len(query_embeddings)
 
         for i, query_emb in enumerate(query_embeddings):
-            # Calculate distance to all support examples
-            distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+            # Move tensors to GPU for distance calculation
+            query_gpu = query_emb.to(self.device)
+            support_gpu = support_tensor.to(self.device)
 
-            # Find k nearest neighbors (up to n_shots)
+            # Calculate distance
+            distances = torch.norm(support_gpu - query_gpu.unsqueeze(0), dim=1)
+
+            # Find k nearest neighbors
             k = min(n_shots, len(support_labels))
             _, indices = torch.topk(distances, k=k, largest=False)
-            nearest_labels = support_labels[indices]
 
-            # Majority vote
+            # Get majority vote (on CPU)
+            nearest_labels = torch.tensor([support_labels[idx] for idx in indices.cpu()])
             votes = torch.bincount(nearest_labels, minlength=len(class_names))
-            predicted_label = torch.argmax(votes)
+            predicted_label = torch.argmax(votes).item()
 
             if predicted_label == query_labels[i]:
                 correct += 1
 
+            # Free GPU memory
+            del query_gpu, support_gpu, distances, indices
+            torch.cuda.empty_cache()
+
         # Calculate accuracy
         accuracy = correct / total if total > 0 else 0
+
+        # Clean up
+        del support_embeddings, support_labels, query_embeddings, query_labels
+        del support_tensor, support_labels_tensor
+        torch.cuda.empty_cache()
+
         return accuracy
 
     def _run_single_window_few_shot_trial(self, n_shots=1, n_queries=1):
-        """Run a single window-level few-shot trial and return accuracy"""
+        """Run a single window-level few-shot trial and return accuracy (memory optimized)"""
         # Extract windows from all sequences (if not already done)
         class_windows = {}
         for class_name, sequences in self.class_data.items():
@@ -839,9 +931,15 @@ class EEGSimpleEvaluator:
                 windows = self.extract_windows_from_sequence(seq)
                 all_windows.extend(windows)
 
-            class_windows[class_name] = all_windows
+                # Free memory periodically
+                if len(all_windows) % 100 == 0:
+                    torch.cuda.empty_cache()
 
-        # Prepare support and query sets
+            class_windows[class_name] = all_windows
+            # Free memory after processing each class
+            torch.cuda.empty_cache()
+
+        # Prepare support and query sets (on CPU)
         support_embeddings = []
         support_labels = []
         query_embeddings = []
@@ -862,49 +960,72 @@ class EEGSimpleEvaluator:
             # Get embeddings for support set
             for idx in support_indices:
                 window = windows[idx].to(self.device)
+                # This returns a CPU tensor with optimized method
                 emb = self._extract_embeddings_from_tokens(window)
                 support_embeddings.append(emb)
                 support_labels.append(class_idx)
+                # Free GPU memory
+                del window
 
             # Get embeddings for query set
             for idx in query_indices:
                 window = windows[idx].to(self.device)
+                # This returns a CPU tensor with optimized method
                 emb = self._extract_embeddings_from_tokens(window)
                 query_embeddings.append(emb)
                 query_labels.append(class_idx)
+                # Free GPU memory
+                del window
+
+            # Free memory after processing each class
+            torch.cuda.empty_cache()
 
         # Skip this trial if we don't have enough data
         if not support_embeddings or not query_embeddings:
             return None
 
-        # Stack embeddings and convert labels to tensors
-        support_embeddings = torch.stack(support_embeddings)
-        support_labels = torch.tensor(support_labels, device=self.device)
-        query_embeddings = torch.stack(query_embeddings)
-        query_labels = torch.tensor(query_labels, device=self.device)
+        # Stack embeddings and keep on CPU
+        support_tensor = torch.stack(support_embeddings)
 
-        # Perform nearest neighbor classification
+        # Process one query at a time to save memory
         correct = 0
-        total = len(query_labels)
+        total = len(query_embeddings)
 
         for i, query_emb in enumerate(query_embeddings):
-            # Calculate distance to all support examples
-            distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
+            # Move to GPU for faster distance calculation
+            query_gpu = query_emb.to(self.device)
+            support_gpu = support_tensor.to(self.device)
+
+            # Calculate distances
+            distances = torch.norm(support_gpu - query_gpu.unsqueeze(0), dim=1)
 
             # Find k nearest neighbors (up to n_shots)
             k = min(n_shots, len(support_labels))
             _, indices = torch.topk(distances, k=k, largest=False)
-            nearest_labels = support_labels[indices]
+
+            # Process the results on CPU
+            indices_cpu = indices.cpu()
+            nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
 
             # Majority vote
             votes = torch.bincount(nearest_labels, minlength=len(class_windows))
-            predicted_label = torch.argmax(votes)
+            predicted_label = torch.argmax(votes).item()
 
             if predicted_label == query_labels[i]:
                 correct += 1
 
+            # Free GPU memory
+            del query_gpu, support_gpu, distances, indices
+            torch.cuda.empty_cache()
+
         # Calculate accuracy
         accuracy = correct / total if total > 0 else 0
+
+        # Clean up
+        del support_embeddings, support_labels, query_embeddings, query_labels
+        del support_tensor
+        torch.cuda.empty_cache()
+
         return accuracy
 
 
@@ -984,7 +1105,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             n_layers=evaluator.n_layers,
             max_windows=evaluator.max_windows,
             pad_token_id=evaluator.pad_token_id
-        ).to('cpu')
+        ).to(evaluator.device)
 
         # Explicitly reinitialize all weights randomly
         def init_weights(m):
@@ -1191,7 +1312,7 @@ def main():
         output_dir=args.output_dir,
         n_shots=args.n_shots,
         n_trials=20,  # You can adjust the number of trials
-        include_random_model=False  # Notice the "not" here
+        include_random_model=not args.skip_random_model  # Notice the "not" here
     )
     print("Evaluation complete!")
 
