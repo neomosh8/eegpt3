@@ -1045,7 +1045,7 @@ class EEGSimpleEvaluator:
 
         if is_full_sequence:
             # For full sequences, extract windows and process each window
-            print(f"Processing full sequence with {tokens.numel()} tokens")
+            # print(f"Processing full sequence with {tokens.numel()} tokens")
             windows = self.extract_windows_from_sequence(tokens)
 
             if not windows:
@@ -1085,7 +1085,7 @@ class EEGSimpleEvaluator:
             return torch.zeros(self.d_model, device="cpu")
 
         # Print diagnostic info
-        print(f"Processing window tokens: {filtered_tokens.numel()}")
+        # print(f"Processing window tokens: {filtered_tokens.numel()}")
 
         # Clamp token IDs to valid range
         filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
@@ -1124,7 +1124,7 @@ class EEGSimpleEvaluator:
 
         if is_full_sequence:
             # For full sequences, extract windows and process each window
-            print(f"Processing full sequence with {tokens.numel()} tokens")
+            # print(f"Processing full sequence with {tokens.numel()} tokens")
             windows = self.extract_windows_from_sequence(tokens)
 
             if not windows:
@@ -1156,7 +1156,7 @@ class EEGSimpleEvaluator:
             return torch.zeros(self.d_model, device="cpu")
 
         # Print diagnostic info
-        print(f"Processing window with {filtered_tokens.numel()} tokens")
+        # print(f"Processing window with {filtered_tokens.numel()} tokens")
 
         # Clamp token IDs to valid range
         filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
