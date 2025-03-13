@@ -1193,9 +1193,9 @@ if __name__ == "__main__":
                         help="Size of the VQVAE codebook")
     parser.add_argument("--window_size", type=int, default=2304,
                         help="Size of each EEG window (72x32)")
-    parser.add_argument("--d_model", type=int, default=768,
+    parser.add_argument("--d_model", type=int, default=360,
                         help="Hidden dimension of the model")
-    parser.add_argument("--n_heads", type=int, default=12,
+    parser.add_argument("--n_heads", type=int, default=6,
                         help="Number of attention heads")
     parser.add_argument("--n_layers", type=int, default=6,
                         help="Number of transformer layers")
