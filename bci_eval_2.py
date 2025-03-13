@@ -1738,7 +1738,7 @@ def main():
         evaluator,
         output_dir=args.output_dir,
         n_shots=args.n_shots,
-        n_trials=20,  # You can adjust the number of trials
+        n_trials=100,  # You can adjust the number of trials
         include_random_model=not args.skip_random_model  # Notice the "not" here
     )
 
