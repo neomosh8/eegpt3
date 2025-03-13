@@ -980,55 +980,6 @@ class EEGSimpleEvaluator:
 
         return accuracy
 
-    def extract_windows_from_sequence(self, sequence, window_size=2304):
-        """
-        Extract properly sized windows from a sequence, ensuring exact window size
-
-        Args:
-            sequence: The full token sequence tensor
-            window_size: Size of each window (default: 2304 tokens)
-
-        Returns:
-            List of window token tensors, each of EXACTLY window_size
-        """
-        # Move to CPU for memory efficiency
-        sequence = sequence.to("cpu")
-
-        # Remove EOS token if present
-        if sequence[-1] == self.eos_token_id:
-            sequence = sequence[:-1]
-
-        # Find all pad tokens (which separate windows)
-        pad_positions = (sequence == self.pad_token_id).nonzero(as_tuple=True)[0]
-
-        windows = []
-        start_idx = 0
-
-        # Extract windows based on pad positions
-        for pad_pos in pad_positions:
-            window = sequence[start_idx:pad_pos]
-
-            # Only add windows of EXACT window_size
-            if len(window) == window_size:
-                windows.append(window)
-            elif len(window) != 0:
-                print(f"Skipping window of size {len(window)} (expected {window_size})")
-
-            # Next window starts after this pad
-            start_idx = pad_pos + 1
-
-        # Add the last window if there's data after the last pad
-        if start_idx < len(sequence):
-            window = sequence[start_idx:]
-            if len(window) == window_size:
-                windows.append(window)
-            elif len(window) != 0:
-                print(f"Skipping final window of size {len(window)} (expected {window_size})")
-
-        # print(
-            # f"Extracted {len(windows)} complete windows of size {window_size} from sequence of length {len(sequence)}")
-        return windows
-
     def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
         """
         Extract embeddings from a single window or process a sequence into windows
@@ -1196,89 +1147,6 @@ class EEGSimpleEvaluator:
 
                 # Fallback to empty embedding
                 return torch.zeros(self.d_model, device="cpu")
-
-    def _extract_hierarchical_embeddings(self, tokens, layer_depth=2):
-        """
-        Extract embeddings using the hierarchical structure of the model
-
-        Args:
-            tokens: Token sequence or window
-            layer_depth: How many transformer layers to use (0 = just embeddings)
-
-        Returns:
-            Contextualized embedding vector
-        """
-        # First, check if this is a single window or a sequence with multiple windows
-        is_full_sequence = tokens.numel() > 3000  # Windows should be 2304 tokens
-
-        if is_full_sequence:
-            # For full sequences, extract windows and process each window
-            print(f"Processing full sequence with {tokens.numel()} tokens")
-            windows = self.extract_windows_from_sequence(tokens)
-
-            if not windows:
-                print("No valid windows found in sequence")
-                return torch.zeros(self.model.d_model, device="cpu")
-
-            # Process each window and average the embeddings
-            window_embeddings = []
-            for window in windows:
-                if len(window) != self.window_size:
-                    print(f"Skipping window of size {len(window)}")
-                    continue
-
-                # Process each window
-                emb = self._extract_hierarchical_embeddings(window, layer_depth)
-                window_embeddings.append(emb)
-
-            # Average all window embeddings
-            if window_embeddings:
-                return torch.stack(window_embeddings).mean(dim=0)
-            else:
-                return torch.zeros(self.model.d_model, device="cpu")
-
-        # From here on, we're processing a single window
-        batch_size = 1
-        window_size = tokens.shape[0]
-
-        if window_size != self.window_size:
-            print(f"Warning: Window size {window_size} != expected {self.window_size}")
-
-        # Move to device
-        tokens = tokens.to(self.device)
-
-        # Prepare input format: sequence with 1 window and no pads
-        tokens = tokens.unsqueeze(0)  # Add batch dimension
-
-        with torch.no_grad():
-            try:
-                # Get token embeddings
-                embedded = self.model.token_embedding(tokens)  # [B, W, D]
-
-                # Add positional encodings - follow the model's own logic
-                # 1. Window-level position (we have one window at position 0)
-                embedded = embedded + self.model.window_pos_embed[:, 0:1, :].transpose(1, 2)
-
-                # 2. Token-level positions
-                embedded = embedded + self.model.token_pos_embed[:, :window_size, :]
-
-                # Apply transformer layers up to layer_depth
-                x = embedded
-                for i in range(min(layer_depth, len(self.model.layers))):
-                    x = self.model.layers[i](x)
-
-                # Apply normalization
-                if layer_depth > 0:
-                    x = self.model.norm(x)
-
-                # Mean over the token dimension to get a single vector per window
-                mean_embedding = x.mean(dim=1).squeeze(0)
-
-                return mean_embedding.cpu()
-
-            except RuntimeError as e:
-                print(f"Error processing window: {str(e)}")
-                return torch.zeros(self.model.d_model, device="cpu")
 
     def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=2):
         """
@@ -1713,6 +1581,163 @@ class EEGSimpleEvaluator:
         plt.savefig(f"evaluation_results/depth_comparison_{n_shots}shot.png", dpi=300)
         plt.close()
 
+    def _extract_hierarchical_embeddings(self, tokens, layer_depth=2):
+        """
+        Extract embeddings using the hierarchical structure of the model
+        with proper tensor shape handling
+
+        Args:
+            tokens: Token sequence or window
+            layer_depth: How many transformer layers to use (0 = just embeddings)
+
+        Returns:
+            Contextualized embedding vector
+        """
+        # First, check if this is a single window or a sequence with multiple windows
+        is_full_sequence = tokens.numel() > 3000  # Windows should be 2304 tokens
+
+        if is_full_sequence:
+            # For full sequences, extract windows and process each window
+            print(f"Processing full sequence with {tokens.numel()} tokens")
+            windows = self.extract_windows_from_sequence(tokens)
+
+            if not windows:
+                print("No valid windows found in sequence")
+                return torch.zeros(self.d_model, device="cpu")
+
+            # Process each window and average the embeddings
+            window_embeddings = []
+            for window in windows:
+                if len(window) != self.window_size:
+                    print(f"Skipping window of size {len(window)}")
+                    continue
+
+                # Process each window
+                emb = self._extract_hierarchical_embeddings(window, layer_depth)
+                window_embeddings.append(emb)
+
+            # Average all window embeddings
+            if window_embeddings:
+                return torch.stack(window_embeddings).mean(dim=0)
+            else:
+                return torch.zeros(self.d_model, device="cpu")
+
+        # From here on, we're processing a single window
+        batch_size = 1
+        num_windows = 1
+        window_size = self.window_size
+
+        # Match expected window size
+        if tokens.numel() != self.window_size:
+            print(f"Warning: Window size {tokens.numel()} != expected {self.window_size}")
+            # Pad or truncate to match window_size
+            if tokens.numel() < self.window_size:
+                padding = torch.zeros(self.window_size - tokens.numel(), device=tokens.device, dtype=tokens.dtype)
+                tokens = torch.cat([tokens, padding])
+            else:
+                tokens = tokens[:self.window_size]
+
+        # Move to device and reshape for proper processing
+        tokens = tokens.to(self.device).unsqueeze(0)  # [1, window_size]
+
+        with torch.no_grad():
+            try:
+                # Get token embeddings
+                embedded = self.model.token_embedding(tokens)  # [1, window_size, d_model]
+
+                # Reshape to match the model's expected format: [batch, num_windows, window_size, d_model]
+                embedded = embedded.view(batch_size, num_windows, window_size, self.d_model)
+
+                # Add positional encodings (properly matching dimensions)
+                # 1. Window-level positions
+                embedded = embedded + self.model.window_pos_embed[:, :num_windows, :].unsqueeze(2)
+
+                # 2. Token-level positions
+                embedded = embedded + self.model.token_pos_embed[:, :window_size, :].unsqueeze(1)
+
+                # Reshape back to sequence form for transformer processing
+                embedded = embedded.view(batch_size, num_windows * window_size, self.d_model)
+
+                # If we're only using embeddings, skip the transformer layers
+                if layer_depth == 0:
+                    # Just take mean of embeddings
+                    mean_embedding = embedded.mean(dim=1).squeeze(0)
+                    return mean_embedding.cpu()
+
+                # Create attention mask if needed by the model
+                mask = None
+                if hasattr(self.model, '_create_hierarchical_mask'):
+                    mask = self.model._create_hierarchical_mask(batch_size, num_windows, self.device)
+
+                # Apply transformer layers up to layer_depth
+                x = embedded
+                for i in range(min(layer_depth, len(self.model.layers))):
+                    if mask is not None:
+                        x = self.model.layers[i](x, mask)
+                    else:
+                        x = self.model.layers[i](x)
+
+                # Apply normalization
+                if hasattr(self.model, 'norm'):
+                    x = self.model.norm(x)
+
+                # Mean over the token dimension to get a single vector
+                mean_embedding = x.mean(dim=1).squeeze(0)
+
+                return mean_embedding.cpu()
+
+            except RuntimeError as e:
+                print(f"Error processing window: {str(e)}")
+                traceback.print_exc()  # Print full traceback for debugging
+                return torch.zeros(self.d_model, device="cpu")
+
+    def extract_windows_from_sequence(self, sequence, window_size=2304):
+        """
+        Extract windows from sequences with proper checks
+
+        Args:
+            sequence: Token sequence tensor
+            window_size: Expected window size (default: 2304)
+
+        Returns:
+            List of window token tensors
+        """
+        # Ensure we're working with CPU tensors for memory efficiency
+        sequence = sequence.to("cpu")
+
+        # Remove EOS token if present
+        if sequence.numel() > 0 and sequence[-1] == self.eos_token_id:
+            sequence = sequence[:-1]
+
+        # Find all pad tokens (which separate windows)
+        pad_positions = (sequence == self.pad_token_id).nonzero(as_tuple=True)[0]
+
+        windows = []
+        start_idx = 0
+
+        # Extract windows based on pad positions
+        for pad_pos in pad_positions:
+            window = sequence[start_idx:pad_pos]
+
+            # Only add windows of expected size
+            if len(window) == window_size:
+                windows.append(window)
+            elif len(window) > 0:
+                print(f"Skipping window of size {len(window)} (expected {window_size})")
+
+            # Next window starts after this pad
+            start_idx = pad_pos + 1
+
+        # Add the last window if there's data after the last pad
+        if start_idx < len(sequence):
+            window = sequence[start_idx:]
+            if len(window) == window_size:
+                windows.append(window)
+            elif len(window) > 0:
+                print(f"Skipping final window of size {len(window)} (expected {window_size})")
+
+        print(f"Extracted {len(windows)} complete windows from sequence of length {len(sequence)}")
+        return windows
 import matplotlib.pyplot as plt
 import numpy as np
 import os
