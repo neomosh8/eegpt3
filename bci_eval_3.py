@@ -1615,7 +1615,7 @@ if __name__ == "__main__":
     )
 
     # Load checkpoint
-    # evaluator.load_checkpoint()
+    evaluator.load_checkpoint()
 
     # Check available number of classes
     available_classes = len(evaluator.dataloader.class_names)
