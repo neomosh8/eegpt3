@@ -564,6 +564,143 @@ class EEGTransformerEvaluationDataLoader:
             'n_shot': n_shot
         }
 
+    def get_multiwindow_sequences(self, file_path, window_count=4):
+        """
+        Load consecutive window sequences from a file.
+
+        Args:
+            file_path (str): Path to tokenized EEG file
+            window_count (int): Number of consecutive windows to group together
+
+        Returns:
+            list: List of multi-window sequences as tensors
+        """
+        # Check if the file's windows are already cached
+        if file_path not in self.window_cache:
+            self.load_windows_from_file(file_path)
+
+        # Get individual windows from cache
+        windows = self.window_cache[file_path]
+
+        if len(windows) < window_count:
+            return []  # Not enough windows in this file
+
+        # Group consecutive windows into sequences
+        sequences = []
+
+        for i in range(len(windows) - window_count + 1):
+            # Get window_count consecutive windows
+            consecutive_windows = windows[i:i + window_count]
+
+            # Create a sequence by concatenating windows with pad tokens in between
+            sequence = consecutive_windows[0]
+
+            for window in consecutive_windows[1:]:
+                # Add pad token between windows
+                pad_token = torch.tensor([self.pad_token_id], device=sequence.device)
+                sequence = torch.cat([sequence, pad_token, window])
+
+            sequences.append(sequence)
+
+        return sequences
+
+    def get_multiwindow_few_shot_batch(self, n_way, n_shot, n_query, window_count=4):
+        """
+        Create a few-shot batch with multi-window sequences for evaluation.
+
+        Args:
+            n_way (int): Number of classes to discriminate between
+            n_shot (int): Number of examples per class for support set
+            n_query (int): Number of examples per class for query set
+            window_count (int): Number of consecutive windows per example
+
+        Returns:
+            dict: Dictionary containing support and query sets with labels
+        """
+        # Make sure we have enough classes
+        if n_way > len(self.class_names):
+            raise ValueError(f"Requested {n_way}-way task but only have {len(self.class_names)} classes")
+
+        # Select n_way classes randomly
+        selected_classes = random.sample(self.class_names, n_way)
+
+        support_sequences = []
+        support_labels = []
+        query_sequences = []
+        query_labels = []
+
+        for class_idx, class_name in enumerate(selected_classes):
+            class_files = self.files_by_class[class_name]
+
+            # Need at least n_shot + n_query sequences for this class
+            all_sequences = []
+
+            # Load sequences until we have enough
+            random.shuffle(class_files)
+            for file_path in class_files:
+                if len(all_sequences) >= n_shot + n_query:
+                    break
+
+                file_sequences = self.get_multiwindow_sequences(file_path, window_count)
+                all_sequences.extend(file_sequences)
+
+            # If we still don't have enough sequences, try to collect more from all files
+            if len(all_sequences) < n_shot + n_query:
+                for file_path in class_files:
+                    if file_path not in [f for f in class_files[:class_files.index(file_path)]]:
+                        file_sequences = self.get_multiwindow_sequences(file_path, window_count)
+                        all_sequences.extend(file_sequences)
+                        if len(all_sequences) >= n_shot + n_query:
+                            break
+
+            # If after trying all files, we still don't have enough, repeat some
+            if len(all_sequences) < n_shot + n_query:
+                if len(all_sequences) == 0:
+                    print(f"Warning: No multi-window sequences found for class {class_name}. Skipping this class.")
+                    continue
+                all_sequences = all_sequences * ((n_shot + n_query) // len(all_sequences) + 1)
+
+            # Shuffle the sequences
+            random.shuffle(all_sequences)
+
+            # Select support and query sets
+            support_sequences.extend(all_sequences[:n_shot])
+            support_labels.extend([class_idx] * n_shot)
+
+            query_sequences.extend(all_sequences[n_shot:n_shot + n_query])
+            query_labels.extend([class_idx] * n_query)
+
+        # Make sure we have balanced classes
+        classes_found = len(set(support_labels))
+        if classes_found < n_way:
+            print(f"Warning: Only found sequences for {classes_found}/{n_way} classes")
+
+        # Convert sequences to the format expected by the model
+        # (adding a final pad token and batch dimension)
+        support_formatted = []
+        for seq in support_sequences:
+            # Add a final pad token
+            pad_token = torch.tensor([self.pad_token_id], device=seq.device)
+            seq_with_pad = torch.cat([seq, pad_token])
+            support_formatted.append(seq_with_pad.unsqueeze(0))  # Add batch dimension
+
+        query_formatted = []
+        for seq in query_sequences:
+            pad_token = torch.tensor([self.pad_token_id], device=seq.device)
+            seq_with_pad = torch.cat([seq, pad_token])
+            query_formatted.append(seq_with_pad.unsqueeze(0))
+
+        return {
+            'support_windows': support_formatted,
+            'support_labels': torch.tensor(support_labels),
+            'query_windows': query_formatted,
+            'query_labels': torch.tensor(query_labels),
+            'class_names': [selected_classes[i] for i in range(classes_found)],
+            'n_way': classes_found,
+            'n_shot': n_shot,
+            'window_count': window_count
+        }
+
 
 import os
 import json
@@ -999,6 +1136,153 @@ class EEGSimpleEvaluator:
 
         return mean_accuracy
 
+    def evaluate_multiwindow_few_shot(self, n_way=2, n_shot=5, n_query=5, window_count=4, n_trials=10, verbose=True):
+        """
+        Evaluate few-shot learning performance using multi-window sequences.
+
+        Args:
+            n_way (int): Number of classes to discriminate between
+            n_shot (int): Number of examples per class for support set
+            n_query (int): Number of examples per class for query set
+            window_count (int): Number of consecutive windows per example
+            n_trials (int): Number of random trials to run
+            verbose (bool): Whether to print detailed results
+
+        Returns:
+            float: Average accuracy across trials
+        """
+        # Make sure model is loaded
+        if not hasattr(self, 'model') or self.model is None:
+            if not self.load_checkpoint():
+                raise ValueError("No model loaded and no checkpoint found")
+
+        self.model.eval()
+
+        accuracies = []
+        actual_n_way_values = []
+
+        for trial in tqdm(range(n_trials), desc=f"Evaluating {n_way}-way {n_shot}-shot with {window_count} windows"):
+            # Get a few-shot batch with multi-window sequences
+            batch = self.dataloader.get_multiwindow_few_shot_batch(n_way, n_shot, n_query, window_count)
+
+            # Skip if we couldn't get a valid batch
+            if len(batch['support_windows']) == 0 or len(batch['query_windows']) == 0:
+                print(f"Skipping trial {trial + 1} - couldn't get valid batch")
+                continue
+
+            # Record the actual n_way (might be less than requested if some classes have no sequences)
+            actual_n_way = batch['n_way']
+            actual_n_way_values.append(actual_n_way)
+
+            # Extract representations for support set
+            support_reps = []
+            for seq in batch['support_windows']:
+                # We need to extract a single representation from the multi-window sequence
+                # Using the representation of the last token before the final pad token
+                rep = self._get_sequence_representation(seq)
+                support_reps.append(rep)
+            support_reps = torch.stack(support_reps)
+
+            # Extract representations for query set
+            query_reps = []
+            for seq in batch['query_windows']:
+                rep = self._get_sequence_representation(seq)
+                query_reps.append(rep)
+            query_reps = torch.stack(query_reps)
+
+            # Compute prototypes for each class (mean of support examples)
+            prototypes = torch.zeros(actual_n_way, support_reps.shape[1], device=self.device)
+            for c in range(actual_n_way):
+                # Get all support representations for this class
+                class_mask = (batch['support_labels'] == c)
+                class_reps = support_reps[class_mask]
+                # Compute prototype as mean
+                if len(class_reps) > 0:
+                    prototypes[c] = class_reps.mean(dim=0)
+
+            # Compute distances between query examples and prototypes
+            dists = torch.cdist(query_reps, prototypes, p=2)
+
+            # Predict classes based on distances
+            _, predictions = torch.min(dists, dim=1)
+
+            # Compute accuracy
+            correct = (predictions == batch['query_labels'].to(self.device)).sum().item()
+            accuracy = correct / len(batch['query_labels'])
+            accuracies.append(accuracy)
+
+            if verbose:
+                print(f"Trial {trial + 1}/{n_trials} - Accuracy: {accuracy:.4f} ({actual_n_way}-way)")
+
+                # Print class-wise accuracies
+                for c in range(actual_n_way):
+                    class_mask = (batch['query_labels'] == c)
+                    if class_mask.sum() > 0:
+                        class_correct = (predictions[class_mask] == c).sum().item()
+                        class_acc = class_correct / class_mask.sum().item()
+                        print(
+                            f"  Class '{batch['class_names'][c]}': {class_acc:.4f} ({class_correct}/{class_mask.sum().item()})")
+
+        # Skip trials where we couldn't get a valid batch
+        if len(accuracies) == 0:
+            print(f"Warning: Couldn't run any valid trials for {n_way}-way {n_shot}-shot with {window_count} windows")
+            return 0.0
+
+        mean_accuracy = np.mean(accuracies)
+        std_accuracy = np.std(accuracies)
+        mean_n_way = np.mean(actual_n_way_values)
+
+        if verbose:
+            print(f"\nMulti-window ({window_count} windows) {n_way}-way {n_shot}-shot evaluation results:")
+            print(f"  Mean accuracy: {mean_accuracy:.4f} ± {std_accuracy:.4f}")
+            if mean_n_way < n_way:
+                print(f"  Note: Average number of ways was {mean_n_way:.1f} (requested: {n_way})")
+
+        return mean_accuracy
+
+    def _get_sequence_representation(self, sequence):
+        """
+        Extract a single representation from a multi-window sequence.
+
+        This method looks at the entire sequence of windows and extracts a representation
+        that captures information from all windows.
+
+        Args:
+            sequence (torch.Tensor): Sequence tensor with multiple windows [1, seq_len]
+
+        Returns:
+            torch.Tensor: Sequence representation vector
+        """
+        self.model.eval()
+        with torch.no_grad():
+            # Forward pass through the model
+            output = self.model(sequence.to(self.device))
+
+            # Shape is [batch_size, seq_len, d_model]
+            batch_size, seq_len, d_model = output.shape
+
+            # Find pad token positions
+            pad_positions = (sequence == self.pad_token_id).squeeze(0).nonzero()
+
+            # If multiple pad tokens found (indicating multiple windows)
+            if len(pad_positions) > 1:
+                # Get representation from before the last pad token
+                # This should capture information from all windows
+                last_pad_pos = pad_positions[-1].item()
+                rep_pos = last_pad_pos - 1
+                rep_pos = max(0, min(rep_pos, seq_len - 1))
+
+                # Extract representation
+                representation = output[0, rep_pos]
+
+            # If only one or no pad tokens found, use the last token
+            else:
+                representation = output[0, -1]
+
+            return representation
+
+    # Update the run_evaluation_suite function to include multi-window evaluation
+
 
 # Utility functions for creating and visualizing embeddings
 def create_tsne_visualization(evaluator, classes=None, samples_per_class=20, perplexity=30):
@@ -1109,8 +1393,8 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
         print(
             f"Warning: Only {available_classes} classes available. Adjusting evaluation to use {max_ways}-way instead of 5-way.")
 
-    # 1. Evaluate standard few-shot learning
-    print("\nEvaluating standard few-shot learning...")
+    # 1. Evaluate standard few-shot learning with single windows
+    print("\nEvaluating standard few-shot learning (single windows)...")
     standard_results = {}
 
     # a. 2-way classification (if at least 2 classes available)
@@ -1127,7 +1411,29 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
 
     results["standard_few_shot"] = standard_results
 
-    # 2. Create t-SNE visualization
+    # 2. Evaluate multi-window few-shot learning (4 consecutive windows)
+    print("\nEvaluating multi-window few-shot learning (4 consecutive windows)...")
+    multiwindow_results = {}
+
+    # a. 2-way classification (if at least 2 classes available)
+    if available_classes >= 2:
+        for n_shot in [1, 5]:  # Using 1 and 5 shots for multi-window to reduce evaluation time
+            accuracy = evaluator.evaluate_multiwindow_few_shot(
+                n_way=2, n_shot=n_shot, n_query=5, window_count=4, n_trials=10
+            )
+            multiwindow_results[f"2way_{n_shot}shot_4win"] = accuracy
+
+    # b. max_ways-way classification
+    if max_ways > 2:
+        for n_shot in [1, 5]:  # Using 1 and 5 shots for multi-window to reduce evaluation time
+            accuracy = evaluator.evaluate_multiwindow_few_shot(
+                n_way=max_ways, n_shot=n_shot, n_query=5, window_count=4, n_trials=10
+            )
+            multiwindow_results[f"{max_ways}way_{n_shot}shot_4win"] = accuracy
+
+    results["multiwindow_few_shot"] = multiwindow_results
+
+    # 3. Create t-SNE visualization
     print("\nCreating t-SNE visualization...")
     try:
         fig = create_tsne_visualization(evaluator)
@@ -1136,15 +1442,27 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
     except Exception as e:
         print(f"Error creating t-SNE visualization: {e}")
 
-    # 3. Save all results
+    # 4. Save all results
     print("\nSaving results...")
+    # Combine all results for CSV
+    all_configs = []
+    all_accuracies = []
+
+    for config, acc in standard_results.items():
+        all_configs.append(f"Standard: {config}")
+        all_accuracies.append(acc)
+
+    for config, acc in multiwindow_results.items():
+        all_configs.append(f"Multi-window: {config}")
+        all_accuracies.append(acc)
+
     results_df = pd.DataFrame({
-        'Configuration': list(standard_results.keys()),
-        'Accuracy': list(standard_results.values())
+        'Configuration': all_configs,
+        'Accuracy': all_accuracies
     })
     results_df.to_csv(os.path.join(output_dir, "evaluation_results.csv"), index=False)
 
-    # Create summary plot
+    # Create summary plot for standard results
     plt.figure(figsize=(12, 6))
 
     # Group by n_way
@@ -1163,7 +1481,7 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
 
         plt.xlabel("Number of shots", fontsize=14)
         plt.ylabel("Accuracy", fontsize=14)
-        plt.title("Few-shot Learning Performance", fontsize=16)
+        plt.title("Few-shot Learning Performance (Single Windows)", fontsize=16)
         plt.legend(fontsize=12)
         plt.grid(True, alpha=0.3)
         plt.xticks(shots)
@@ -1186,6 +1504,67 @@ def run_evaluation_suite(evaluator, output_dir="evaluation_results"):
 
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "few_shot_summary.png"), dpi=300)
+
+    # Create comparison plot between single-window and multi-window
+    if multiwindow_results:
+        plt.figure(figsize=(12, 8))
+
+        # Find common configurations for comparison (we'll compare 1-shot and 5-shot)
+        common_shots = [1, 5]  # We only ran 1-shot and 5-shot for multi-window
+
+        # Plot 2-way comparisons
+        if available_classes >= 2:
+            single_vals = [standard_results.get(f"2way_{s}shot", 0) for s in common_shots]
+            multi_vals = [multiwindow_results.get(f"2way_{s}shot_4win", 0) for s in common_shots]
+
+            x = np.arange(len(common_shots))
+            width = 0.35
+
+            plt.bar(x - width / 2, single_vals, width, label='Single Window', color='skyblue')
+            plt.bar(x + width / 2, multi_vals, width, label='4 Consecutive Windows', color='salmon')
+
+            plt.xlabel('Number of shots', fontsize=14)
+            plt.ylabel('Accuracy', fontsize=14)
+            plt.title('Single vs. Multi-Window Few-Shot Learning (2-way)', fontsize=16)
+            plt.xticks(x, [f"{s}-shot" for s in common_shots])
+            plt.legend()
+
+            # Add value labels
+            for i, v in enumerate(single_vals):
+                plt.text(i - width / 2, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+            for i, v in enumerate(multi_vals):
+                plt.text(i + width / 2, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "single_vs_multi_window_comparison.png"), dpi=300)
+
+        # If we have more than 2 classes, also create a plot for max-way classification
+        if max_ways > 2:
+            plt.figure(figsize=(12, 8))
+
+            single_vals = [standard_results.get(f"{max_ways}way_{s}shot", 0) for s in common_shots]
+            multi_vals = [multiwindow_results.get(f"{max_ways}way_{s}shot_4win", 0) for s in common_shots]
+
+            x = np.arange(len(common_shots))
+            width = 0.35
+
+            plt.bar(x - width / 2, single_vals, width, label='Single Window', color='skyblue')
+            plt.bar(x + width / 2, multi_vals, width, label='4 Consecutive Windows', color='salmon')
+
+            plt.xlabel('Number of shots', fontsize=14)
+            plt.ylabel('Accuracy', fontsize=14)
+            plt.title(f'Single vs. Multi-Window Few-Shot Learning ({max_ways}-way)', fontsize=16)
+            plt.xticks(x, [f"{s}-shot" for s in common_shots])
+            plt.legend()
+
+            # Add value labels
+            for i, v in enumerate(single_vals):
+                plt.text(i - width / 2, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+            for i, v in enumerate(multi_vals):
+                plt.text(i + width / 2, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"single_vs_multi_window_comparison_{max_ways}way.png"), dpi=300)
 
     print(f"\nEvaluation complete. Results saved to {output_dir}")
     return results
