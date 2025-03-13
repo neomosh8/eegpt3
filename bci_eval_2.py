@@ -515,7 +515,7 @@ class EEGSimpleEvaluator:
             # Move to CPU immediately to free GPU memory
             return mean_embedding.cpu()
 
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=8):
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=1):
         """
         Memory-optimized few-shot learning evaluation using token embeddings
 
@@ -670,7 +670,7 @@ class EEGSimpleEvaluator:
         print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
-    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10, batch_size=8):
+    def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10, batch_size=1):
         """
         Memory-optimized window-level few-shot evaluation
 
