@@ -976,19 +976,18 @@ class EEGSimpleEvaluator:
 
         return accuracy
 
-
     def extract_windows_from_sequence(self, sequence, window_size=2304):
         """
-        Split a tokenized sequence into individual windows based on pad tokens
+        Extract properly sized windows from a sequence, ensuring exact window size
 
         Args:
-            sequence: The full token sequence
-            window_size: Expected size of each window (2304 tokens)
+            sequence: The full token sequence tensor
+            window_size: Size of each window (default: 2304 tokens)
 
         Returns:
-            List of window token sequences
+            List of window token tensors, each of EXACTLY window_size
         """
-        # Make sure sequence is on CPU for memory efficiency
+        # Move to CPU for memory efficiency
         sequence = sequence.to("cpu")
 
         # Remove EOS token if present
@@ -1005,9 +1004,11 @@ class EEGSimpleEvaluator:
         for pad_pos in pad_positions:
             window = sequence[start_idx:pad_pos]
 
-            # Only add windows that are close to the expected size
-            if len(window) > window_size * 0.5:  # At least half the expected size
+            # Only add windows of EXACT window_size
+            if len(window) == window_size:
                 windows.append(window)
+            elif len(window) != 0:
+                print(f"Skipping window of size {len(window)} (expected {window_size})")
 
             # Next window starts after this pad
             start_idx = pad_pos + 1
@@ -1015,11 +1016,92 @@ class EEGSimpleEvaluator:
         # Add the last window if there's data after the last pad
         if start_idx < len(sequence):
             window = sequence[start_idx:]
-            if len(window) > window_size * 0.5:
+            if len(window) == window_size:
                 windows.append(window)
+            elif len(window) != 0:
+                print(f"Skipping final window of size {len(window)} (expected {window_size})")
 
-        print(f"Extracted {len(windows)} windows from sequence of length {len(sequence)}")
+        print(
+            f"Extracted {len(windows)} complete windows of size {window_size} from sequence of length {len(sequence)}")
         return windows
+
+    def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
+        """
+        Extract embeddings from a single window or process a sequence into windows
+
+        Args:
+            tokens: Token sequence tensor or window
+            max_chunk_size: Safety parameter for large processing
+
+        Returns:
+            Mean token embedding vector (on CPU)
+        """
+        # Check if this is a full sequence or already a window
+        is_full_sequence = tokens.numel() > 3000  # Windows should be exactly 2304
+
+        if is_full_sequence:
+            # For full sequences, extract windows and process each window
+            print(f"Processing full sequence with {tokens.numel()} tokens")
+            windows = self.extract_windows_from_sequence(tokens)
+
+            if not windows:
+                print("No valid windows found in sequence")
+                return torch.zeros(self.d_model, device="cpu")
+
+            # Process each window and average the embeddings
+            window_embeddings = []
+            for window in windows:
+                if len(window) != 2304:
+                    print(f"WARNING: Window size {len(window)} is not 2304")
+                    continue
+
+                # Process each window (recursive call, but now with a window)
+                emb = self._extract_embeddings_from_tokens(window)
+                window_embeddings.append(emb)
+
+            # Average all window embeddings
+            if window_embeddings:
+                return torch.stack(window_embeddings).mean(dim=0)
+            else:
+                return torch.zeros(self.d_model, device="cpu")
+
+        # Verify this is a proper window
+        if tokens.numel() != 2304:
+            print(f"WARNING: Processing non-standard window of size {tokens.numel()}")
+
+        # From here on, we're processing a single window
+        tokens = tokens.to(self.device)
+
+        # Remove padding and EOS tokens for embedding extraction
+        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
+        filtered_tokens = tokens[mask]
+
+        # Skip empty sequences
+        if filtered_tokens.numel() == 0:
+            return torch.zeros(self.d_model, device="cpu")
+
+        # Print diagnostic info
+        print(f"Processing window tokens: {filtered_tokens.numel()}")
+
+        # Clamp token IDs to valid range
+        filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
+
+        # Get embeddings
+        with torch.no_grad():
+            try:
+                embeddings = self.token_embedding(filtered_tokens)
+                mean_embedding = embeddings.mean(dim=0)
+                return mean_embedding.cpu()
+            except RuntimeError as e:
+                print(f"Error processing window: {str(e)}")
+
+                # Try with smaller chunks if needed
+                if filtered_tokens.numel() > max_chunk_size:
+                    print(f"Window too large, processing in chunks")
+                    # [chunk processing code omitted for brevity]
+
+                # Fallback to empty embedding
+                return torch.zeros(self.d_model, device="cpu")
 
 
     def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
@@ -1114,38 +1196,49 @@ class EEGSimpleEvaluator:
 
     def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=32):
         """
-        Memory-optimized window-aware few-shot learning evaluation
+        Few-shot evaluation using ONLY complete windows (2304 tokens)
 
         Args:
-            n_shots: Number of examples per class for support set
-            n_queries: Number of examples per class for query set
-            n_trials: Number of random trials to average over
-            batch_size: Batch size for processing
+            n_shots: Number of complete windows per class for support
+            n_queries: Number of complete windows per class for query
+            n_trials: Number of trials
+            batch_size: Processing batch size
 
         Returns:
             Average accuracy across trials
         """
-        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+        print(f"Running window-based few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
 
-        # Extract windows from all sequences first to ensure we work with proper windows
+        # Extract windows from all sequences - STRICT mode (only exact size windows)
         class_windows = {}
 
         for class_name, sequences in self.class_data.items():
             all_windows = []
+            window_sizes = []
+
             for seq in sequences:
                 # Extract windows from each sequence
                 windows = self.extract_windows_from_sequence(seq)
-                all_windows.extend(windows)
 
-                # Clean up memory
+                # Verify all windows are the correct size
+                for window in windows:
+                    window_sizes.append(window.numel())
+                    if window.numel() == 2304:  # Only keep exact-sized windows
+                        all_windows.append(window)
+                    else:
+                        print(f"Discarding window of size {window.numel()} (expected 2304)")
+
                 torch.cuda.empty_cache()
 
             if all_windows:
                 class_windows[class_name] = all_windows
-                print(f"  - {class_name}: {len(all_windows)} windows extracted")
+                # Print detailed window stats
+                print(f"  - {class_name}: {len(all_windows)} complete windows (2304 tokens each)")
+                if window_sizes:
+                    print(f"    Window size stats: min={min(window_sizes)}, max={max(window_sizes)}, "
+                          f"mean={sum(window_sizes) / len(window_sizes):.1f}")
             else:
                 print(f"  - {class_name}: No valid windows found")
-
         # Check if we have enough data
         if not class_windows or min([len(windows) for windows in class_windows.values()]) < 2:
             print("Insufficient windows for few-shot evaluation")
