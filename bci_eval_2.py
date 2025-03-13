@@ -1025,8 +1025,8 @@ class EEGSimpleEvaluator:
             elif len(window) != 0:
                 print(f"Skipping final window of size {len(window)} (expected {window_size})")
 
-        print(
-            f"Extracted {len(windows)} complete windows of size {window_size} from sequence of length {len(sequence)}")
+        # print(
+            # f"Extracted {len(windows)} complete windows of size {window_size} from sequence of length {len(sequence)}")
         return windows
 
     def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
