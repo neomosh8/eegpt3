@@ -26,7 +26,7 @@ class EEGSimpleEvaluator:
 
     def __init__(self, checkpoint_dir, data_dir, device="cuda", pad_token_id=129,
                  eos_token_id=128, codebook_size=130, window_size=2304,
-                 d_model=32, n_heads=4, n_layers=2, max_windows=4):
+                 d_model=360, n_heads=6, n_layers=4, max_windows=4):
         """
         Initialize the evaluator with directories and model parameters.
         """
