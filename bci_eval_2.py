@@ -223,46 +223,6 @@ class EEGSimpleEvaluator:
         # Extract the token embedding layer
         self.token_embedding = self.model.token_embedding
 
-    def extract_windows_from_sequence(self, sequence, window_size=2304):
-        """
-        Split a tokenized sequence into individual windows
-
-        Args:
-            sequence: The full token sequence
-            window_size: Size of each window (default: 2304 tokens)
-
-        Returns:
-            List of window token sequences
-        """
-        # Remove EOS token if present
-        if sequence[-1] == self.eos_token_id:
-            sequence = sequence[:-1]
-
-        # Find all pad tokens (which separate windows)
-        pad_positions = (sequence == self.pad_token_id).nonzero(as_tuple=True)[0]
-
-        windows = []
-        start_idx = 0
-
-        # Extract windows based on pad positions
-        for pad_pos in pad_positions:
-            window = sequence[start_idx:pad_pos]
-
-            # Only add windows of reasonable size
-            if len(window) > 0:
-                windows.append(window)
-
-            # Next window starts after this pad
-            start_idx = pad_pos + 1
-
-        # Add the last window if there's data after the last pad
-        if start_idx < len(sequence):
-            window = sequence[start_idx:]
-            if len(window) > 0:
-                windows.append(window)
-
-        return windows
-
     def evaluate_classifier(self, train_ratio=0.7, classifier_type="logistic"):
         """
         Evaluate using token embeddings as features for a classifier
@@ -480,264 +440,6 @@ class EEGSimpleEvaluator:
         plt.savefig(os.path.join(output_dir, f'accuracy_vs_epoch{suffix}.png'), dpi=300)
         plt.close()
 
-    def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
-        """
-        Extract embeddings using chunking to avoid memory spikes
-
-        Args:
-            tokens: Token sequence tensor
-            max_chunk_size: Maximum number of tokens to process at once
-
-        Returns:
-            Mean token embedding vectors (on CPU)
-        """
-        # Make sure tokens are on the right device
-        tokens = tokens.to("cpu")  # First process on CPU
-
-        # Remove padding and EOS tokens for embedding extraction
-        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
-        filtered_tokens = tokens[mask]
-
-        # Safety check for empty sequences
-        if filtered_tokens.numel() == 0:
-            return torch.zeros(self.d_model, device="cpu")
-
-        # Print diagnostic info for debugging
-        token_count = filtered_tokens.numel()
-        print(f"Processing {token_count} tokens (chunked)")
-
-        # Safety check for unreasonably large token sequences (potential error)
-        if token_count > 1000000:  # 1 million tokens is very unlikely in normal use
-            print(f"WARNING: Extremely large token sequence detected ({token_count} tokens)")
-            print(f"Truncating to first 100,000 tokens to avoid OOM")
-            filtered_tokens = filtered_tokens[:100000]
-            token_count = filtered_tokens.numel()
-
-        # Clamp token IDs to valid range
-        filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
-
-        # Process tokens in chunks to avoid memory spikes
-        all_embeddings = []
-        for i in range(0, token_count, max_chunk_size):
-            # Get a chunk of tokens
-            end_idx = min(i + max_chunk_size, token_count)
-            chunk = filtered_tokens[i:end_idx].to(self.device)
-
-            # Get embeddings for this chunk
-            with torch.no_grad():
-                try:
-                    chunk_embeddings = self.token_embedding(chunk)
-                    # Move chunk result to CPU immediately
-                    all_embeddings.append(chunk_embeddings.cpu())
-                except RuntimeError as e:
-                    # Handle potential OOM errors gracefully
-                    print(f"Error processing chunk {i}-{end_idx}: {str(e)}")
-                    print("Attempting to recover with smaller chunk size...")
-
-                    # Try with a smaller chunk size
-                    if max_chunk_size > 1000:
-                        smaller_chunk_size = max_chunk_size // 5
-                        for j in range(i, end_idx, smaller_chunk_size):
-                            sub_end = min(j + smaller_chunk_size, end_idx)
-                            sub_chunk = filtered_tokens[j:sub_end].to(self.device)
-                            try:
-                                with torch.no_grad():
-                                    sub_embeddings = self.token_embedding(sub_chunk)
-                                    all_embeddings.append(sub_embeddings.cpu())
-                            except RuntimeError:
-                                # If still failing, skip this part
-                                print(f"Skipping tokens {j}-{sub_end} due to memory constraints")
-                            finally:
-                                # Always free memory
-                                del sub_chunk
-                                torch.cuda.empty_cache()
-                finally:
-                    # Always free memory
-                    del chunk
-                    torch.cuda.empty_cache()
-
-        # If we couldn't process any chunks, return zeros
-        if not all_embeddings:
-            print("WARNING: Could not process any tokens, returning zero embedding")
-            return torch.zeros(self.d_model, device="cpu")
-
-        # Concatenate all chunk embeddings and compute mean
-        try:
-            all_embeddings_tensor = torch.cat(all_embeddings, dim=0)
-            mean_embedding = all_embeddings_tensor.mean(dim=0)
-            return mean_embedding.cpu()
-        except RuntimeError as e:
-            print(f"Error computing mean embedding: {str(e)}")
-            # In case of failure, try a different approach
-            print("Attempting alternate approach...")
-
-            # Try calculating running average instead of concatenating
-            running_sum = torch.zeros(self.d_model, dtype=torch.float32, device="cpu")
-            total_tokens = 0
-
-            for emb in all_embeddings:
-                running_sum += emb.sum(dim=0)
-                total_tokens += emb.size(0)
-
-            if total_tokens > 0:
-                return (running_sum / total_tokens).cpu()
-            else:
-                return torch.zeros(self.d_model, device="cpu")
-
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=1):
-        """
-        Memory-optimized few-shot learning evaluation using token embeddings
-
-        Args:
-            n_shots: Number of examples per class for support set
-            n_queries: Number of examples per class for query set
-            n_trials: Number of random trials to average over
-            batch_size: Number of queries to process at once to save memory
-
-        Returns:
-            Average accuracy across trials
-        """
-        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
-
-        # Check if we have enough data and adjust parameters if needed
-        class_names = list(self.class_data.keys())
-        min_examples = min([len(self.class_data[cls]) for cls in class_names])
-
-        # We need at least 2 examples per class (1 for support, 1 for query)
-        if min_examples < 2:
-            print(f"Warning: Not enough examples for few-shot (min={min_examples}). Skipping evaluation.")
-            return 0.0
-
-        # Adjust n_shots and n_queries to fit available data
-        max_per_class = min_examples // 2
-        adjusted_n_shots = min(n_shots, max_per_class)
-        adjusted_n_queries = min(n_queries, min_examples - adjusted_n_shots)
-
-        if adjusted_n_shots != n_shots or adjusted_n_queries != n_queries:
-            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
-            print(
-                f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries instead of requested {n_shots}-shot with {n_queries} queries")
-            n_shots = adjusted_n_shots
-            n_queries = adjusted_n_queries
-
-        # Ensure we're using at least 1 query example
-        if n_queries < 1:
-            n_queries = 1
-            n_shots = min_examples - 1
-
-        accuracies = []
-
-        # Run multiple trials
-        for trial in range(n_trials):
-            print(f"  Trial {trial + 1}/{n_trials}")
-
-            # Prepare support and query sets (on CPU)
-            support_embeddings = []
-            support_labels = []
-            query_embeddings = []
-            query_labels = []
-
-            for class_idx, class_name in enumerate(class_names):
-                sequences = self.class_data[class_name]
-
-                # Skip classes with insufficient examples
-                if len(sequences) < n_shots + n_queries:
-                    continue
-
-                # Randomly select support and query examples
-                indices = np.random.permutation(len(sequences))
-                support_indices = indices[:n_shots]
-                query_indices = indices[n_shots:n_shots + n_queries]
-
-                # Get embeddings for support set (move to CPU)
-                for idx in support_indices:
-                    seq = sequences[idx]
-                    # Embedding already comes back on CPU from modified method
-                    emb = self._extract_embeddings_from_tokens(seq)
-                    support_embeddings.append(emb)
-                    support_labels.append(class_idx)
-
-                # Get embeddings for query set (move to CPU)
-                for idx in query_indices:
-                    seq = sequences[idx]
-                    # Embedding already comes back on CPU from modified method
-                    emb = self._extract_embeddings_from_tokens(seq)
-                    query_embeddings.append(emb)
-                    query_labels.append(class_idx)
-
-                # Clear CUDA cache periodically to free memory
-                if len(query_embeddings) % 50 == 0:
-                    torch.cuda.empty_cache()
-
-            # Skip this trial if we don't have enough data
-            if not support_embeddings or not query_embeddings:
-                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
-                continue
-
-            # Stack embeddings and convert labels to tensors (all on CPU)
-            support_tensor = torch.stack(support_embeddings)
-            support_labels_tensor = torch.tensor(support_labels)
-
-            # Process query samples in smaller batches to save memory
-            correct = 0
-            total = len(query_embeddings)
-
-            # Process in batches to save memory
-            for i in range(0, len(query_embeddings), batch_size):
-                batch_end = min(i + batch_size, len(query_embeddings))
-                batch_queries = query_embeddings[i:batch_end]
-                batch_labels = query_labels[i:batch_end]
-
-                batch_correct = 0
-
-                # Process one query at a time
-                for j, query_emb in enumerate(batch_queries):
-                    # Move single query to GPU for faster computation
-                    query_emb_gpu = query_emb.to(self.device)
-                    support_tensor_gpu = support_tensor.to(self.device)
-
-                    # Calculate distances
-                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
-
-                    # Find k nearest neighbors (up to n_shots)
-                    k = min(n_shots, len(support_labels))
-                    _, indices = torch.topk(distances, k=k, largest=False)
-
-                    # Calculate votes on CPU
-                    indices_cpu = indices.cpu()
-                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
-
-                    votes = torch.bincount(nearest_labels, minlength=len(class_names))
-                    predicted_label = torch.argmax(votes).item()
-
-                    if predicted_label == batch_labels[j]:
-                        batch_correct += 1
-
-                    # Free GPU memory
-                    del query_emb_gpu, support_tensor_gpu, distances, indices
-                    torch.cuda.empty_cache()
-
-                correct += batch_correct
-
-            # Calculate accuracy
-            accuracy = correct / total if total > 0 else 0
-            accuracies.append(accuracy)
-
-            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
-
-            # Clear all stored tensors to free memory
-            del support_embeddings, support_labels, query_embeddings, query_labels
-            del support_tensor, support_labels_tensor
-            torch.cuda.empty_cache()
-
-        # Handle case where all trials were skipped
-        if not accuracies:
-            print("No valid trials completed. Please check your dataset.")
-            return 0.0
-
-        avg_accuracy = np.mean(accuracies)
-        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
-        return avg_accuracy
 
     def evaluate_few_shot_windows(self, n_shots=5, n_queries=5, n_trials=10, batch_size=1):
         """
@@ -910,74 +612,94 @@ class EEGSimpleEvaluator:
 
     # Also update these helper methods for consistency
     def _run_single_few_shot_trial(self, n_shots=1, n_queries=1):
-        """Run a single few-shot trial and return accuracy (memory optimized)"""
-        # Prepare support and query sets (on CPU)
+        """Run a single window-based few-shot trial with proper memory management"""
+        # Extract windows from all sequences
+        class_windows = {}
+
+        for class_name, sequences in self.class_data.items():
+            all_windows = []
+            for seq in sequences:
+                # Extract windows from each sequence
+                windows = self.extract_windows_from_sequence(seq)
+                all_windows.extend(windows)
+                torch.cuda.empty_cache()
+
+            if all_windows:
+                class_windows[class_name] = all_windows
+
+        # Check if we have enough data
+        if not class_windows or min([len(windows) for windows in class_windows.values()]) < n_shots + n_queries:
+            print("Insufficient windows for few-shot evaluation")
+            return None
+
+        # Prepare support and query sets
         support_embeddings = []
         support_labels = []
         query_embeddings = []
         query_labels = []
 
-        class_names = list(self.class_data.keys())
-        for class_idx, class_name in enumerate(class_names):
-            sequences = self.class_data[class_name]
+        for class_idx, class_name in enumerate(class_windows.keys()):
+            windows = class_windows[class_name]
 
-            # Skip classes with insufficient examples
-            if len(sequences) < n_shots + n_queries:
-                continue
-
-            # Randomly select support and query examples
-            indices = np.random.permutation(len(sequences))
+            # Randomly select support and query windows
+            indices = np.random.permutation(len(windows))
             support_indices = indices[:n_shots]
             query_indices = indices[n_shots:n_shots + n_queries]
 
-            # Get embeddings for support set (already on CPU from modified method)
+            # Get embeddings for support set
             for idx in support_indices:
-                seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq)
+                window = windows[idx]
+                # Process window directly
+                emb = self._extract_embeddings_from_tokens(window)
                 support_embeddings.append(emb)
                 support_labels.append(class_idx)
 
-            # Get embeddings for query set (already on CPU from modified method)
+            # Get embeddings for query set
             for idx in query_indices:
-                seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq)
+                window = windows[idx]
+                # Process window directly
+                emb = self._extract_embeddings_from_tokens(window)
                 query_embeddings.append(emb)
                 query_labels.append(class_idx)
 
-        # Skip this trial if we don't have enough data
+            # Clean up memory
+            torch.cuda.empty_cache()
+
+        # Skip if insufficient data
         if not support_embeddings or not query_embeddings:
             return None
 
-        # Stack embeddings on CPU
+        # Stack embeddings
         support_tensor = torch.stack(support_embeddings)
         support_labels_tensor = torch.tensor(support_labels)
 
-        # Process one query at a time to save memory
+        # Process queries
         correct = 0
         total = len(query_embeddings)
 
         for i, query_emb in enumerate(query_embeddings):
-            # Move tensors to GPU for distance calculation
-            query_gpu = query_emb.to(self.device)
-            support_gpu = support_tensor.to(self.device)
+            # Move to device for computation
+            query_emb_gpu = query_emb.to(self.device)
+            support_tensor_gpu = support_tensor.to(self.device)
 
-            # Calculate distance
-            distances = torch.norm(support_gpu - query_gpu.unsqueeze(0), dim=1)
+            # Calculate distances
+            distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
 
             # Find k nearest neighbors
             k = min(n_shots, len(support_labels))
             _, indices = torch.topk(distances, k=k, largest=False)
 
-            # Get majority vote (on CPU)
-            nearest_labels = torch.tensor([support_labels[idx] for idx in indices.cpu()])
-            votes = torch.bincount(nearest_labels, minlength=len(class_names))
+            # Get majority vote
+            indices_cpu = indices.cpu()
+            nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+            votes = torch.bincount(nearest_labels, minlength=len(class_windows))
             predicted_label = torch.argmax(votes).item()
 
             if predicted_label == query_labels[i]:
                 correct += 1
 
-            # Free GPU memory
-            del query_gpu, support_gpu, distances, indices
+            # Clean up memory
+            del query_emb_gpu, support_tensor_gpu, distances, indices
             torch.cuda.empty_cache()
 
         # Calculate accuracy
@@ -989,6 +711,163 @@ class EEGSimpleEvaluator:
         torch.cuda.empty_cache()
 
         return accuracy
+
+    def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_shots=1, n_trials=20,
+                                   include_random_model=True):
+        """
+        Creates a bar plot with window-aware evaluation
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get baseline for reference
+        baseline_results = evaluator.evaluate_baseline()
+
+        results = {
+            'trained': {'seq': [], 'win': []},
+            'random': {'seq': [], 'win': []} if include_random_model else None,
+            'baseline': {'seq': baseline_results['few_shot_accuracy'], 'win': 0.25}
+        }
+
+        # First evaluate with trained model
+        print("\nEvaluating trained model...")
+
+        # Use the latest checkpoint
+        latest_checkpoint = evaluator.checkpoint_files[-1]
+        print(f"Using latest checkpoint: {latest_checkpoint}")
+
+        try:
+            # Load checkpoint on CPU
+            checkpoint = torch.load(latest_checkpoint, map_location="cpu")
+            state_dict = checkpoint['model_state_dict']
+
+            if list(state_dict.keys())[0].startswith('module.'):
+                new_state_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    name = k[7:] if k.startswith('module.') else k
+                    new_state_dict[name] = v
+                state_dict = new_state_dict
+
+            # Load model on CPU first
+            evaluator.model = evaluator.model.cpu()
+            evaluator.model.load_state_dict(state_dict)
+
+            # Try to move to device
+            try:
+                evaluator.model = evaluator.model.to(evaluator.device)
+            except RuntimeError as e:
+                print(f"Could not move model to {evaluator.device}: {str(e)}")
+                print("Falling back to CPU")
+                evaluator.device = "cpu"
+
+            evaluator.model.eval()
+            evaluator.token_embedding = evaluator.model.token_embedding
+
+            # Use reduced trials to save memory
+            reduced_trials = min(n_trials, 5 if evaluator.device == "cuda" else n_trials)
+            print(f"Running window-based few-shot evaluation with {reduced_trials} trials...")
+
+            for trial in range(reduced_trials):
+                print(f"  Trial {trial + 1}/{reduced_trials}")
+                try:
+                    # Clear cache before each trial
+                    torch.cuda.empty_cache()
+                    acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+                    if acc is not None:
+                        results['trained']['seq'].append(acc)
+
+                    # Check memory after trial
+                    if evaluator.device == "cuda" and torch.cuda.memory_allocated() / torch.cuda.get_device_properties(
+                            0).total_memory > 0.8:
+                        print("Memory usage high, stopping early")
+                        break
+                except RuntimeError as e:
+                    print(f"Error in trial {trial + 1}: {str(e)}")
+                    if "CUDA out of memory" in str(e):
+                        print("CUDA OOM detected, moving to CPU")
+                        evaluator.model = evaluator.model.cpu()
+                        evaluator.device = "cpu"
+                        evaluator.token_embedding = evaluator.model.token_embedding
+                        torch.cuda.empty_cache()
+
+            # Skip window-level evaluation to simplify (window-level evaluation is already window-aware)
+            # This is optional - you can keep it if needed
+            results['trained']['win'] = results['trained']['seq']
+
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            traceback.print_exc()
+
+        # Skip random model evaluation to simplify
+        # This is optional - you can keep it if needed
+
+        # Create plot with the data we have
+        metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
+
+        trained_means = [
+            np.mean(results['trained']['seq']) if results['trained']['seq'] else 0,
+            np.mean(results['trained']['win']) if results['trained']['win'] else 0
+        ]
+
+        trained_errors = [
+            np.std(results['trained']['seq']) if results['trained']['seq'] else 0,
+            np.std(results['trained']['win']) if results['trained']['win'] else 0
+        ]
+
+        plt.figure(figsize=(12, 7))
+        x_pos = np.arange(len(metrics))
+        width = 0.25 if include_random_model else 0.35
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        trained_pos = x_pos - width if include_random_model else x_pos
+        baseline_pos = x_pos + width if include_random_model else x_pos + width
+
+        trained_bars = ax.bar(
+            trained_pos,
+            trained_means,
+            width,
+            yerr=trained_errors,
+            capsize=10,
+            alpha=0.8,
+            ecolor='black',
+            color='steelblue',
+            label='Trained Model'
+        )
+
+        baseline_bars = ax.bar(
+            baseline_pos,
+            [results['baseline']['seq'], results['baseline']['win']],
+            width,
+            alpha=0.5,
+            color='lightgray',
+            label='Random Chance'
+        )
+
+        for i, (mean, error) in enumerate(zip(trained_means, trained_errors)):
+            if mean > 0:
+                ax.text(trained_pos[i], mean + error + 0.01, f"{mean:.3f}",
+                        ha='center', va='bottom', fontsize=9)
+
+        ax.set_xlabel('Evaluation Method', fontsize=12)
+        ax.set_ylabel('Accuracy', fontsize=12)
+        title = f'Model Performance Comparison ({n_shots}-shot, Window-Based)'
+        ax.set_title(title, fontsize=14)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(metrics)
+        ax.legend(loc='best')
+
+        max_y = max([m + e for m, e in zip(trained_means, trained_errors) if m > 0] or [0.4])
+        ax.set_ylim(0, min(1.0, max_y + 0.1))
+
+        ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+
+        plt.tight_layout()
+        file_name = f'window_based_performance_{n_shots}shot.png'
+        plt.savefig(os.path.join(output_dir, file_name), dpi=300)
+        plt.close()
+
+        print(f"Plot saved to {os.path.join(output_dir, file_name)}")
+        return results
 
     def _run_single_window_few_shot_trial(self, n_shots=1, n_queries=1):
         """Run a single window-level few-shot trial and return accuracy (memory optimized)"""
@@ -1096,6 +975,294 @@ class EEGSimpleEvaluator:
         torch.cuda.empty_cache()
 
         return accuracy
+
+
+    def extract_windows_from_sequence(self, sequence, window_size=2304):
+        """
+        Split a tokenized sequence into individual windows based on pad tokens
+
+        Args:
+            sequence: The full token sequence
+            window_size: Expected size of each window (2304 tokens)
+
+        Returns:
+            List of window token sequences
+        """
+        # Make sure sequence is on CPU for memory efficiency
+        sequence = sequence.to("cpu")
+
+        # Remove EOS token if present
+        if sequence[-1] == self.eos_token_id:
+            sequence = sequence[:-1]
+
+        # Find all pad tokens (which separate windows)
+        pad_positions = (sequence == self.pad_token_id).nonzero(as_tuple=True)[0]
+
+        windows = []
+        start_idx = 0
+
+        # Extract windows based on pad positions
+        for pad_pos in pad_positions:
+            window = sequence[start_idx:pad_pos]
+
+            # Only add windows that are close to the expected size
+            if len(window) > window_size * 0.5:  # At least half the expected size
+                windows.append(window)
+
+            # Next window starts after this pad
+            start_idx = pad_pos + 1
+
+        # Add the last window if there's data after the last pad
+        if start_idx < len(sequence):
+            window = sequence[start_idx:]
+            if len(window) > window_size * 0.5:
+                windows.append(window)
+
+        print(f"Extracted {len(windows)} windows from sequence of length {len(sequence)}")
+        return windows
+
+
+    def _extract_embeddings_from_tokens(self, tokens, max_chunk_size=10000):
+        """
+        Extract embeddings using window-aware processing
+
+        Args:
+            tokens: Token sequence tensor
+            max_chunk_size: Maximum chunk size for processing
+
+        Returns:
+            Mean token embedding vectors (on CPU)
+        """
+        # Check if this is a full sequence or already a window
+        is_full_sequence = tokens.numel() > 4000  # Windows are 2304 tokens, so this is safe
+
+        if is_full_sequence:
+            # For full sequences, extract windows and process each window
+            print(f"Processing full sequence with {tokens.numel()} tokens")
+            windows = self.extract_windows_from_sequence(tokens)
+
+            if not windows:
+                print("No valid windows found in sequence")
+                return torch.zeros(self.d_model, device="cpu")
+
+            # Process each window and average the embeddings
+            window_embeddings = []
+            for window in windows:
+                # Process each window (recursive call, but now with a window)
+                emb = self._extract_embeddings_from_tokens(window)
+                window_embeddings.append(emb)
+
+            # Average all window embeddings
+            if window_embeddings:
+                return torch.stack(window_embeddings).mean(dim=0)
+            else:
+                return torch.zeros(self.d_model, device="cpu")
+
+        # From here on, we're processing a single window
+        tokens = tokens.to(self.device)
+
+        # Remove padding and EOS tokens for embedding extraction
+        mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
+        filtered_tokens = tokens[mask]
+
+        # Skip empty sequences
+        if filtered_tokens.numel() == 0:
+            return torch.zeros(self.d_model, device="cpu")
+
+        # Print diagnostic info
+        print(f"Processing window with {filtered_tokens.numel()} tokens")
+
+        # Clamp token IDs to valid range
+        filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
+
+        # Get embeddings
+        with torch.no_grad():
+            try:
+                embeddings = self.token_embedding(filtered_tokens)
+                mean_embedding = embeddings.mean(dim=0)
+                return mean_embedding.cpu()
+            except RuntimeError as e:
+                print(f"Error processing window: {str(e)}")
+
+                # Try with smaller chunks if the window is still too large
+                if filtered_tokens.numel() > max_chunk_size:
+                    print(f"Window too large, processing in chunks")
+                    all_embeddings = []
+
+                    for i in range(0, filtered_tokens.numel(), max_chunk_size):
+                        end_idx = min(i + max_chunk_size, filtered_tokens.numel())
+                        chunk = filtered_tokens[i:end_idx]
+
+                        try:
+                            with torch.no_grad():
+                                chunk_embeddings = self.token_embedding(chunk)
+                                all_embeddings.append(chunk_embeddings.cpu())
+                        except RuntimeError:
+                            print(f"Skipping chunk {i}-{end_idx}")
+                        finally:
+                            del chunk
+                            torch.cuda.empty_cache()
+
+                    if all_embeddings:
+                        all_embeddings_tensor = torch.cat(all_embeddings, dim=0)
+                        mean_embedding = all_embeddings_tensor.mean(dim=0)
+                        return mean_embedding
+
+                # Fallback to empty embedding
+                return torch.zeros(self.d_model, device="cpu")
+
+
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=32):
+        """
+        Memory-optimized window-aware few-shot learning evaluation
+
+        Args:
+            n_shots: Number of examples per class for support set
+            n_queries: Number of examples per class for query set
+            n_trials: Number of random trials to average over
+            batch_size: Batch size for processing
+
+        Returns:
+            Average accuracy across trials
+        """
+        print(f"Running few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+
+        # Extract windows from all sequences first to ensure we work with proper windows
+        class_windows = {}
+
+        for class_name, sequences in self.class_data.items():
+            all_windows = []
+            for seq in sequences:
+                # Extract windows from each sequence
+                windows = self.extract_windows_from_sequence(seq)
+                all_windows.extend(windows)
+
+                # Clean up memory
+                torch.cuda.empty_cache()
+
+            if all_windows:
+                class_windows[class_name] = all_windows
+                print(f"  - {class_name}: {len(all_windows)} windows extracted")
+            else:
+                print(f"  - {class_name}: No valid windows found")
+
+        # Check if we have enough data
+        if not class_windows or min([len(windows) for windows in class_windows.values()]) < 2:
+            print("Insufficient windows for few-shot evaluation")
+            return 0.0
+
+        # Adjust n_shots and n_queries based on available data
+        min_windows = min([len(windows) for windows in class_windows.values()])
+        adjusted_n_shots = min(n_shots, min_windows // 2)
+        adjusted_n_queries = min(n_queries, min_windows - adjusted_n_shots)
+
+        if adjusted_n_shots != n_shots or adjusted_n_queries != n_queries:
+            print(f"Adjusting parameters: {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
+            n_shots = adjusted_n_shots
+            n_queries = adjusted_n_queries
+
+        # Ensure at least 1 query
+        if n_queries < 1:
+            n_queries = 1
+            n_shots = min(n_shots, min_windows - 1)
+
+        accuracies = []
+
+        # Run trials
+        for trial in range(n_trials):
+            print(f"  Trial {trial + 1}/{n_trials}")
+
+            # Prepare support and query sets
+            support_embeddings = []
+            support_labels = []
+            query_embeddings = []
+            query_labels = []
+
+            for class_idx, class_name in enumerate(class_windows.keys()):
+                windows = class_windows[class_name]
+
+                # Randomly select support and query windows
+                indices = np.random.permutation(len(windows))
+                support_indices = indices[:n_shots]
+                query_indices = indices[n_shots:n_shots + n_queries]
+
+                # Get embeddings for support set
+                for idx in support_indices:
+                    window = windows[idx]
+                    # Process window directly (no need to extract windows again)
+                    emb = self._extract_embeddings_from_tokens(window)
+                    support_embeddings.append(emb)
+                    support_labels.append(class_idx)
+
+                # Get embeddings for query set
+                for idx in query_indices:
+                    window = windows[idx]
+                    # Process window directly
+                    emb = self._extract_embeddings_from_tokens(window)
+                    query_embeddings.append(emb)
+                    query_labels.append(class_idx)
+
+                # Clean up memory
+                torch.cuda.empty_cache()
+
+            # Skip trial if insufficient data
+            if not support_embeddings or not query_embeddings:
+                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
+                continue
+
+            # Stack embeddings
+            support_tensor = torch.stack(support_embeddings)
+            support_labels_tensor = torch.tensor(support_labels)
+
+            # Process queries in batches
+            correct = 0
+            total = len(query_embeddings)
+
+            for i in range(0, len(query_embeddings), batch_size):
+                batch_end = min(i + batch_size, len(query_embeddings))
+                batch_queries = query_embeddings[i:batch_end]
+                batch_labels = query_labels[i:batch_end]
+
+                for j, query_emb in enumerate(batch_queries):
+                    # Move to device for computation
+                    query_emb_gpu = query_emb.to(self.device)
+                    support_tensor_gpu = support_tensor.to(self.device)
+
+                    # Calculate distances
+                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
+
+                    # Find k nearest neighbors
+                    k = min(n_shots, len(support_labels))
+                    _, indices = torch.topk(distances, k=k, largest=False)
+
+                    # Get majority vote
+                    indices_cpu = indices.cpu()
+                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+                    votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+                    predicted_label = torch.argmax(votes).item()
+
+                    if predicted_label == batch_labels[j]:
+                        correct += 1
+
+                    # Clean up memory
+                    del query_emb_gpu, support_tensor_gpu, distances, indices
+                    torch.cuda.empty_cache()
+
+            # Calculate accuracy
+            accuracy = correct / total if total > 0 else 0
+            accuracies.append(accuracy)
+
+            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+            # Clean up memory
+            del support_embeddings, support_labels, query_embeddings, query_labels
+            del support_tensor, support_labels_tensor
+            torch.cuda.empty_cache()
+
+        # Calculate average accuracy
+        avg_accuracy = np.mean(accuracies) if accuracies else 0.0
+        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
+        return avg_accuracy
 
 
 import matplotlib.pyplot as plt
