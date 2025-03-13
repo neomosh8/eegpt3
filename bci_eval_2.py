@@ -1197,23 +1197,106 @@ class EEGSimpleEvaluator:
                 # Fallback to empty embedding
                 return torch.zeros(self.d_model, device="cpu")
 
-
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, batch_size=32):
+    def _extract_hierarchical_embeddings(self, tokens, layer_depth=2):
         """
-        Few-shot evaluation using ONLY complete windows (2304 tokens)
+        Extract embeddings using the hierarchical structure of the model
 
         Args:
-            n_shots: Number of complete windows per class for support
-            n_queries: Number of complete windows per class for query
+            tokens: Token sequence or window
+            layer_depth: How many transformer layers to use (0 = just embeddings)
+
+        Returns:
+            Contextualized embedding vector
+        """
+        # First, check if this is a single window or a sequence with multiple windows
+        is_full_sequence = tokens.numel() > 3000  # Windows should be 2304 tokens
+
+        if is_full_sequence:
+            # For full sequences, extract windows and process each window
+            print(f"Processing full sequence with {tokens.numel()} tokens")
+            windows = self.extract_windows_from_sequence(tokens)
+
+            if not windows:
+                print("No valid windows found in sequence")
+                return torch.zeros(self.model.d_model, device="cpu")
+
+            # Process each window and average the embeddings
+            window_embeddings = []
+            for window in windows:
+                if len(window) != self.window_size:
+                    print(f"Skipping window of size {len(window)}")
+                    continue
+
+                # Process each window
+                emb = self._extract_hierarchical_embeddings(window, layer_depth)
+                window_embeddings.append(emb)
+
+            # Average all window embeddings
+            if window_embeddings:
+                return torch.stack(window_embeddings).mean(dim=0)
+            else:
+                return torch.zeros(self.model.d_model, device="cpu")
+
+        # From here on, we're processing a single window
+        batch_size = 1
+        window_size = tokens.shape[0]
+
+        if window_size != self.window_size:
+            print(f"Warning: Window size {window_size} != expected {self.window_size}")
+
+        # Move to device
+        tokens = tokens.to(self.device)
+
+        # Prepare input format: sequence with 1 window and no pads
+        tokens = tokens.unsqueeze(0)  # Add batch dimension
+
+        with torch.no_grad():
+            try:
+                # Get token embeddings
+                embedded = self.model.token_embedding(tokens)  # [B, W, D]
+
+                # Add positional encodings - follow the model's own logic
+                # 1. Window-level position (we have one window at position 0)
+                embedded = embedded + self.model.window_pos_embed[:, 0:1, :].transpose(1, 2)
+
+                # 2. Token-level positions
+                embedded = embedded + self.model.token_pos_embed[:, :window_size, :]
+
+                # Apply transformer layers up to layer_depth
+                x = embedded
+                for i in range(min(layer_depth, len(self.model.layers))):
+                    x = self.model.layers[i](x)
+
+                # Apply normalization
+                if layer_depth > 0:
+                    x = self.model.norm(x)
+
+                # Mean over the token dimension to get a single vector per window
+                mean_embedding = x.mean(dim=1).squeeze(0)
+
+                return mean_embedding.cpu()
+
+            except RuntimeError as e:
+                print(f"Error processing window: {str(e)}")
+                return torch.zeros(self.model.d_model, device="cpu")
+
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=2):
+        """
+        Few-shot evaluation using hierarchical embeddings
+
+        Args:
+            n_shots: Number of windows per class for support
+            n_queries: Number of windows per class for query
             n_trials: Number of trials
-            batch_size: Processing batch size
+            layer_depth: Number of transformer layers to use (0 = just embeddings)
 
         Returns:
             Average accuracy across trials
         """
-        print(f"Running window-based few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
+        print(
+            f"Running hierarchical few-shot evaluation (n_shots={n_shots}, n_queries={n_queries}, layers={layer_depth})...")
 
-        # Extract windows from all sequences - STRICT mode (only exact size windows)
+        # Extract windows from all sequences
         class_windows = {}
 
         for class_name, sequences in self.class_data.items():
@@ -1227,28 +1310,25 @@ class EEGSimpleEvaluator:
                 # Verify all windows are the correct size
                 for window in windows:
                     window_sizes.append(window.numel())
-                    if window.numel() == 2304:  # Only keep exact-sized windows
+                    if window.numel() == self.window_size:  # Only keep exact-sized windows
                         all_windows.append(window)
                     else:
-                        print(f"Discarding window of size {window.numel()} (expected 2304)")
+                        print(f"Discarding window of size {window.numel()} (expected {self.window_size})")
 
                 torch.cuda.empty_cache()
 
             if all_windows:
                 class_windows[class_name] = all_windows
-                # Print detailed window stats
-                print(f"  - {class_name}: {len(all_windows)} complete windows (2304 tokens each)")
-                if window_sizes:
-                    print(f"    Window size stats: min={min(window_sizes)}, max={max(window_sizes)}, "
-                          f"mean={sum(window_sizes) / len(window_sizes):.1f}")
+                print(f"  - {class_name}: {len(all_windows)} complete windows ({self.window_size} tokens each)")
             else:
                 print(f"  - {class_name}: No valid windows found")
+
         # Check if we have enough data
-        if not class_windows or min([len(windows) for windows in class_windows.values()]) < 2:
+        if not class_windows or min([len(windows) for windows in class_windows.values()]) < n_shots + n_queries:
             print("Insufficient windows for few-shot evaluation")
             return 0.0
 
-        # Adjust n_shots and n_queries based on available data
+        # Adjust n_shots and n_queries if needed
         min_windows = min([len(windows) for windows in class_windows.values()])
         adjusted_n_shots = min(n_shots, min_windows // 2)
         adjusted_n_queries = min(n_queries, min_windows - adjusted_n_shots)
@@ -1257,11 +1337,6 @@ class EEGSimpleEvaluator:
             print(f"Adjusting parameters: {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
             n_shots = adjusted_n_shots
             n_queries = adjusted_n_queries
-
-        # Ensure at least 1 query
-        if n_queries < 1:
-            n_queries = 1
-            n_shots = min(n_shots, min_windows - 1)
 
         accuracies = []
 
@@ -1283,19 +1358,17 @@ class EEGSimpleEvaluator:
                 support_indices = indices[:n_shots]
                 query_indices = indices[n_shots:n_shots + n_queries]
 
-                # Get embeddings for support set
+                # Get embeddings for support set using hierarchical embedding
                 for idx in support_indices:
                     window = windows[idx]
-                    # Process window directly (no need to extract windows again)
-                    emb = self._extract_embeddings_from_tokens(window)
+                    emb = self._extract_hierarchical_embeddings(window, layer_depth)
                     support_embeddings.append(emb)
                     support_labels.append(class_idx)
 
-                # Get embeddings for query set
+                # Get embeddings for query set using hierarchical embedding
                 for idx in query_indices:
                     window = windows[idx]
-                    # Process window directly
-                    emb = self._extract_embeddings_from_tokens(window)
+                    emb = self._extract_hierarchical_embeddings(window, layer_depth)
                     query_embeddings.append(emb)
                     query_labels.append(class_idx)
 
@@ -1311,39 +1384,34 @@ class EEGSimpleEvaluator:
             support_tensor = torch.stack(support_embeddings)
             support_labels_tensor = torch.tensor(support_labels)
 
-            # Process queries in batches
+            # Process queries
             correct = 0
             total = len(query_embeddings)
 
-            for i in range(0, len(query_embeddings), batch_size):
-                batch_end = min(i + batch_size, len(query_embeddings))
-                batch_queries = query_embeddings[i:batch_end]
-                batch_labels = query_labels[i:batch_end]
+            for i, query_emb in enumerate(query_embeddings):
+                # Move to device for computation
+                query_emb_gpu = query_emb.to(self.device)
+                support_tensor_gpu = support_tensor.to(self.device)
 
-                for j, query_emb in enumerate(batch_queries):
-                    # Move to device for computation
-                    query_emb_gpu = query_emb.to(self.device)
-                    support_tensor_gpu = support_tensor.to(self.device)
+                # Calculate distances
+                distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
 
-                    # Calculate distances
-                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
+                # Find k nearest neighbors
+                k = min(n_shots, len(support_labels))
+                _, indices = torch.topk(distances, k=k, largest=False)
 
-                    # Find k nearest neighbors
-                    k = min(n_shots, len(support_labels))
-                    _, indices = torch.topk(distances, k=k, largest=False)
+                # Get majority vote
+                indices_cpu = indices.cpu()
+                nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+                votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+                predicted_label = torch.argmax(votes).item()
 
-                    # Get majority vote
-                    indices_cpu = indices.cpu()
-                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
-                    votes = torch.bincount(nearest_labels, minlength=len(class_windows))
-                    predicted_label = torch.argmax(votes).item()
+                if predicted_label == query_labels[i]:
+                    correct += 1
 
-                    if predicted_label == batch_labels[j]:
-                        correct += 1
-
-                    # Clean up memory
-                    del query_emb_gpu, support_tensor_gpu, distances, indices
-                    torch.cuda.empty_cache()
+                # Clean up memory
+                del query_emb_gpu, support_tensor_gpu, distances, indices
+                torch.cuda.empty_cache()
 
             # Calculate accuracy
             accuracy = correct / total if total > 0 else 0
@@ -1358,7 +1426,7 @@ class EEGSimpleEvaluator:
 
         # Calculate average accuracy
         avg_accuracy = np.mean(accuracies) if accuracies else 0.0
-        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
+        print(f"Few-shot ({n_shots}-shot, {layer_depth} layers) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
 
