@@ -194,6 +194,7 @@ class EEGSimpleEvaluator:
             max_windows=self.max_windows,
             pad_token_id=self.pad_token_id
         ).to(self.device)
+        print("Pre-loaded weights:", self.model.token_embedding.weight[0, :10])
 
         # Load state dict (removing 'module.' prefix if it exists from DDP training)
         state_dict = checkpoint['model_state_dict']
@@ -203,6 +204,7 @@ class EEGSimpleEvaluator:
                 name = k[7:] if k.startswith('module.') else k
                 new_state_dict[name] = v
             state_dict = new_state_dict
+
 
         # Check if keys in state dict match model's state dict
         model_keys = set(self.model.state_dict().keys())
@@ -218,6 +220,8 @@ class EEGSimpleEvaluator:
             state_dict = filtered_state_dict
 
         self.model.load_state_dict(state_dict, strict=False)
+        print("Loaded weights:", self.model.token_embedding.weight[0, :10])
+
         self.model.eval()
 
         # Extract the token embedding layer
@@ -1463,7 +1467,8 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
                 max_windows=evaluator.max_windows,
                 pad_token_id=evaluator.pad_token_id
             ).to("cpu")
-
+            print("Trained model:", get_embedding_stats(evaluator.model))
+            print("Random model:", get_embedding_stats(random_model))
             # Explicitly initialize with random weights
             def init_weights(m):
                 if isinstance(m, (nn.Linear, nn.Embedding)):
@@ -1660,6 +1665,18 @@ def get_memory_usage():
     else:
         return {"allocated_gb": 0, "reserved_gb": 0, "max_allocated_gb": 0, "total_gb": 0}
 
+# Add code to collect embedding statistics
+def get_embedding_stats(model):
+    with torch.no_grad():
+        weights = model.token_embedding.weight.detach().cpu().numpy()
+        return {
+            "mean": np.mean(weights),
+            "std": np.std(weights),
+            "min": np.min(weights),
+            "max": np.max(weights)
+        }
+
+
 
 def check_memory(label=""):
     """Print memory usage with optional label"""
@@ -1724,6 +1741,7 @@ def main():
         n_trials=20,  # You can adjust the number of trials
         include_random_model=not args.skip_random_model  # Notice the "not" here
     )
+
     print("Evaluation complete!")
 
     # if len(results) > 0:
