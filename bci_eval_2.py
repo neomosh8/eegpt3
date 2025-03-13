@@ -24,7 +24,7 @@ class EEGSimpleEvaluator:
     instead of running the full model forward pass.
     """
 
-    def __init__(self, checkpoint_dir, data_dir, device="cuda", pad_token_id=30,
+    def __init__(self, checkpoint_dir, data_dir, device="cuda", pad_token_id=129,
                  eos_token_id=128, codebook_size=130, window_size=2304,
                  d_model=360, n_heads=6, n_layers=4, max_windows=4):
         """
@@ -175,41 +175,15 @@ class EEGSimpleEvaluator:
             print(f"  - {class_name}: {len(sequences)} sequences")
 
     def _initialize_model(self, checkpoint_path):
-        """Initialize the model using the specified checkpoint, adapting to the checkpoint's structure"""
+        """Initialize the model using the specified checkpoint"""
         from HTETP import HierarchicalEEGTransformer  # Import from your file
 
         print(f"Initializing model from {checkpoint_path}...")
 
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
 
-        # Extract state dict
-        state_dict = checkpoint['model_state_dict']
-
-        # Remove 'module.' prefix if it exists from DDP training
-        if list(state_dict.keys())[0].startswith('module.'):
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k[7:] if k.startswith('module.') else k
-                new_state_dict[name] = v
-            state_dict = new_state_dict
-
-        # Detect the number of layers in the checkpoint
-        layer_pattern = re.compile(r'layers\.(\d+)\..*')
-        layers = set()
-
-        for key in state_dict.keys():
-            match = layer_pattern.match(key)
-            if match:
-                layers.add(int(match.group(1)))
-
-        if layers:
-            actual_n_layers = max(layers) + 1  # +1 because layers are 0-indexed
-            if actual_n_layers != self.n_layers:
-                print(f"Adjusting model configuration: detected {actual_n_layers} layers in checkpoint")
-                self.n_layers = actual_n_layers
-
-        # Create model with the detected number of layers
+        # Create model
         self.model = HierarchicalEEGTransformer(
             codebook_size=self.codebook_size,
             window_size=self.window_size,
@@ -220,75 +194,21 @@ class EEGSimpleEvaluator:
             pad_token_id=self.pad_token_id
         ).to(self.device)
 
-        # Load the state dict
-        try:
-            self.model.load_state_dict(state_dict)
-            print("Model successfully loaded")
-        except Exception as e:
-            print(f"Error loading model: {str(e)}")
-            print("Attempting to load with strict=False...")
-            self.model.load_state_dict(state_dict, strict=False)
-            print("Model loaded with strict=False")
+        # Load state dict (removing 'module.' prefix if it exists from DDP training)
+        state_dict = checkpoint['model_state_dict']
+        if list(state_dict.keys())[0].startswith('module.'):
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k[7:] if k.startswith('module.') else k
+                new_state_dict[name] = v
+            state_dict = new_state_dict
 
+        self.model.load_state_dict(state_dict)
         self.model.eval()
 
         # Extract the token embedding layer
         self.token_embedding = self.model.token_embedding
 
-    def _extract_embeddings_from_tokens_batch(self, tokens_batch, batch_size=16):
-        """
-        Extract embeddings for a batch of token sequences
-
-        Args:
-            tokens_batch: List of token sequences
-            batch_size: Size of mini-batches to process
-
-        Returns:
-            List of mean token embedding vectors
-        """
-        result_embeddings = []
-
-        # Process in mini-batches
-        for i in range(0, len(tokens_batch), batch_size):
-            batch = tokens_batch[i:i + batch_size]
-            batch_embeddings = []
-
-            # Process each sequence in the batch
-            for tokens in batch:
-                # Move tokens to the correct device
-                tokens = tokens.to(self.device)
-
-                # Remove padding and EOS tokens for embedding extraction
-                mask = (tokens != self.pad_token_id) & (tokens != self.eos_token_id)
-                filtered_tokens = tokens[mask]
-
-                # Handle empty sequences
-                if filtered_tokens.numel() == 0:
-                    batch_embeddings.append(torch.zeros(self.d_model, device=self.device))
-                    continue
-
-                # Clamp token IDs to valid range
-                filtered_tokens = torch.clamp(filtered_tokens, max=self.codebook_size - 1)
-                batch_embeddings.append(filtered_tokens)
-
-            # Create padded batch for processing
-            valid_embeddings = []
-            for tokens in batch_embeddings:
-                if isinstance(tokens, torch.Tensor) and tokens.dim() > 0:
-                    # Get embeddings using the embedding layer directly
-                    with torch.no_grad():
-                        embeddings = self.token_embedding(tokens)
-                    # Average embeddings across sequence length
-                    mean_embedding = embeddings.mean(dim=0)
-                    valid_embeddings.append(mean_embedding)
-                else:
-                    # For pre-computed embeddings or zeros
-                    valid_embeddings.append(tokens)
-
-            # Add processed embeddings to results
-            result_embeddings.extend(valid_embeddings)
-
-        return result_embeddings
     def _extract_embeddings_from_tokens(self, tokens):
         """
         Extract embeddings directly from token IDs using the embedding layer
@@ -608,118 +528,6 @@ class EEGSimpleEvaluator:
         print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
-    def evaluate_few_shot_batch(self, n_shots=1, n_queries=1, n_trials=10, batch_size=16):
-        """
-        Evaluate few-shot learning performance using batched processing
-
-        Args:
-            n_shots: Number of examples per class for support set
-            n_queries: Number of examples per class for query set
-            n_trials: Number of random trials to average over
-            batch_size: Size of batches for processing
-
-        Returns:
-            Average accuracy across trials
-        """
-        print(f"Running batched few-shot evaluation (n_shots={n_shots}, n_queries={n_queries})...")
-
-        # Check if we have enough data and adjust parameters if needed
-        class_names = list(self.class_data.keys())
-        min_examples = min([len(self.class_data[cls]) for cls in class_names])
-
-        # Adjust parameters if needed
-        if min_examples < n_shots + n_queries:
-            adjusted_n_shots = min(n_shots, min_examples // 2)
-            adjusted_n_queries = min(n_queries, min_examples - adjusted_n_shots)
-
-            print(f"Warning: Adjusting few-shot parameters to fit dataset size.")
-            print(f"Using {adjusted_n_shots}-shot with {adjusted_n_queries} queries")
-
-            n_shots = adjusted_n_shots
-            n_queries = adjusted_n_queries
-
-        # Ensure at least 1 query example
-        if n_queries < 1:
-            n_queries = 1
-            n_shots = min(n_shots, min_examples - 1)
-
-        accuracies = []
-
-        # Run multiple trials
-        for trial in range(n_trials):
-            # Prepare support and query sets
-            support_tokens = []
-            support_labels = []
-            query_tokens = []
-            query_labels = []
-
-            for class_idx, class_name in enumerate(class_names):
-                sequences = self.class_data[class_name]
-
-                # Skip classes with insufficient examples
-                if len(sequences) < n_shots + n_queries:
-                    continue
-
-                # Randomly select support and query examples
-                indices = np.random.permutation(len(sequences))
-                support_indices = indices[:n_shots]
-                query_indices = indices[n_shots:n_shots + n_queries]
-
-                # Collect tokens for support set
-                for idx in support_indices:
-                    support_tokens.append(sequences[idx])
-                    support_labels.append(class_idx)
-
-                # Collect tokens for query set
-                for idx in query_indices:
-                    query_tokens.append(sequences[idx])
-                    query_labels.append(class_idx)
-
-            # Skip this trial if we don't have enough data
-            if not support_tokens or not query_tokens:
-                print(f"  Trial {trial + 1}/{n_trials}: Skipped (insufficient data)")
-                continue
-
-            # Extract embeddings in batches
-            support_embeddings = self._extract_embeddings_from_tokens_batch(support_tokens, batch_size)
-            query_embeddings = self._extract_embeddings_from_tokens_batch(query_tokens, batch_size)
-
-            # Stack embeddings and convert labels to tensors
-            support_embeddings = torch.stack(support_embeddings)
-            support_labels = torch.tensor(support_labels, device=self.device)
-            query_embeddings = torch.stack(query_embeddings)
-            query_labels = torch.tensor(query_labels, device=self.device)
-
-            # Perform nearest neighbor classification
-            correct = 0
-            total = len(query_labels)
-
-            for i, query_emb in enumerate(query_embeddings):
-                # Calculate distance to all support examples
-                distances = torch.norm(support_embeddings - query_emb.unsqueeze(0), dim=1)
-
-                # Find k nearest neighbors (up to n_shots)
-                k = min(n_shots, len(support_labels))
-                _, indices = torch.topk(distances, k=k, largest=False)
-                nearest_labels = support_labels[indices]
-
-                # Majority vote
-                votes = torch.bincount(nearest_labels, minlength=len(class_names))
-                predicted_label = torch.argmax(votes)
-
-                if predicted_label == query_labels[i]:
-                    correct += 1
-
-            # Calculate accuracy
-            accuracy = correct / total if total > 0 else 0
-            accuracies.append(accuracy)
-
-            print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
-
-        # Calculate average accuracy
-        avg_accuracy = np.mean(accuracies) if accuracies else 0.0
-        print(f"Few-shot ({n_shots}-shot) average accuracy: {avg_accuracy:.4f}")
-        return avg_accuracy
     def evaluate_classifier(self, train_ratio=0.7, classifier_type="logistic"):
         """
         Evaluate using token embeddings as features for a classifier
