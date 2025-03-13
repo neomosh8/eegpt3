@@ -1366,11 +1366,11 @@ import os
 def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_shots=1, n_trials=20,
                                include_random_model=True):
     """
-    Creates a bar plot with error bars for evaluation metrics with memory-safe processing.
+    Creates a bar plot comparing trained model, random weights model, and baseline
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get baseline for reference (don't use model for this)
+    # Get baseline for reference
     baseline_results = evaluator.evaluate_baseline()
 
     results = {
@@ -1387,8 +1387,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
     print(f"Using latest checkpoint: {latest_checkpoint}")
 
     try:
-        # Process with smaller batch sizes and more memory checks
-        # Load the checkpoint with map_location="cpu" to avoid GPU memory spike
+        # Load checkpoint on CPU
         checkpoint = torch.load(latest_checkpoint, map_location="cpu")
         state_dict = checkpoint['model_state_dict']
 
@@ -1399,31 +1398,25 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
                 new_state_dict[name] = v
             state_dict = new_state_dict
 
-        # Manually move model to CPU before loading weights
+        # Load model on CPU first
         evaluator.model = evaluator.model.cpu()
         evaluator.model.load_state_dict(state_dict)
 
-        # Now move back to device (if possible)
+        # Try to move to device
         try:
             evaluator.model = evaluator.model.to(evaluator.device)
         except RuntimeError as e:
-            print(f"Warning: Could not move model to {evaluator.device}: {str(e)}")
-            print("Falling back to CPU evaluation")
+            print(f"Could not move model to {evaluator.device}: {str(e)}")
+            print("Falling back to CPU")
             evaluator.device = "cpu"
 
         evaluator.model.eval()
         evaluator.token_embedding = evaluator.model.token_embedding
 
-        # Set a reduced number of trials if memory is an issue
-        if evaluator.device == "cuda":
-            reduced_trials = min(n_trials, 5)  # Start with just a few trials
-            if reduced_trials < n_trials:
-                print(f"Using reduced number of trials ({reduced_trials}) to save memory")
-        else:
-            reduced_trials = n_trials
+        # Use reduced trials to save memory
+        reduced_trials = min(n_trials, 5 if evaluator.device == "cuda" else n_trials)
+        print(f"Running window-based few-shot evaluation with {reduced_trials} trials...")
 
-        # Run trials for trained model evaluations
-        print(f"Running sequence-level few-shot evaluation ({n_shots}-shot, {reduced_trials} trials)...")
         for trial in range(reduced_trials):
             print(f"  Trial {trial + 1}/{reduced_trials}")
             try:
@@ -1432,65 +1425,109 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
                 acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
                 if acc is not None:
                     results['trained']['seq'].append(acc)
+                    results['trained']['win'].append(acc)  # Same implementation for both now
 
-                # Early success check - if we have at least 3 successful trials and seeing OOM,
-                # we can stop early and use what we have
-                if len(results['trained']['seq']) >= 3 and evaluator.device == "cuda":
-                    # Check available memory
-                    if torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() > 0.7:
-                        print("Memory usage high, stopping early with current results")
-                        break
+                # Check memory after trial
+                if evaluator.device == "cuda" and torch.cuda.memory_allocated() / torch.cuda.get_device_properties(
+                        0).total_memory > 0.8:
+                    print("Memory usage high, stopping early")
+                    break
             except RuntimeError as e:
                 print(f"Error in trial {trial + 1}: {str(e)}")
                 if "CUDA out of memory" in str(e):
-                    print("CUDA OOM detected, moving to CPU for remaining trials")
-                    evaluator.model = evaluator.model.cpu()
-                    evaluator.device = "cpu"
-                    evaluator.token_embedding = evaluator.model.token_embedding
-                    torch.cuda.empty_cache()
-
-        # Window-level evaluation
-        if evaluator.device == "cuda":
-            reduced_trials = min(n_trials, 5)
-        else:
-            reduced_trials = n_trials
-
-        print(f"Running window-level few-shot evaluation ({n_shots}-shot, {reduced_trials} trials)...")
-        for trial in range(reduced_trials):
-            print(f"  Trial {trial + 1}/{reduced_trials}")
-            try:
-                # Clear cache before each trial
-                torch.cuda.empty_cache()
-                acc = evaluator._run_single_window_few_shot_trial(n_shots=n_shots, n_queries=1)
-                if acc is not None:
-                    results['trained']['win'].append(acc)
-
-                # Early success check
-                if len(results['trained']['win']) >= 3 and evaluator.device == "cuda":
-                    # Check available memory
-                    if torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() > 0.7:
-                        print("Memory usage high, stopping early with current results")
-                        break
-            except RuntimeError as e:
-                print(f"Error in trial {trial + 1}: {str(e)}")
-                if "CUDA out of memory" in str(e):
-                    print("CUDA OOM detected, moving to CPU for remaining trials")
+                    print("CUDA OOM detected, moving to CPU")
                     evaluator.model = evaluator.model.cpu()
                     evaluator.device = "cpu"
                     evaluator.token_embedding = evaluator.model.token_embedding
                     torch.cuda.empty_cache()
 
     except Exception as e:
-        print(f"Error evaluating trained model: {str(e)}")
+        print(f"Error: {str(e)}")
         traceback.print_exc()
 
-    # Skip random model evaluation if we had memory issues with the trained model
-    if include_random_model and evaluator.device == "cuda":
-        # Rest of the random model evaluation code...
-        # This is omitted to focus on the main issue for now
-        pass
+    # Now evaluate with random model (if requested)
+    if include_random_model:
+        print("\nEvaluating randomly initialized model (no pretraining)...")
 
-    # Create plots using results we have, even if incomplete
+        try:
+            # Import the model class (already imported in the script)
+            from HTETP import HierarchicalEEGTransformer
+
+            # Create a new model with the same architecture on CPU first
+            random_model = HierarchicalEEGTransformer(
+                codebook_size=evaluator.codebook_size,
+                window_size=evaluator.window_size,
+                d_model=evaluator.d_model,
+                n_heads=evaluator.n_heads,
+                n_layers=evaluator.n_layers,
+                max_windows=evaluator.max_windows,
+                pad_token_id=evaluator.pad_token_id
+            ).to("cpu")
+
+            # Explicitly initialize with random weights
+            def init_weights(m):
+                if isinstance(m, (nn.Linear, nn.Embedding)):
+                    nn.init.xavier_uniform_(m.weight)
+                    if hasattr(m, 'bias') and m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+            random_model.apply(init_weights)
+
+            # Save original model
+            original_model = evaluator.model
+            original_device = evaluator.device
+
+            # Try to move random model to device
+            try:
+                random_model = random_model.to(evaluator.device)
+            except RuntimeError:
+                print("Could not move random model to GPU, using CPU")
+                evaluator.device = "cpu"
+
+            # Use the random model temporarily
+            evaluator.model = random_model
+            evaluator.token_embedding = random_model.token_embedding
+            evaluator.model.eval()
+
+            # Run fewer trials for random model to save time
+            random_trials = min(reduced_trials, 3)
+            print(f"Running window-based few-shot evaluation with random model ({random_trials} trials)...")
+
+            for trial in range(random_trials):
+                print(f"  Trial {trial + 1}/{random_trials}")
+                try:
+                    torch.cuda.empty_cache()
+                    acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+                    if acc is not None:
+                        results['random']['seq'].append(acc)
+                        results['random']['win'].append(acc)  # Same implementation
+
+                    # Check memory after trial
+                    if evaluator.device == "cuda" and torch.cuda.memory_allocated() / torch.cuda.get_device_properties(
+                            0).total_memory > 0.8:
+                        print("Memory usage high, stopping early")
+                        break
+                except RuntimeError as e:
+                    print(f"Error in random model trial {trial + 1}: {str(e)}")
+                    # Fall back to CPU if OOM
+                    if "CUDA out of memory" in str(e):
+                        print("Moving random model to CPU")
+                        evaluator.model = evaluator.model.cpu()
+                        evaluator.device = "cpu"
+                        evaluator.token_embedding = evaluator.model.token_embedding
+                        torch.cuda.empty_cache()
+
+            # Restore original model and device
+            evaluator.model = original_model
+            evaluator.device = original_device
+            evaluator.token_embedding = original_model.token_embedding
+
+        except Exception as e:
+            print(f"Error evaluating random model: {str(e)}")
+            traceback.print_exc()
+
+    # Create plot with the data we have
+    metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
 
     # Calculate stats for trained model
     trained_means = [
@@ -1503,19 +1540,20 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         np.std(results['trained']['win']) if results['trained']['win'] else 0
     ]
 
-    # Create plot output even with partial results
-    metrics = ["Sequence-Level Few-Shot", "Window-Level Few-Shot"]
-
-    # Create figure
     plt.figure(figsize=(12, 7))
     x_pos = np.arange(len(metrics))
     width = 0.25 if include_random_model else 0.35
 
     fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Position of bars
-    trained_pos = x_pos - width if include_random_model else x_pos
-    baseline_pos = x_pos + width if include_random_model else x_pos + width
+    # Position bars
+    if include_random_model:
+        trained_pos = x_pos - width
+        random_pos = x_pos
+        baseline_pos = x_pos + width
+    else:
+        trained_pos = x_pos
+        baseline_pos = x_pos + width
 
     # Plot trained model bars
     trained_bars = ax.bar(
@@ -1530,7 +1568,37 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         label='Trained Model'
     )
 
-    # Plot baseline bars (true random chance)
+    # Plot random model bars if available
+    if include_random_model and results['random']['seq']:
+        random_means = [
+            np.mean(results['random']['seq']) if results['random']['seq'] else 0,
+            np.mean(results['random']['win']) if results['random']['win'] else 0
+        ]
+
+        random_errors = [
+            np.std(results['random']['seq']) if results['random']['seq'] else 0,
+            np.std(results['random']['win']) if results['random']['win'] else 0
+        ]
+
+        random_bars = ax.bar(
+            random_pos,
+            random_means,
+            width,
+            yerr=random_errors,
+            capsize=10,
+            alpha=0.8,
+            ecolor='black',
+            color='orange',
+            label='Random Initialization'
+        )
+
+        # Add values above random model bars
+        for i, (mean, error) in enumerate(zip(random_means, random_errors)):
+            if mean > 0:
+                ax.text(random_pos[i], mean + error + 0.01, f"{mean:.3f}",
+                        ha='center', va='bottom', fontsize=9)
+
+    # Plot baseline bars
     baseline_bars = ax.bar(
         baseline_pos,
         [results['baseline']['seq'], results['baseline']['win']],
@@ -1546,31 +1614,32 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             ax.text(trained_pos[i], mean + error + 0.01, f"{mean:.3f}",
                     ha='center', va='bottom', fontsize=9)
 
-    # Add labels and legend
     ax.set_xlabel('Evaluation Method', fontsize=12)
     ax.set_ylabel('Accuracy', fontsize=12)
-    title = f'Model Performance Comparison ({n_shots}-shot, {len(results["trained"]["seq"])} trials)'
+    title = f'Model Performance Comparison ({n_shots}-shot, Window-Based)'
     ax.set_title(title, fontsize=14)
     ax.set_xticks(x_pos)
     ax.set_xticklabels(metrics)
     ax.legend(loc='best')
 
-    # Set y-axis limits
-    max_y = max([m + e for m, e in zip(trained_means, trained_errors) if m > 0] or [0.4])
+    # Calculate ylim based on all data
+    all_means = trained_means
+    all_errors = trained_errors
+    if include_random_model and results['random']['seq']:
+        all_means = all_means + random_means
+        all_errors = all_errors + random_errors
+
+    max_y = max([m + e for m, e in zip(all_means, all_errors) if m > 0] or [0.4])
     ax.set_ylim(0, min(1.0, max_y + 0.1))
 
-    # Add grid
     ax.yaxis.grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
-
-    # Output filename
-    file_name = f'performance_comparison_{n_shots}shot.png'
+    file_name = f'complete_performance_{n_shots}shot.png'
     plt.savefig(os.path.join(output_dir, file_name), dpi=300)
     plt.close()
 
     print(f"Plot saved to {os.path.join(output_dir, file_name)}")
-
     return results
 
 
