@@ -540,19 +540,18 @@ class EEGTransformerEvaluationDataLoader:
         # Convert to tensors and add pad tokens for the model's expected format
         support_windows_with_pad = []
         for window in support_windows:
+            # Create pad token tensor on the same device as window
+            pad_token_tensor = torch.tensor([self.pad_token_id], device=window.device)
             # Add a single pad token after the window (as expected by the model)
-            window_with_pad = torch.cat([
-                window,
-                torch.tensor([self.pad_token_id])
-            ])
+            window_with_pad = torch.cat([window, pad_token_tensor])
             support_windows_with_pad.append(window_with_pad.unsqueeze(0))  # Add batch dimension
 
         query_windows_with_pad = []
         for window in query_windows:
-            window_with_pad = torch.cat([
-                window,
-                torch.tensor([self.pad_token_id])
-            ])
+            # Create pad token tensor on the same device as window
+            pad_token_tensor = torch.tensor([self.pad_token_id], device=window.device)
+            # Add a single pad token after the window
+            window_with_pad = torch.cat([window, pad_token_tensor])
             query_windows_with_pad.append(window_with_pad.unsqueeze(0))
 
         return {
@@ -916,17 +915,21 @@ class EEGSimpleEvaluator:
             # Format windows for model
             support_windows_with_pad = []
             for window in support_windows:
+                # Create pad token tensor on the same device as window
+                pad_token_tensor = torch.tensor([self.pad_token_id], device=window.device)
                 window_with_pad = torch.cat([
                     window,
-                    torch.tensor([self.pad_token_id])
+                    pad_token_tensor
                 ])
                 support_windows_with_pad.append(window_with_pad.unsqueeze(0))
 
             query_windows_with_pad = []
             for window in query_windows:
+                # Create pad token tensor on the same device as window
+                pad_token_tensor = torch.tensor([self.pad_token_id], device=window.device)
                 window_with_pad = torch.cat([
                     window,
-                    torch.tensor([self.pad_token_id])
+                    pad_token_tensor
                 ])
                 query_windows_with_pad.append(window_with_pad.unsqueeze(0))
 
@@ -1044,13 +1047,13 @@ def create_tsne_visualization(evaluator, classes=None, samples_per_class=20, per
         class_indices.extend([i] * len(class_windows))
 
     # Extract embeddings
+    # Extract embeddings
     embeddings = []
     for window in tqdm(windows, desc="Extracting embeddings"):
+        # Create pad token tensor on the same device as window
+        pad_token_tensor = torch.tensor([evaluator.pad_token_id], device=window.device)
         # Add pad token and batch dimension
-        window_with_pad = torch.cat([
-            window,
-            torch.tensor([evaluator.pad_token_id])
-        ]).unsqueeze(0)
+        window_with_pad = torch.cat([window, pad_token_tensor]).unsqueeze(0)
 
         # Get representation
         with torch.no_grad():
