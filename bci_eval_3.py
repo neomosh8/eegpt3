@@ -1179,7 +1179,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EEG Transformer Few-Shot Evaluation")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
                         help="Directory containing model checkpoints")
-    parser.add_argument("--data_dir", type=str, default="tokenized_data",
+    parser.add_argument("--data_dir", type=str, default="tokenized_bci_data",
                         help="Directory containing tokenized EEG data")
     parser.add_argument("--output_dir", type=str, default="evaluation_results",
                         help="Directory to save evaluation results")
