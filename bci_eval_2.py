@@ -176,12 +176,13 @@ class EEGSimpleEvaluator:
 
     def _initialize_model(self, checkpoint_path):
         """Initialize the model using the specified checkpoint"""
-        from HTETP import HierarchicalEEGTransformer  # Import from your file
+        from HTETP import \
+            HierarchicalEEGTransformer  # Also ensure TransformerLayer and HierarchicalMemoryEfficientAttention are accessible
 
         print(f"Initializing model from {checkpoint_path}...")
 
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         # Create model
         self.model = HierarchicalEEGTransformer(
@@ -203,7 +204,21 @@ class EEGSimpleEvaluator:
                 new_state_dict[name] = v
             state_dict = new_state_dict
 
-        self.model.load_state_dict(state_dict)
+        # Check if keys in state dict match model's state dict
+        model_keys = set(self.model.state_dict().keys())
+        checkpoint_keys = set(state_dict.keys())
+
+        # Handle potential mismatch due to structure changes
+        if model_keys != checkpoint_keys:
+            print("Warning: Structure mismatch between checkpoint and model.")
+            print(f"Missing: {model_keys - checkpoint_keys}")
+            print(f"Unexpected: {checkpoint_keys - model_keys}")
+
+            # Create a filtered state dict with only matching keys
+            filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_keys}
+            state_dict = filtered_state_dict
+
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.eval()
 
         # Extract the token embedding layer
@@ -961,6 +976,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         from HTETP import HierarchicalEEGTransformer
 
         # Create a new model with the same architecture
+        # In create_evaluation_bar_plot function
         random_model = HierarchicalEEGTransformer(
             codebook_size=evaluator.codebook_size,
             window_size=evaluator.window_size,
