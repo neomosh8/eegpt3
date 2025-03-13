@@ -984,7 +984,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             n_layers=evaluator.n_layers,
             max_windows=evaluator.max_windows,
             pad_token_id=evaluator.pad_token_id
-        ).to(evaluator.device)
+        ).to('cpu')
 
         # Explicitly reinitialize all weights randomly
         def init_weights(m):
