@@ -485,14 +485,14 @@ class EEGSimpleEvaluator:
                 # Get embeddings for support set
                 for idx in support_indices:
                     seq = sequences[idx]
-                    emb = self._extract_embeddings_from_tokens(seq)
+                    emb = self._extract_embeddings_from_tokens(seq).cpu()
                     support_embeddings.append(emb)
                     support_labels.append(class_idx)
 
                 # Get embeddings for query set
                 for idx in query_indices:
                     seq = sequences[idx]
-                    emb = self._extract_embeddings_from_tokens(seq)
+                    emb = self._extract_embeddings_from_tokens(seq).cpu()
                     query_embeddings.append(emb)
                     query_labels.append(class_idx)
 
@@ -564,7 +564,7 @@ class EEGSimpleEvaluator:
 
             for seq in tqdm(sequences, desc=f"Processing {class_name}", leave=False):
                 # Get embedding
-                emb = self._extract_embeddings_from_tokens(seq)
+                emb = self._extract_embeddings_from_tokens(seq).cpu()
                 X.append(emb.cpu().numpy())
                 y.append(class_idx)
 
@@ -784,14 +784,14 @@ class EEGSimpleEvaluator:
             # Get embeddings for support set
             for idx in support_indices:
                 seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq)
+                emb = self._extract_embeddings_from_tokens(seq).cpu()
                 support_embeddings.append(emb)
                 support_labels.append(class_idx)
 
             # Get embeddings for query set
             for idx in query_indices:
                 seq = sequences[idx]
-                emb = self._extract_embeddings_from_tokens(seq)
+                emb = self._extract_embeddings_from_tokens(seq).cpu()
                 query_embeddings.append(emb)
                 query_labels.append(class_idx)
 
