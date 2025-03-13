@@ -1280,7 +1280,7 @@ class EEGSimpleEvaluator:
                 print(f"Error processing window: {str(e)}")
                 return torch.zeros(self.model.d_model, device="cpu")
 
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=6):
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=10):
         """
         Few-shot evaluation using hierarchical embeddings
 
