@@ -88,7 +88,7 @@ class EEGSimpleEvaluator:
         # 1. Few-shot baseline: Random guessing based on class distribution
         # For few-shot learning, we'll simulate random guessing with proper class probabilities
         n_trials = 200
-        np.random.seed(88)  # For reproducibility
+        # np.random.seed(88)  # For reproducibility
 
         few_shot_accs = []
         for _ in range(n_trials):
