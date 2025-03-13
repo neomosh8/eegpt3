@@ -1280,7 +1280,7 @@ class EEGSimpleEvaluator:
                 print(f"Error processing window: {str(e)}")
                 return torch.zeros(self.model.d_model, device="cpu")
 
-    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=1):
+    def evaluate_few_shot(self, n_shots=1, n_queries=1, n_trials=10, layer_depth=2):
         """
         Few-shot evaluation using hierarchical embeddings
 
@@ -1429,6 +1429,289 @@ class EEGSimpleEvaluator:
         print(f"Few-shot ({n_shots}-shot, {layer_depth} layers) average accuracy: {avg_accuracy:.4f}")
         return avg_accuracy
 
+    def evaluate_with_random_model(self, n_shots=1, n_queries=1, n_trials=5, layer_depth=2):
+        """
+        Perform evaluation with a randomly initialized model using matching embedding extraction
+
+        Args:
+            n_shots: Number of shots per class
+            n_queries: Number of queries per class
+            n_trials: Number of evaluation trials
+            layer_depth: Transformer layers to use (same as trained model)
+
+        Returns:
+            Average accuracy of random model
+        """
+        print("\nEvaluating with randomly initialized model...")
+
+        # Import the model class (already available)
+        from HTETP import HierarchicalEEGTransformer
+
+        # Create a new model with the same architecture
+        random_model = HierarchicalEEGTransformer(
+            codebook_size=self.codebook_size,
+            window_size=self.window_size,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_layers=self.n_layers,
+            max_windows=self.max_windows,
+            pad_token_id=self.pad_token_id
+        ).to("cpu")
+
+        # Explicitly initialize with truly random weights
+        def init_weights(m):
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                # Use normal distribution instead of Xavier for more randomness
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        random_model.apply(init_weights)
+
+        # Save original model
+        original_model = self.model
+
+        # Use the random model
+        self.model = random_model
+
+        try:
+            # Move to evaluation device
+            self.model = self.model.to(self.device)
+            self.model.eval()
+
+            # Extract windows from all sequences (if not already done)
+            class_windows = {}
+            for class_name, sequences in self.class_data.items():
+                all_windows = []
+                for seq in sequences:
+                    windows = self.extract_windows_from_sequence(seq)
+                    all_windows.extend([w for w in windows if w.numel() == self.window_size])
+
+                if all_windows:
+                    class_windows[class_name] = all_windows
+                    print(f"  - {class_name}: {len(all_windows)} windows")
+
+                torch.cuda.empty_cache()
+
+            # Check if we have enough data
+            if not class_windows or min([len(windows) for windows in class_windows.values()]) < n_shots + n_queries:
+                print("Insufficient windows for evaluation")
+                return 0.0
+
+            # Run trials with random model
+            accuracies = []
+
+            for trial in range(n_trials):
+                print(f"  Trial {trial + 1}/{n_trials}")
+
+                # Prepare support and query sets
+                support_embeddings = []
+                support_labels = []
+                query_embeddings = []
+                query_labels = []
+
+                for class_idx, class_name in enumerate(class_windows.keys()):
+                    windows = class_windows[class_name]
+
+                    # Randomly select support and query windows
+                    indices = np.random.permutation(len(windows))
+                    support_indices = indices[:n_shots]
+                    query_indices = indices[n_shots:n_shots + n_queries]
+
+                    # Get embeddings using HIERARCHICAL embedding extraction
+                    for idx in support_indices:
+                        window = windows[idx]
+                        # Use the same hierarchical embedding function
+                        emb = self._extract_hierarchical_embeddings(window, layer_depth)
+                        support_embeddings.append(emb)
+                        support_labels.append(class_idx)
+
+                    for idx in query_indices:
+                        window = windows[idx]
+                        # Use the same hierarchical embedding function
+                        emb = self._extract_hierarchical_embeddings(window, layer_depth)
+                        query_embeddings.append(emb)
+                        query_labels.append(class_idx)
+
+                    torch.cuda.empty_cache()
+
+                # Skip if insufficient data
+                if not support_embeddings or not query_embeddings:
+                    continue
+
+                # Stack embeddings
+                support_tensor = torch.stack(support_embeddings)
+                support_labels_tensor = torch.tensor(support_labels)
+
+                # Process queries
+                correct = 0
+                total = len(query_embeddings)
+
+                for i, query_emb in enumerate(query_embeddings):
+                    query_emb_gpu = query_emb.to(self.device)
+                    support_tensor_gpu = support_tensor.to(self.device)
+
+                    # Calculate distances
+                    distances = torch.norm(support_tensor_gpu - query_emb_gpu.unsqueeze(0), dim=1)
+
+                    # Find nearest neighbors
+                    k = min(n_shots, len(support_labels))
+                    _, indices = torch.topk(distances, k=k, largest=False)
+
+                    # Get majority vote
+                    indices_cpu = indices.cpu()
+                    nearest_labels = torch.tensor([support_labels[idx] for idx in indices_cpu])
+                    votes = torch.bincount(nearest_labels, minlength=len(class_windows))
+                    predicted_label = torch.argmax(votes).item()
+
+                    if predicted_label == query_labels[i]:
+                        correct += 1
+
+                    del query_emb_gpu, support_tensor_gpu, distances, indices
+                    torch.cuda.empty_cache()
+
+                # Calculate accuracy
+                accuracy = correct / total if total > 0 else 0
+                accuracies.append(accuracy)
+
+                print(f"  Trial {trial + 1}/{n_trials}: Accuracy = {accuracy:.4f} ({correct}/{total})")
+
+                # Clean up
+                del support_embeddings, support_labels, query_embeddings, query_labels
+                del support_tensor, support_labels_tensor
+                torch.cuda.empty_cache()
+
+            # Calculate average accuracy
+            avg_accuracy = np.mean(accuracies) if accuracies else 0.0
+            print(f"Random model ({n_shots}-shot, {layer_depth} layers) average accuracy: {avg_accuracy:.4f}")
+            return avg_accuracy
+
+        finally:
+            # Always restore original model
+            self.model = original_model
+            self.model = self.model.to(self.device)
+            self.model.eval()
+
+    def compare_all_models(self, n_shots=1, n_queries=1, n_trials=5, layer_depths=[0, 2]):
+        """
+        Comprehensive comparison between trained model, random model, and random chance
+
+        Args:
+            n_shots: Number of shots for few-shot evaluation
+            n_queries: Number of queries per class
+            n_trials: Number of trials
+            layer_depths: List of layer depths to try
+
+        Returns:
+            Dictionary with results
+        """
+        os.makedirs("evaluation_results", exist_ok=True)
+
+        # Get baseline for reference
+        baseline_results = self.evaluate_baseline()
+        random_chance = baseline_results['few_shot_accuracy']
+
+        results = {
+            'random_chance': random_chance,
+            'depths': {},
+        }
+
+        # Test with different layer depths
+        for depth in layer_depths:
+            print(f"\n===== Testing with layer depth {depth} =====")
+
+            # Trained model
+            print("\nEvaluating trained model...")
+            trained_accs = []
+
+            for trial in range(n_trials):
+                print(f"  Trial {trial + 1}/{n_trials}")
+                acc = self.evaluate_few_shot(n_shots=n_shots, n_queries=n_queries,
+                                             n_trials=1, layer_depth=depth)
+                trained_accs.append(acc)
+
+            trained_avg = np.mean(trained_accs) if trained_accs else 0
+
+            # Random model (using the same hierarchical embedding approach)
+            random_avg = self.evaluate_with_random_model(n_shots=n_shots, n_queries=n_queries,
+                                                         n_trials=n_trials, layer_depth=depth)
+
+            # Store results for this depth
+            results['depths'][depth] = {
+                'trained': trained_avg,
+                'random': random_avg
+            }
+
+            # Create plot for this depth
+            self._create_comparison_plot(trained_avg, random_avg, random_chance,
+                                         n_shots, depth, f"depth_{depth}")
+
+        # Create combined plot with all depths
+        self._create_multi_depth_plot(results, n_shots)
+
+        return results
+
+    def _create_comparison_plot(self, trained_acc, random_acc, random_chance, n_shots, depth, suffix=""):
+        """Create plot comparing all three models at specific depth"""
+        plt.figure(figsize=(10, 6))
+
+        # Data
+        methods = ['Trained Model', 'Random Model', 'Random Chance']
+        accuracies = [trained_acc, random_acc, random_chance]
+        colors = ['steelblue', 'orange', 'lightgray']
+
+        # Create bars
+        plt.bar(methods, accuracies, color=colors, width=0.5)
+
+        # Add values on top of bars
+        for i, acc in enumerate(accuracies):
+            plt.text(i, acc + 0.01, f"{acc:.4f}", ha='center', fontsize=11)
+
+        plt.title(f'Model Comparison ({n_shots}-shot, {depth} transformer layers)', fontsize=14)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.ylim(0, min(1.0, max(accuracies) + 0.1))
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+        # Save plot
+        plt.tight_layout()
+        plt.savefig(f"evaluation_results/model_comparison_{n_shots}shot_{suffix}.png", dpi=300)
+        plt.close()
+
+    def _create_multi_depth_plot(self, results, n_shots):
+        """Create plot comparing performance across different layer depths"""
+        plt.figure(figsize=(12, 7))
+
+        # Extract data
+        depths = sorted(results['depths'].keys())
+        trained_accs = [results['depths'][d]['trained'] for d in depths]
+        random_accs = [results['depths'][d]['random'] for d in depths]
+
+        # Create line plot
+        plt.plot(depths, trained_accs, 'bo-', linewidth=2, label='Trained Model')
+        plt.plot(depths, random_accs, 'o-', color='orange', linewidth=2, label='Random Model')
+        plt.axhline(y=results['random_chance'], color='gray', linestyle='--',
+                    label=f'Random Chance ({results["random_chance"]:.4f})')
+
+        # Add markers
+        for i, depth in enumerate(depths):
+            plt.text(depth, trained_accs[i] + 0.02, f"{trained_accs[i]:.4f}",
+                     ha='center', fontsize=9, color='blue')
+            plt.text(depth, random_accs[i] - 0.02, f"{random_accs[i]:.4f}",
+                     ha='center', fontsize=9, color='darkorange')
+
+        plt.title(f'Model Performance vs Layer Depth ({n_shots}-shot)', fontsize=14)
+        plt.xlabel('Transformer Layer Depth', fontsize=12)
+        plt.ylabel('Few-Shot Accuracy', fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+
+        # X-axis should be integer layer depths
+        plt.xticks(depths)
+
+        # Save plot
+        plt.tight_layout()
+        plt.savefig(f"evaluation_results/depth_comparison_{n_shots}shot.png", dpi=300)
+        plt.close()
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1809,6 +2092,7 @@ def main():
         n_trials=10,  # You can adjust the number of trials
         include_random_model=not args.skip_random_model  # Notice the "not" here
     )
+    evaluator.compare_all_models(3,1,20,[0,1,2,4])
 
     print("Evaluation complete!")
 
