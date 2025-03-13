@@ -1613,7 +1613,7 @@ def main():
                         help="Directory containing tokenized data files")
     parser.add_argument("--output_dir", type=str, default="evaluation_results",
                         help="Directory to save evaluation results")
-    parser.add_argument("--n_shots", type=int, default=100,
+    parser.add_argument("--n_shots", type=int, default=2000,
                         help="Number of shots for few-shot evaluation")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run evaluation on (cuda/cpu)")
