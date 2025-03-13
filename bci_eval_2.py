@@ -1418,7 +1418,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
         evaluator.token_embedding = evaluator.model.token_embedding
 
         # Use reduced trials to save memory
-        reduced_trials = min(n_trials, 5 if evaluator.device == "cuda" else n_trials)
+        reduced_trials = n_trials
         print(f"Running window-based few-shot evaluation with {reduced_trials} trials...")
 
         for trial in range(reduced_trials):
@@ -1426,7 +1426,7 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             try:
                 # Clear cache before each trial
                 torch.cuda.empty_cache()
-                acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+                acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=5)
                 if acc is not None:
                     results['trained']['seq'].append(acc)
                     results['trained']['win'].append(acc)  # Same implementation for both now
@@ -1495,14 +1495,14 @@ def create_evaluation_bar_plot(evaluator, output_dir="evaluation_results", n_sho
             evaluator.model.eval()
 
             # Run fewer trials for random model to save time
-            random_trials = min(reduced_trials, 3)
+            random_trials = min(reduced_trials, 10)
             print(f"Running window-based few-shot evaluation with random model ({random_trials} trials)...")
 
             for trial in range(random_trials):
                 print(f"  Trial {trial + 1}/{random_trials}")
                 try:
                     torch.cuda.empty_cache()
-                    acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=1)
+                    acc = evaluator._run_single_few_shot_trial(n_shots=n_shots, n_queries=5)
                     if acc is not None:
                         results['random']['seq'].append(acc)
                         results['random']['win'].append(acc)  # Same implementation
